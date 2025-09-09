@@ -668,10 +668,10 @@ The complete AGPL-3.0 license text is available at: https://www.gnu.org/licenses
 
 ## 📞 Contact
 
-- Project Homepage: https://github.com/yourusername/gogeo
-- Issue Tracker: https://github.com/yourusername/gogeo/issues
+- Project Homepage: https://github.com/fmecool/gogeo
+- Issue Tracker: https://github.com/fmecool/gogeo/issues
 - Email: 1131698384@qq.com
-
+- qq交流群：767449805
 ## 🔗 Related Projects
 
 - [GDAL Go Bindings](https://github.com/lukeroth/gdal) - Alternative GDAL bindings for Go
