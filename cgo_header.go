@@ -263,6 +263,21 @@ func InitializeGDAL() error {
 
 	return nil // 初始化成功
 }
+func CreateEPSG4490WithCorrectAxis() (*SpatialReference, error) {
+	// 调用C函数创建空间参考系统
+	cPtr := C.createEPSG4490WithCorrectAxis()
+	if cPtr == nil {
+		return nil, errors.New("failed to create EPSG:4490 spatial reference system") // 创建失败
+	}
+
+	// 创建Go包装器对象
+	srs := &SpatialReference{cPtr: cPtr}
+
+	// 设置终结器，确保C资源被正确释放
+	runtime.SetFinalizer(srs, (*SpatialReference).destroy)
+
+	return srs, nil // 返回成功创建的对象
+}
 
 // CreateGeometryFromWKBHex 从十六进制WKB字符串创建几何对象
 // wkbHex: 十六进制格式的WKB字符串
