@@ -35,7 +35,6 @@ extern "C" {
 extern int handleProgressUpdate(double, char*, void*);
 
 
-
 OGRLayerH createMemoryLayer(const char* layerName, OGRwkbGeometryType geomType, OGRSpatialReferenceH srs);
 int check_isnan(double x);
 int check_isinf(double x);
@@ -55,6 +54,8 @@ OGRGeometryH mergeGeometryCollection(OGRGeometryH geomCollection, OGRwkbGeometry
 OGRGeometryH normalizeGeometryType(OGRGeometryH geom, OGRwkbGeometryType expectedType);
 OGRGeometryH createTileClipGeometry(double minX, double minY, double maxX, double maxY);
 OGRLayerH clipLayerToTile(OGRLayerH sourceLayer, double minX, double minY, double maxX, double maxY, const char* layerName, const char* sourceIdentifier);
+
+
 #ifdef __cplusplus
 }
 #endif

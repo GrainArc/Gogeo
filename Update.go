@@ -33,328 +33,341 @@ import "C"
 import (
 	"fmt"
 	"runtime"
-	"sync"
 	"time"
+	"sync"
+	"log"
+	"github.com/google/uuid"
 	"unsafe"
 )
 
-// 修改 addUniqueIdentifierFields 函数
-func addUniqueIdentifierFieldsByUpdate(layer1, layer2 *GDALLayer, table1Name, table2Name string) error {
-	// 为第一个图层创建带标识字段的副本
-	newLayer1, err := createLayerWithIdentifierField(layer1, table1Name+"_updateID")
-	if err != nil {
-		return fmt.Errorf("为图层 %s 创建带标识字段的副本失败: %v", table1Name, err)
-	}
-
-	// 为第二个图层创建带标识字段的副本
-	newLayer2, err := createLayerWithIdentifierField(layer2, table2Name+"_updateID")
-	if err != nil {
-		return fmt.Errorf("为图层 %s 创建带标识字段的副本失败: %v", table2Name, err)
-	}
-
-	// 替换原始图层
-	layer1.Close()
-	layer2.Close()
-	*layer1 = *newLayer1
-	*layer2 = *newLayer2
-
-	return nil
-}
-
 // SpatialUpdateAnalysisParallel 执行并行空间更新分析
-func SpatialUpdateAnalysis(inputLayer, updateLayer *GDALLayer, config *ParallelGeosConfig) (*GeosAnalysisResult, error) {
-
+func SpatialUpdateAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelGeosConfig) (*GeosAnalysisResult, error) {
 	defer inputLayer.Close()
 
-	defer updateLayer.Close()
-	inputTable := inputLayer.GetLayerName()
-	updateTable := inputLayer.GetLayerName()
+	defer methodLayer.Close()
+
 	// 为两个图层添加唯一标识字段
-	err := addUniqueIdentifierFieldsByUpdate(inputLayer, updateLayer, inputTable, updateTable)
+	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	if err != nil {
+		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
+	}
+	err = addIdentifierField(methodLayer,"gogeo_analysis_id2")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
 
-	// 执行基于瓦片裁剪的并行更新分析
-	resultLayer, err := performTileClipUpdateAnalysis(inputLayer, updateLayer, inputTable, updateTable, config)
+	resultLayer, err := performUpdateAnalysis(inputLayer, methodLayer, config)
 	if err != nil {
-		return nil, fmt.Errorf("执行瓦片裁剪更新分析失败: %v", err)
+		return nil, fmt.Errorf("执行瓦片裁剪分析失败: %v", err)
 	}
-
 	// 计算结果数量
 	resultCount := resultLayer.GetFeatureCount()
-	fmt.Printf("瓦片裁剪并行分块数: %dx%d\n", config.TileCount, config.TileCount)
-	fmt.Printf("更新分析完成，共生成 %d 个要素\n", resultCount)
+
+	fmt.Printf("分析完成，共生成 %d 个要素\n", resultCount)
+
 	if config.IsMergeTile {
 		// 执行按标识字段的融合操作
-		unionResult, err := performUnionByIdentifierFieldsForUpdate(resultLayer, inputTable, updateTable, config.PrecisionConfig, config.ProgressCallback)
+		unionResult, err := performUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
 		if err != nil {
 			return nil, fmt.Errorf("执行融合操作失败: %v", err)
 		}
 
-		fmt.Printf("融合操作完成，最终生成 %d 个要素\n", unionResult.ResultCount)
-
-		// 删除临时的_updateID字段
-		err = removeTempIdentifierFieldsForUpdate(unionResult.OutputLayer, inputTable, updateTable)
+		// 删除临时的_identityID字段
+		err = deleteFieldFromLayerFuzzy(unionResult.OutputLayer, "gogeo_analysis_id")
 		if err != nil {
 			fmt.Printf("警告: 删除临时标识字段失败: %v\n", err)
-		} else {
-			fmt.Printf("成功删除临时标识字段: %s_updateID, %s_updateID\n", inputTable, updateTable)
 		}
 
 		return unionResult, nil
 	} else {
+		// 删除临时的_identityID字段
+		err = deleteFieldFromLayerFuzzy(resultLayer, "gogeo_analysis_id")
+		if err != nil {
+			fmt.Printf("警告: 删除临时标识字段失败: %v\n", err)
+		}
+
 		return &GeosAnalysisResult{
 			OutputLayer: resultLayer,
 			ResultCount: resultCount,
 		}, nil
 	}
-
 }
 
-// removeTempIdentifierFieldsForUpdate 删除临时的_updateID字段
-func removeTempIdentifierFieldsForUpdate(resultLayer *GDALLayer, inputTableName, updateTableName string) error {
-	field1Name := inputTableName + "_updateID"
-	field2Name := updateTableName + "_updateID"
+func performUpdateAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelGeosConfig) (*GDALLayer, error) {
+	if config.PrecisionConfig != nil {
+		// 创建内存副本
+		inputMemLayer, err := createMemoryLayerCopy(inputLayer, "input_mem_layer")
+		if err != nil {
+			return nil, fmt.Errorf("创建输入图层内存副本失败: %v", err)
+		}
 
-	err1 := deleteFieldFromLayer(resultLayer, field1Name)
-	if err1 != nil {
-		return fmt.Errorf("删除字段 %s 失败: %v", field1Name, err1)
+		methodMemLayer, err := createMemoryLayerCopy(methodLayer, "erase_mem_layer")
+		if err != nil {
+			inputMemLayer.Close()
+			return nil, fmt.Errorf("图层内存副本失败: %v", err)
+		}
+
+		// 在内存图层上设置精度
+		if config.PrecisionConfig.Enabled {
+			flags := config.PrecisionConfig.getFlags()
+			gridSize := C.double(config.PrecisionConfig.GridSize)
+
+			C.setLayerGeometryPrecision(inputMemLayer.layer, gridSize, flags)
+			C.setLayerGeometryPrecision(methodMemLayer.layer, gridSize, flags)
+		}
+		// 使用内存图层进行后续处理
+		inputLayer = inputMemLayer
+		methodLayer = methodMemLayer
 	}
-
-	err2 := deleteFieldFromLayer(resultLayer, field2Name)
-	if err2 != nil {
-		return fmt.Errorf("删除字段 %s 失败: %v", field2Name, err2)
-	}
-
-	return nil
-}
-
-// performUnionByIdentifierFieldsForUpdate 执行按标识字段的融合操作（更新版本）
-func performUnionByIdentifierFieldsForUpdate(inputLayer *GDALLayer, inputTableName, updateTableName string,
-	precisionConfig *GeometryPrecisionConfig, progressCallback ProgressCallback) (*GeosAnalysisResult, error) {
-
-	// 构建分组字段列表
-	groupFields := []string{
-		SourceIdentifierField,         // "source_layer" 字段
-		inputTableName + "_updateID",  // 输入表的标识字段
-		updateTableName + "_updateID", // 更新表的标识字段
-	}
-
-	// 构建输出图层名称
-	outputLayerName := fmt.Sprintf("update_union_%s_%s", inputTableName, updateTableName)
-
-	// 为融合操作调整精度配置
-	fusionPrecisionConfig := *precisionConfig
-	fusionPrecisionConfig.GridSize = 0
-
-	// 执行融合操作
-	return UnionByFieldsWithPrecision(inputLayer, groupFields, outputLayerName, &fusionPrecisionConfig, progressCallback)
-}
-
-// performTileClipUpdateAnalysis 执行基于瓦片裁剪的并行更新分析
-func performTileClipUpdateAnalysis(inputLayer, updateLayer *GDALLayer, inputTableName, updateTableName string, config *ParallelGeosConfig) (*GDALLayer, error) {
-	// 在分块裁剪前对两个图层进行精度处理
-	if config.PrecisionConfig != nil && config.PrecisionConfig.Enabled && config.PrecisionConfig.GridSize > 0 {
-		fmt.Printf("开始对图层进行精度处理，网格大小: %f\n", config.PrecisionConfig.GridSize)
-
-		flags := config.PrecisionConfig.getFlags()
-		gridSize := C.double(config.PrecisionConfig.GridSize)
-
-		// 对输入图层进行精度处理
-		C.setLayerGeometryPrecision(inputLayer.layer, gridSize, flags)
-		fmt.Printf("输入图层 %s 精度处理完成\n", inputTableName)
-
-		// 对更新图层进行精度处理
-		C.setLayerGeometryPrecision(updateLayer.layer, gridSize, flags)
-		fmt.Printf("更新图层 %s 精度处理完成\n", updateTableName)
-	}
-
-	// 获取数据范围
-	extent, err := getLayersExtent(inputLayer, updateLayer)
-	if err != nil {
-		return nil, fmt.Errorf("获取数据范围失败: %v", err)
-	}
-
-	// 创建瓦片裁剪信息
-	tiles := createTileClipInfos(extent, config.TileCount)
-	fmt.Printf("创建了 %d 个瓦片进行裁剪并行处理\n", len(tiles))
-
-	// 创建结果图层
-	resultLayer, err := createUpdateAnalysisResultLayer(inputLayer, updateLayer, inputTableName, updateTableName)
+	resultLayer, err := createUpdateAnalysisResultLayer(inputLayer, methodLayer)
 	if err != nil {
 		return nil, fmt.Errorf("创建结果图层失败: %v", err)
 	}
-
-	// 为每个工作线程创建图层副本
-	inputLayerCopies, updateLayerCopies, err := createLayerCopies(inputLayer, updateLayer, config.MaxWorkers)
+	taskid := uuid.New().String()
+	//对A B图层进行分块,并创建bin文件
+	GenerateTiles(inputLayer,methodLayer,config.TileCount,taskid)
+	//读取文件列表，并发执行操作
+	GPbins ,err:= ReadAndGroupBinFiles(taskid)
 	if err != nil {
-		return nil, fmt.Errorf("创建图层副本失败: %v", err)
+		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
-	defer cleanupLayerCopies(inputLayerCopies, updateLayerCopies)
-
-	// 并行处理瓦片裁剪
-	err = processTileClipUpdateInParallel(inputLayerCopies, updateLayerCopies, resultLayer, tiles, inputTableName, updateTableName, config)
+	// 并发执行分析
+	err = executeConcurrentUpdateAnalysis(GPbins, resultLayer, config)
 	if err != nil {
-		return nil, fmt.Errorf("并行处理瓦片裁剪失败: %v", err)
+		resultLayer.Close()
+		return nil, fmt.Errorf("并发擦除分析失败: %v", err)
 	}
+	// 清理临时文件
+	defer func() {
+		err := cleanupTileFiles(taskid)
+		if err != nil {
+			log.Printf("清理临时文件失败: %v", err)
+		}
+	}()
 
-	resultCount := resultLayer.GetFeatureCount()
-	fmt.Printf("瓦片裁剪更新分析完成，共生成 %d 个要素\n", resultCount)
 
 	return resultLayer, nil
 }
 
-// processTileClipUpdateInParallel 并行处理瓦片裁剪更新
-func processTileClipUpdateInParallel(inputLayerCopies, updateLayerCopies []*GDALLayer, resultLayer *GDALLayer, tiles []*TileClipInfo, inputTableName, updateTableName string, config *ParallelGeosConfig) error {
-	// 创建工作池
-	tilesChan := make(chan *TileClipInfo, len(tiles))
-	resultsChan := make(chan *TileClipResult, len(tiles))
+func executeConcurrentUpdateAnalysis(tileGroups []GroupTileFiles, resultLayer *GDALLayer, config *ParallelGeosConfig) error {
+	maxWorkers := config.MaxWorkers
+	if maxWorkers <= 0 {
+		maxWorkers = runtime.NumCPU()
+	}
 
-	// 启动工作协程
+	totalTasks := len(tileGroups)
+	if totalTasks == 0 {
+		return fmt.Errorf("没有分块需要处理")
+	}
+
+
+
+	// 创建任务队列和结果队列
+	taskQueue := make(chan GroupTileFiles, totalTasks)
+	results := make(chan taskResult, totalTasks)
+
+	// 启动固定数量的工作协程
 	var wg sync.WaitGroup
-	for i := 0; i < config.MaxWorkers; i++ {
+	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			processTileClipUpdateWorker(workerID, inputLayerCopies[workerID], updateLayerCopies[workerID], inputTableName, updateTableName, config.PrecisionConfig, tilesChan, resultsChan)
-		}(i)
+		go worker_update(i, taskQueue, results, config, &wg)
 	}
 
-	// 发送分块任务
+	// 发送所有任务到队列
 	go func() {
-		defer close(tilesChan)
-		for _, tile := range tiles {
-			tilesChan <- tile
+		for _, tileGroup := range tileGroups {
+			taskQueue <- tileGroup
 		}
+		close(taskQueue) // 关闭任务队列，通知工作协程没有更多任务
 	}()
 
-	// 收集结果
+	// 启动结果收集协程
+	var resultWg sync.WaitGroup
+	resultWg.Add(1)
+	var processingError error
+	completed := 0
+
 	go func() {
-		wg.Wait()
-		close(resultsChan)
+		defer resultWg.Done()
+
+		var totalDuration time.Duration
+		var minDuration, maxDuration time.Duration
+
+		for i := 0; i < totalTasks; i++ {
+			result := <-results
+			completed++
+
+			if result.err != nil {
+				processingError = fmt.Errorf("分块 %d 处理失败: %v", result.index, result.err)
+				log.Printf("错误: %v", processingError)
+				return
+			}
+
+			// 统计执行时间
+			totalDuration += result.duration
+			if i == 0 {
+				minDuration = result.duration
+				maxDuration = result.duration
+			} else {
+				if result.duration < minDuration {
+					minDuration = result.duration
+				}
+				if result.duration > maxDuration {
+					maxDuration = result.duration
+				}
+			}
+
+			// 将结果合并到主图层
+			if result.layer != nil {
+				err := mergeResultsToMainLayer(result.layer, resultLayer)
+				if err != nil {
+					processingError = fmt.Errorf("合并分块 %d 结果失败: %v", result.index, err)
+					log.Printf("错误: %v", processingError)
+					return
+				}
+
+				// 释放临时图层资源
+				result.layer.Close()
+			}
+
+			// 进度回调
+			if config.ProgressCallback != nil {
+				progress := float64(completed) / float64(totalTasks)
+				avgDuration := totalDuration / time.Duration(completed)
+
+				var memStats runtime.MemStats
+				runtime.ReadMemStats(&memStats)
+
+				message := fmt.Sprintf("已完成: %d/%d, 平均耗时: %v, 内存: %.2fMB, 协程数: %d",
+					completed, totalTasks, avgDuration,
+					float64(memStats.Alloc)/1024/1024, runtime.NumGoroutine())
+
+				config.ProgressCallback(progress, message)
+			}
+
+			// 每处理50个任务输出一次详细统计
+			if completed%50 == 0 || completed == totalTasks {
+				avgDuration := totalDuration / time.Duration(completed)
+				log.Printf("进度统计 - 已完成: %d/%d, 平均耗时: %v, 最快: %v, 最慢: %v",
+					completed, totalTasks, avgDuration, minDuration, maxDuration)
+			}
+		}
+
+		log.Printf("所有分块处理完成，总计: %d", completed)
 	}()
 
-	// 收集并合并结果
-	return collectTileClipResults(resultsChan, resultLayer, len(tiles), config.ProgressCallback)
+	// 等待所有工作协程完成
+	wg.Wait()
+	close(results) // 关闭结果队列
+
+	// 等待结果收集完成
+	resultWg.Wait()
+
+	if processingError != nil {
+		return processingError
+	}
+
+	return nil
 }
+func worker_update(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult,
+	config *ParallelGeosConfig, wg *sync.WaitGroup) {
+	defer wg.Done()
+	tasksProcessed := 0
 
-// processTileClipUpdateWorker 瓦片裁剪更新工作协程
-func processTileClipUpdateWorker(workerID int, inputLayerCopy, updateLayerCopy *GDALLayer, inputTableName, updateTableName string, precisionConfig *GeometryPrecisionConfig, tilesChan <-chan *TileClipInfo, resultsChan chan<- *TileClipResult) {
-	for tile := range tilesChan {
-		startTime := time.Now()
+	for tileGroup := range taskQueue {
 
-		result := &TileClipResult{
-			TileIndex: tile.Index,
-			Features:  make([]C.OGRFeatureH, 0),
+		start := time.Now()
+
+		// 处理单个分块
+		layer, err := processTileGroupforUpdate(tileGroup, config)
+
+		duration := time.Since(start)
+
+		tasksProcessed++
+
+		// 发送结果
+		results <- taskResult{
+			layer:    layer,
+			err:      err,
+			duration: duration,
+			index:    tileGroup.Index,
 		}
 
-		// 处理单个瓦片的裁剪更新
-		features, err := processSingleTileClipUpdate(inputLayerCopy, updateLayerCopy, tile, workerID, inputTableName, updateTableName, precisionConfig)
-		if err != nil {
-			result.Error = fmt.Errorf("工作协程 %d 处理瓦片 %d 失败: %v", workerID, tile.Index, err)
-		} else {
-			result.Features = features
-		}
 
-		result.ProcessTime = time.Since(startTime)
-		resultsChan <- result
+		// 定期强制垃圾回收
+
+		runtime.GC()
+
 	}
+
 }
+func processTileGroupforUpdate(tileGroup GroupTileFiles, config *ParallelGeosConfig) (*GDALLayer, error) {
 
-// processSingleTileClipUpdate 处理单个瓦片的裁剪更新
-func processSingleTileClipUpdate(
-	inputLayerCopy, updateLayerCopy *GDALLayer, tile *TileClipInfo, workerID int, inputTableName, updateTableName string, precisionConfig *GeometryPrecisionConfig) (
-	[]C.OGRFeatureH, error) {
-
-	// 创建瓦片裁剪后的图层
-	inputLayerName := C.CString(fmt.Sprintf("clipped_input_worker%d_tile%d", workerID, tile.Index))
-	updateLayerName := C.CString(fmt.Sprintf("clipped_update_worker%d_tile%d", workerID, tile.Index))
-	defer C.free(unsafe.Pointer(inputLayerName))
-	defer C.free(unsafe.Pointer(updateLayerName))
-
-	// 裁剪两个图层到当前瓦片范围
-	inputTableNameC := C.CString(inputTableName)
-	updateTableNameC := C.CString(updateTableName)
-	defer C.free(unsafe.Pointer(inputTableNameC))
-	defer C.free(unsafe.Pointer(updateTableNameC))
-
-	clippedInputLayerPtr := C.clipLayerToTile(inputLayerCopy.layer,
-		C.double(tile.MinX), C.double(tile.MinY),
-		C.double(tile.MaxX), C.double(tile.MaxY), inputLayerName, inputTableNameC)
-
-	clippedUpdateLayerPtr := C.clipLayerToTile(updateLayerCopy.layer,
-		C.double(tile.MinX), C.double(tile.MinY),
-		C.double(tile.MaxX), C.double(tile.MaxY), updateLayerName, updateTableNameC)
-
-	if clippedInputLayerPtr == nil || clippedUpdateLayerPtr == nil {
-		if clippedInputLayerPtr != nil {
-			C.OGR_L_Dereference(clippedInputLayerPtr)
-		}
-		if clippedUpdateLayerPtr != nil {
-			C.OGR_L_Dereference(clippedUpdateLayerPtr)
-		}
-		return nil, fmt.Errorf("裁剪图层到瓦片失败")
-	}
-	defer C.OGR_L_Dereference(clippedInputLayerPtr)
-	defer C.OGR_L_Dereference(clippedUpdateLayerPtr)
-
-	clippedInputLayer := &GDALLayer{layer: clippedInputLayerPtr}
-	clippedUpdateLayer := &GDALLayer{layer: clippedUpdateLayerPtr}
-
-	// 检查裁剪后的图层是否有要素
-	inputCount := clippedInputLayer.GetFeatureCount()
-	updateCount := clippedUpdateLayer.GetFeatureCount()
-
-	if inputCount == 0 && updateCount == 0 {
-		return []C.OGRFeatureH{}, nil
-	}
-
-	// 创建结果临时图层
-	resultTempName := C.CString(fmt.Sprintf("update_result_worker%d_tile%d", workerID, tile.Index))
-	defer C.free(unsafe.Pointer(resultTempName))
-
-	srs := clippedInputLayer.GetSpatialRef()
-	if srs == nil {
-		srs = clippedUpdateLayer.GetSpatialRef()
-	}
-
-	resultTempPtr := C.createMemoryLayer(resultTempName, C.wkbMultiPolygon, srs)
-	if resultTempPtr == nil {
-		return nil, fmt.Errorf("创建结果临时图层失败")
-	}
-	defer C.OGR_L_Dereference(resultTempPtr)
-
-	resultTemp := &GDALLayer{layer: resultTempPtr}
-
-	// 添加字段定义
-	err := addUpdateFields(resultTemp, clippedInputLayer, clippedUpdateLayer, inputTableName, updateTableName)
+	// 加载layer1的bin文件
+	inputTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer1)
 	if err != nil {
+		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
+	}
+
+
+	// 加载layer2的bin文件
+	methodTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
+	if err != nil {
+		return nil, fmt.Errorf("加载擦除分块文件失败: %v", err)
+	}
+	defer func() {
+		inputTileLayer.Close()
+		methodTileLayer.Close()
+
+	}()
+
+	// 为当前分块创建临时结果图层
+	tileName := fmt.Sprintf("tile_result_%d", tileGroup.Index)
+	tileResultLayer, err := createUpdateTileResultLayer(inputTileLayer, methodTileLayer,tileName)
+	if err != nil {
+		return nil, fmt.Errorf("创建分块结果图层失败: %v", err)
+	}
+
+	// 执行裁剪分析 - 不使用进度回调
+	err = executeUpdateAnalysis(inputTileLayer, methodTileLayer, tileResultLayer, nil)
+	if err != nil {
+		tileResultLayer.Close()
+		return nil, fmt.Errorf("执行擦除分析失败: %v", err)
+	}
+	return tileResultLayer, nil
+}
+func createUpdateTileResultLayer(layer1, layer2 *GDALLayer, layerName string) (*GDALLayer, error) {
+	layerNameC := C.CString(layerName)
+	defer C.free(unsafe.Pointer(layerNameC))
+
+	// 获取空间参考系统
+	srs := layer1.GetSpatialRef()
+	if srs == nil {
+		srs = layer2.GetSpatialRef()
+	}
+
+	// 创建结果图层
+	resultLayerPtr := C.createMemoryLayer(layerNameC, C.wkbMultiPolygon, srs)
+	if resultLayerPtr == nil {
+		return nil, fmt.Errorf("创建结果图层失败")
+	}
+
+	resultLayer := &GDALLayer{layer: resultLayerPtr}
+	runtime.SetFinalizer(resultLayer, (*GDALLayer).cleanup)
+
+	// 添加字段定义 - 使用默认策略（合并字段，带前缀区分来源）
+	err := addUpdateFields(resultLayer, layer1, layer2)
+	if err != nil {
+		resultLayer.Close()
 		return nil, fmt.Errorf("添加字段失败: %v", err)
 	}
-
-	// 执行更新分析
-	err = executeUpdateAnalysis(clippedInputLayer, clippedUpdateLayer, resultTemp, inputTableName, updateTableName, nil)
-	if err != nil {
-		return nil, fmt.Errorf("瓦片更新分析失败: %v", err)
-	}
-
-	// 收集结果要素
-	features := make([]C.OGRFeatureH, 0)
-	resultTemp.ResetReading()
-
-	resultTemp.IterateFeatures(func(feature C.OGRFeatureH) {
-		clonedFeature := C.OGR_F_Clone(feature)
-		if clonedFeature != nil {
-			features = append(features, clonedFeature)
-		}
-	})
-
-	return features, nil
+	return resultLayer, nil
 }
 
+
+
 // createUpdateAnalysisResultLayer 创建更新分析结果图层
-func createUpdateAnalysisResultLayer(inputLayer, updateLayer *GDALLayer, inputTableName, updateTableName string) (*GDALLayer, error) {
+func createUpdateAnalysisResultLayer(inputLayer, updateLayer *GDALLayer) (*GDALLayer, error) {
 	layerName := C.CString("update_result")
 	defer C.free(unsafe.Pointer(layerName))
 
@@ -374,7 +387,7 @@ func createUpdateAnalysisResultLayer(inputLayer, updateLayer *GDALLayer, inputTa
 	runtime.SetFinalizer(resultLayer, (*GDALLayer).cleanup)
 
 	// 添加字段定义
-	err := addUpdateFields(resultLayer, inputLayer, updateLayer, inputTableName, updateTableName)
+	err := addUpdateFields(resultLayer, inputLayer, updateLayer)
 	if err != nil {
 		resultLayer.Close()
 		return nil, fmt.Errorf("添加字段失败: %v", err)
@@ -384,26 +397,16 @@ func createUpdateAnalysisResultLayer(inputLayer, updateLayer *GDALLayer, inputTa
 }
 
 // addUpdateFields 添加更新分析的字段
-func addUpdateFields(resultLayer, inputLayer, updateLayer *GDALLayer, inputTableName, updateTableName string) error {
-	// 首先添加来源标识字段
-	sourceFieldName := C.CString(SourceIdentifierField)
-	sourceFieldDefn := C.OGR_Fld_Create(sourceFieldName, C.OFTString)
-	C.OGR_Fld_SetWidth(sourceFieldDefn, 50)
-	err := C.OGR_L_CreateField(resultLayer.layer, sourceFieldDefn, 1)
-	C.OGR_Fld_Destroy(sourceFieldDefn)
-	C.free(unsafe.Pointer(sourceFieldName))
+func addUpdateFields(resultLayer, inputLayer, updateLayer *GDALLayer) error {
 
-	if err != C.OGRERR_NONE {
-		return fmt.Errorf("创建来源标识字段失败，错误代码: %d", int(err))
-	}
 
 	// 合并两个图层的字段（不使用前缀）
-	err1 := addLayerFieldsWithoutPrefix(resultLayer, inputLayer)
+	err1 := addLayerFields(resultLayer, inputLayer,"")
 	if err1 != nil {
 		return fmt.Errorf("添加输入图层字段失败: %v", err1)
 	}
 
-	err2 := addLayerFieldsWithoutPrefix(resultLayer, updateLayer)
+	err2 := addLayerFields(resultLayer, updateLayer,"")
 	if err2 != nil {
 		return fmt.Errorf("添加更新图层字段失败: %v", err2)
 	}
@@ -412,7 +415,8 @@ func addUpdateFields(resultLayer, inputLayer, updateLayer *GDALLayer, inputTable
 }
 
 // executeUpdateAnalysis 执行更新分析
-func executeUpdateAnalysis(inputLayer, updateLayer, resultLayer *GDALLayer, inputTableName, updateTableName string, progressCallback ProgressCallback) error {
+func executeUpdateAnalysis(inputLayer, updateLayer, resultLayer *GDALLayer,
+	progressCallback ProgressCallback) error {
 	// 设置GDAL选项
 	var options **C.char
 	defer func() {
@@ -475,129 +479,3 @@ func executeGDALUpdateWithProgress(inputLayer, updateLayer, resultLayer *GDALLay
 	return nil
 }
 
-// createLayerWithUpdateIdentifierField 创建一个带有更新标识字段的新图层
-func createLayerWithUpdateIdentifierField(sourceLayer *GDALLayer, identifierFieldName string) (*GDALLayer, error) {
-	// 创建内存数据源
-	driverName := C.CString("MEM")
-	driver := C.OGRGetDriverByName(driverName)
-	C.free(unsafe.Pointer(driverName))
-
-	if driver == nil {
-		return nil, fmt.Errorf("无法获取Memory驱动")
-	}
-
-	dataSourceName := C.CString("")
-	dataSource := C.OGR_Dr_CreateDataSource(driver, dataSourceName, nil)
-	C.free(unsafe.Pointer(dataSourceName))
-
-	if dataSource == nil {
-		return nil, fmt.Errorf("无法创建内存数据源")
-	}
-
-	// 获取源图层的空间参考系统
-	sourceLayerDefn := C.OGR_L_GetLayerDefn(sourceLayer.layer)
-	sourceSRS := C.OGR_L_GetSpatialRef(sourceLayer.layer)
-
-	// 创建新图层
-	layerName := C.CString("temp_layer")
-	geomType := C.OGR_FD_GetGeomType(sourceLayerDefn)
-	newLayer := C.OGR_DS_CreateLayer(dataSource, layerName, sourceSRS, geomType, nil)
-	C.free(unsafe.Pointer(layerName))
-
-	if newLayer == nil {
-		C.OGR_DS_Destroy(dataSource)
-		return nil, fmt.Errorf("无法创建新图层")
-	}
-
-	// 复制原有字段定义
-	fieldCount := C.OGR_FD_GetFieldCount(sourceLayerDefn)
-	for i := C.int(0); i < fieldCount; i++ {
-		fieldDefn := C.OGR_FD_GetFieldDefn(sourceLayerDefn, i)
-		if C.OGR_L_CreateField(newLayer, fieldDefn, 1) != C.OGRERR_NONE {
-			C.OGR_DS_Destroy(dataSource)
-			return nil, fmt.Errorf("复制字段定义失败")
-		}
-	}
-
-	// 添加标识字段
-	identifierFieldNameC := C.CString(identifierFieldName)
-	identifierFieldDefn := C.OGR_Fld_Create(identifierFieldNameC, C.OFTInteger64)
-	defer C.OGR_Fld_Destroy(identifierFieldDefn)
-	defer C.free(unsafe.Pointer(identifierFieldNameC))
-
-	if C.OGR_L_CreateField(newLayer, identifierFieldDefn, 1) != C.OGRERR_NONE {
-		C.OGR_DS_Destroy(dataSource)
-		return nil, fmt.Errorf("创建标识字段失败")
-	}
-
-	// 获取标识字段索引
-	newLayerDefn := C.OGR_L_GetLayerDefn(newLayer)
-	identifierFieldIndex := C.OGR_FD_GetFieldIndex(newLayerDefn, identifierFieldNameC)
-
-	// 复制要素并添加标识字段值
-	sourceLayer.ResetReading()
-	var featureID int64 = 1
-
-	sourceLayer.IterateFeatures(func(sourceFeature C.OGRFeatureH) {
-		// 创建新要素
-		newFeature := C.OGR_F_Create(newLayerDefn)
-		if newFeature == nil {
-			return
-		}
-		defer C.OGR_F_Destroy(newFeature)
-
-		// 复制几何体
-		geom := C.OGR_F_GetGeometryRef(sourceFeature)
-		if geom != nil {
-			geomClone := C.OGR_G_Clone(geom)
-			C.OGR_F_SetGeometry(newFeature, geomClone)
-			C.OGR_G_DestroyGeometry(geomClone)
-		}
-
-		// 复制原有字段值
-		for i := C.int(0); i < fieldCount; i++ {
-			if C.OGR_F_IsFieldSet(sourceFeature, i) != 0 {
-				sourceFieldDefn := C.OGR_FD_GetFieldDefn(sourceLayerDefn, i)
-				fieldType := C.OGR_Fld_GetType(sourceFieldDefn)
-
-				switch fieldType {
-				case C.OFTInteger:
-					value := C.OGR_F_GetFieldAsInteger(sourceFeature, i)
-					C.OGR_F_SetFieldInteger(newFeature, i, value)
-				case C.OFTInteger64:
-					value := C.OGR_F_GetFieldAsInteger64(sourceFeature, i)
-					C.OGR_F_SetFieldInteger64(newFeature, i, value)
-				case C.OFTReal:
-					value := C.OGR_F_GetFieldAsDouble(sourceFeature, i)
-					C.OGR_F_SetFieldDouble(newFeature, i, value)
-				case C.OFTString:
-					value := C.OGR_F_GetFieldAsString(sourceFeature, i)
-					C.OGR_F_SetFieldString(newFeature, i, value)
-				case C.OFTDate, C.OFTTime, C.OFTDateTime:
-					var year, month, day, hour, minute, second, tzflag C.int
-					C.OGR_F_GetFieldAsDateTime(sourceFeature, i, &year, &month, &day, &hour, &minute, &second, &tzflag)
-					C.OGR_F_SetFieldDateTime(newFeature, i, year, month, day, hour, minute, second, tzflag)
-				default:
-					value := C.OGR_F_GetFieldAsString(sourceFeature, i)
-					C.OGR_F_SetFieldString(newFeature, i, value)
-				}
-			}
-		}
-
-		// 设置标识字段值
-		C.OGR_F_SetFieldInteger64(newFeature, identifierFieldIndex, C.longlong(featureID))
-		featureID++
-
-		// 添加要素到新图层
-		C.OGR_L_CreateFeature(newLayer, newFeature)
-	})
-
-	// 创建新的GDALLayer包装器
-	result := &GDALLayer{
-		layer:   newLayer,
-		dataset: dataSource,
-	}
-
-	fmt.Printf("成功创建带更新标识字段的图层，共处理 %d 个要素\n", featureID-1)
-	return result, nil
-}

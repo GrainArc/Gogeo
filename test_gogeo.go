@@ -16,11 +16,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 package Gogeo
+/*
+#include "osgeo_utils.h"
 
+*/
+import "C"
 import (
 	"fmt"
 	"path/filepath"
-	"runtime"
+	"io/ioutil"
+	"os"
+	"unsafe"
+	"strings"
 	"time"
 )
 
@@ -63,8 +70,8 @@ func PerformSpatialIntersectionTest(shpFile1, shpFile2, outputFile string) error
 
 	// 3. 配置并行相交分析参数
 	config := &ParallelGeosConfig{
-		TileCount:        10,                // 4x4分块
-		MaxWorkers:       8, // 使用所有CPU核心
+		TileCount:        50,                // 4x4分块
+		MaxWorkers:       32, // 使用所有CPU核心
 		BufferDistance:   0.0001,           // 分块缓冲距离
 		IsMergeTile:      true,             // 合并分块结果
 		ProgressCallback: progressCallback, // 进度回调函数
@@ -76,22 +83,15 @@ func PerformSpatialIntersectionTest(shpFile1, shpFile2, outputFile string) error
 		},
 	}
 
-	// 4. 选择字段合并策略
-	strategy := MergePreferTable1 // 使用前缀区分字段来源
-
-	fmt.Printf("\n开始执行空间相交分析...")
-	fmt.Printf("分块配置: %dx%d, 工作线程: %d\n",
-		config.TileCount, config.TileCount, config.MaxWorkers)
-	fmt.Printf("字段合并策略: %s\n", strategy.String())
 
 	// 5. 执行空间相交分析
-	result, err := SpatialIntersectionAnalysis(layer1, layer2, strategy, config)
+	result, err := SpatialIdentityAnalysis(layer1, layer2, config)
 	if err != nil {
-		return fmt.Errorf("空间相交分析执行失败: %v", err)
+		return fmt.Errorf("空间分析执行失败: %v", err)
 	}
 
 	analysisTime := time.Since(startTime)
-	fmt.Printf("\n相交分析完成! 耗时: %v\n", analysisTime)
+	fmt.Printf("\n分析完成! 耗时: %v\n", analysisTime)
 	fmt.Printf("结果要素数量: %d\n", result.ResultCount)
 
 	// 6. 将结果写出为shapefile
@@ -176,109 +176,290 @@ func verifyOutputFile(filePath string) error {
 	return nil
 }
 
-// 高级测试函数：测试不同的字段合并策略
-func testDifferentStrategies(shpFile1, shpFile2 string) error {
-	strategies := []FieldMergeStrategy{
-		UseTable1Fields,
-		UseTable2Fields,
-		MergePreferTable1,
-		MergePreferTable2,
-		MergeWithPrefix,
+// ReadBinFilesAndConvertToGDB 读取文件夹内所有bin文件并转换为GDB
+func ReadBinFilesAndConvertToGDB(folderPath string, outputGDBPath string) error {
+	// 检查文件夹是否存在
+	if _, err := os.Stat(folderPath); os.IsNotExist(err) {
+		return fmt.Errorf("文件夹不存在: %s", folderPath)
 	}
 
-	config := &ParallelGeosConfig{
-		TileCount:        2,
-		MaxWorkers:       runtime.NumCPU(),
-		BufferDistance:   0.001,
-		IsMergeTile:      true,
-		ProgressCallback: progressCallback,
+	// 读取文件夹内容
+	files, err := ioutil.ReadDir(folderPath)
+	if err != nil {
+		return fmt.Errorf("无法读取文件夹 %s: %v", folderPath, err)
 	}
 
-	for i, strategy := range strategies {
-		fmt.Printf("\n=== 测试策略 %d: %s ===\n", i+1, strategy.String())
+	// 过滤出所有.bin文件
+	var binFiles []string
+	for _, file := range files {
+		if !file.IsDir() && strings.ToLower(filepath.Ext(file.Name())) == ".bin" {
+			binFiles = append(binFiles, filepath.Join(folderPath, file.Name()))
+		}
+	}
 
-		outputFile := fmt.Sprintf("output/test_strategy_%d.shp", i+1)
+	if len(binFiles) == 0 {
+		return fmt.Errorf("文件夹 %s 中没有找到.bin文件", folderPath)
+	}
 
-		// 读取图层
-		layer1, err := ReadShapeFileLayer(shpFile1)
+	fmt.Printf("找到 %d 个.bin文件\n", len(binFiles))
+
+	// 创建GDB写入器
+	NewFileGeoWriter(outputGDBPath, true) // true表示覆盖已存在的文件
+	if err != nil {
+		return fmt.Errorf("无法创建GDB写入器: %v", err)
+	}
+
+	// 初始化GDAL
+	InitializeGDAL()
+
+	// 获取FileGDB驱动
+	driver := C.OGRGetDriverByName(C.CString("FileGDB"))
+	if driver == nil {
+		// 如果FileGDB驱动不可用，尝试OpenFileGDB驱动
+		driver = C.OGRGetDriverByName(C.CString("OpenFileGDB"))
+		if driver == nil {
+			return fmt.Errorf("无法获取GDB驱动（需要FileGDB或OpenFileGDB驱动）")
+		}
+	}
+
+	// 如果GDB已存在且需要覆盖，先删除
+	if _, err := os.Stat(outputGDBPath); err == nil {
+		os.RemoveAll(outputGDBPath)
+	}
+
+	// 创建GDB数据源
+	cGDBPath := C.CString(outputGDBPath)
+	defer C.free(unsafe.Pointer(cGDBPath))
+
+	dataset := C.OGR_Dr_CreateDataSource(driver, cGDBPath, nil)
+	if dataset == nil {
+		return fmt.Errorf("无法创建GDB文件: %s", outputGDBPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 处理每个bin文件
+	successCount := 0
+	errorCount := 0
+
+	for i, binFile := range binFiles {
+		fmt.Printf("处理文件 %d/%d: %s\n", i+1, len(binFiles), filepath.Base(binFile))
+
+		// 反序列化图层
+		layer, err := DeserializeLayerFromFile(binFile)
 		if err != nil {
-			return err
+			fmt.Printf("  错误: 无法反序列化文件 %s: %v\n", binFile, err)
+			errorCount++
+			continue
 		}
 
-		layer2, err := ReadShapeFileLayer(shpFile2)
+		// 生成图层名称（使用文件名，去掉扩展名）
+		layerName := strings.TrimSuffix(filepath.Base(binFile), ".bin")
+		layerName = sanitizeLayerName(layerName)
+
+		// 将图层写入GDB
+		err = writeLayerToDataset(layer, dataset, layerName)
 		if err != nil {
-			layer1.Close()
-			return err
+			fmt.Printf("  错误: 无法写入图层 %s: %v\n", layerName, err)
+			errorCount++
+		} else {
+			fmt.Printf("  成功: 图层 %s 已写入GDB\n", layerName)
+			successCount++
 		}
 
-		// 执行分析
-		result, err := SpatialIntersectionAnalysis(layer1, layer2, strategy, config)
-		if err != nil {
-			return fmt.Errorf("策略 %s 执行失败: %v", strategy.String(), err)
-		}
+		// 关闭图层以释放资源
+		layer.Close()
+	}
 
-		// 写出结果
-		layerName := fmt.Sprintf("strategy_%d", i+1)
-		err = WriteShapeFileLayer(result.OutputLayer, outputFile, layerName, true)
-		if err != nil {
-			result.OutputLayer.Close()
-			return fmt.Errorf("策略 %s 写出失败: %v", strategy.String(), err)
-		}
+	fmt.Printf("\n转换完成:\n")
+	fmt.Printf("  成功: %d 个图层\n", successCount)
+	fmt.Printf("  失败: %d 个图层\n", errorCount)
+	fmt.Printf("  输出GDB: %s\n", outputGDBPath)
 
-		fmt.Printf("策略 %s 完成，结果要素: %d，输出: %s\n",
-			strategy.String(), result.ResultCount, outputFile)
-
-		result.OutputLayer.Close()
+	if successCount == 0 {
+		return fmt.Errorf("没有成功转换任何图层")
 	}
 
 	return nil
 }
 
-// 性能测试函数
-func performanceTest(shpFile1, shpFile2 string) error {
-	fmt.Println("\n=== 性能测试 ===")
+// writeLayerToDataset 将GDALLayer写入到指定的数据集
+func writeLayerToDataset(sourceLayer *GDALLayer, dataset C.OGRDataSourceH, layerName string) error {
+	// 获取源图层信息
+	sourceDefn := sourceLayer.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(sourceDefn)
+	srs := sourceLayer.GetSpatialRef()
 
-	// 测试不同的分块配置
-	tileConfigs := []int{2, 4, 8}
+	// 创建图层
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
 
-	for _, tileCount := range tileConfigs {
-		fmt.Printf("\n--- 测试分块配置: %dx%d ---\n", tileCount, tileCount)
+	newLayer := C.OGR_DS_CreateLayer(dataset, cLayerName, srs, geomType, nil)
+	if newLayer == nil {
+		return fmt.Errorf("无法创建图层: %s", layerName)
+	}
 
-		config := &ParallelGeosConfig{
-			TileCount:        tileCount,
-			MaxWorkers:       runtime.NumCPU(),
-			BufferDistance:   0.001,
-			IsMergeTile:      true,
-			ProgressCallback: nil, // 性能测试时不显示进度
-		}
+	// 创建临时写入器用于复制字段和要素
+	tempWriter := &FileGeoWriter{
+		FileType: "gdb",
+	}
 
-		startTime := time.Now()
+	// 复制字段定义
+	err := tempWriter.copyFieldDefinitions(sourceDefn, newLayer)
+	if err != nil {
+		return fmt.Errorf("复制字段定义失败: %v", err)
+	}
 
-		// 读取图层
-		layer1, err := ReadShapeFileLayer(shpFile1)
-		if err != nil {
-			return err
-		}
-
-		layer2, err := ReadShapeFileLayer(shpFile2)
-		if err != nil {
-			layer1.Close()
-			return err
-		}
-
-		// 执行分析
-		result, err := SpatialIntersectionAnalysis(layer1, layer2,
-			MergePreferTable1, config)
-		if err != nil {
-			return err
-		}
-
-		duration := time.Since(startTime)
-		fmt.Printf("分块 %dx%d: 耗时 %v, 结果要素 %d\n",
-			tileCount, tileCount, duration, result.ResultCount)
-
-		result.OutputLayer.Close()
+	// 复制要素
+	err = tempWriter.copyFeatures(sourceLayer, newLayer)
+	if err != nil {
+		return fmt.Errorf("复制要素失败: %v", err)
 	}
 
 	return nil
+}
+
+// sanitizeLayerName 清理图层名称以符合GDB要求
+func sanitizeLayerName(name string) string {
+	// 移除特殊字符，替换为下划线
+	sanitized := strings.ReplaceAll(name, " ", "_")
+	sanitized = strings.ReplaceAll(sanitized, "-", "_")
+	sanitized = strings.ReplaceAll(sanitized, ".", "_")
+	sanitized = strings.ReplaceAll(sanitized, "(", "_")
+	sanitized = strings.ReplaceAll(sanitized, ")", "_")
+
+	// 确保图层名不以数字开头
+	if len(sanitized) > 0 && sanitized[0] >= '0' && sanitized[0] <= '9' {
+		sanitized = "layer_" + sanitized
+	}
+
+	// 确保图层名不为空
+	if len(sanitized) == 0 {
+		sanitized = "unknown_layer"
+	}
+
+	return sanitized
+}
+
+// ProcessBinFolderToGDB 处理bin文件夹并转换为GDB的便捷函数
+func ProcessBinFolderToGDB(binFolderPath string, outputGDBPath string) error {
+	return ReadBinFilesAndConvertToGDB(binFolderPath, outputGDBPath)
+}
+
+// BatchConvertBinToGDB 批量转换bin文件到GDB（支持子文件夹）
+func BatchConvertBinToGDB(rootFolderPath string, outputGDBPath string, includeSubfolders bool) error {
+	var allBinFiles []string
+
+	// 遍历文件夹
+	err := filepath.Walk(rootFolderPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// 如果不包含子文件夹，跳过子目录
+		if !includeSubfolders && info.IsDir() && path != rootFolderPath {
+			return filepath.SkipDir
+		}
+
+		// 检查是否为bin文件
+		if !info.IsDir() && strings.ToLower(filepath.Ext(info.Name())) == ".bin" {
+			allBinFiles = append(allBinFiles, path)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("遍历文件夹失败: %v", err)
+	}
+
+	if len(allBinFiles) == 0 {
+		return fmt.Errorf("没有找到.bin文件")
+	}
+
+	fmt.Printf("找到 %d 个.bin文件\n", len(allBinFiles))
+
+	// 创建GDB写入器
+	NewFileGeoWriter(outputGDBPath, true)
+	if err != nil {
+		return fmt.Errorf("无法创建GDB写入器: %v", err)
+	}
+
+	// 初始化GDAL
+	InitializeGDAL()
+
+	// 获取FileGDB驱动
+	driver := C.OGRGetDriverByName(C.CString("FileGDB"))
+	if driver == nil {
+		driver = C.OGRGetDriverByName(C.CString("OpenFileGDB"))
+		if driver == nil {
+			return fmt.Errorf("无法获取GDB驱动")
+		}
+	}
+
+	// 删除已存在的GDB
+	if _, err := os.Stat(outputGDBPath); err == nil {
+		os.RemoveAll(outputGDBPath)
+	}
+
+	// 创建GDB数据源
+	cGDBPath := C.CString(outputGDBPath)
+	defer C.free(unsafe.Pointer(cGDBPath))
+
+	dataset := C.OGR_Dr_CreateDataSource(driver, cGDBPath, nil)
+	if dataset == nil {
+		return fmt.Errorf("无法创建GDB文件: %s", outputGDBPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 处理每个bin文件
+	successCount := 0
+	errorCount := 0
+
+	for i, binFile := range allBinFiles {
+		fmt.Printf("处理文件 %d/%d: %s\n", i+1, len(allBinFiles), binFile)
+
+		// 反序列化图层
+		layer, err := DeserializeLayerFromFile(binFile)
+		if err != nil {
+			fmt.Printf("  错误: %v\n", err)
+			errorCount++
+			continue
+		}
+
+		// 生成唯一的图层名称
+		relPath, _ := filepath.Rel(rootFolderPath, binFile)
+		layerName := generateUniqueLayerName(relPath)
+
+		// 写入图层
+		err = writeLayerToDataset(layer, dataset, layerName)
+		if err != nil {
+			fmt.Printf("  错误: %v\n", err)
+			errorCount++
+		} else {
+			fmt.Printf("  成功: %s\n", layerName)
+			successCount++
+		}
+
+		layer.Close()
+	}
+
+	fmt.Printf("\n批量转换完成:\n")
+	fmt.Printf("  成功: %d 个图层\n", successCount)
+	fmt.Printf("  失败: %d 个图层\n", errorCount)
+
+	return nil
+}
+
+// generateUniqueLayerName 生成唯一的图层名称
+func generateUniqueLayerName(filePath string) string {
+	// 将路径分隔符替换为下划线
+	name := strings.ReplaceAll(filePath, string(filepath.Separator), "_")
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+
+	// 移除.bin扩展名
+	name = strings.TrimSuffix(name, ".bin")
+
+	// 清理名称
+	return sanitizeLayerName(name)
 }

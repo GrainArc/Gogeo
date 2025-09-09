@@ -174,27 +174,264 @@ func (gl *GDALLayer) GetNextFeature() C.OGRFeatureH {
 	return C.OGR_L_GetNextFeature(gl.layer)
 }
 
-// PrintLayerInfo 打印图层信息
+// PrintLayerInfo 打印图层信息（增强版）
 func (gl *GDALLayer) PrintLayerInfo() {
 	fmt.Printf("图层信息:\n")
+	fmt.Printf("  图层名称: %s\n", gl.GetLayerName())
 	fmt.Printf("  要素数量: %d\n", gl.GetFeatureCount())
 	fmt.Printf("  几何类型: %s\n", gl.GetGeometryType())
 	fmt.Printf("  字段数量: %d\n", gl.GetFieldCount())
 
-	fmt.Printf("  字段列表:\n")
-	for i := 0; i < gl.GetFieldCount(); i++ {
-		fmt.Printf("    %d: %s\n", i, gl.GetFieldName(i))
+	// 打印字段定义表
+	fmt.Printf("\n字段定义表:\n")
+	fmt.Printf("%-4s %-20s %-15s %-8s %-6s\n", "序号", "字段名", "字段类型", "宽度", "精度")
+	fmt.Println(strings.Repeat("-", 65))
+
+	fieldCount := gl.GetFieldCount()
+	defn := gl.GetLayerDefn()
+
+	for i := 0; i < fieldCount; i++ {
+		fieldDefn := C.OGR_FD_GetFieldDefn(defn, C.int(i))
+		if fieldDefn == nil {
+			continue
+		}
+
+		fieldName := C.GoString(C.OGR_Fld_GetNameRef(fieldDefn))
+		fieldType := C.GoString(C.OGR_GetFieldTypeName(C.OGR_Fld_GetType(fieldDefn)))
+		width := int(C.OGR_Fld_GetWidth(fieldDefn))
+		precision := int(C.OGR_Fld_GetPrecision(fieldDefn))
+
+		fmt.Printf("%-4d %-20s %-15s %-8d %-6d\n",
+			i+1, fieldName, fieldType, width, precision)
 	}
 
 	// 打印空间参考系统信息
+	fmt.Printf("\n空间参考系统:\n")
 	srs := gl.GetSpatialRef()
 	if srs != nil {
 		var projStr *C.char
 		C.OSRExportToProj4(srs, &projStr)
 		if projStr != nil {
 			fmt.Printf("  投影: %s\n", C.GoString(projStr))
-
+			C.CPLFree(unsafe.Pointer(projStr))
 		}
+
+		// 获取地理坐标系名称
+		var geogName *C.char
+		C.OSRExportToPrettyWkt(srs, &geogName, C.int(0))
+		if geogName != nil {
+			// 只显示前100个字符的WKT信息，避免输出过长
+			wktStr := C.GoString(geogName)
+			if len(wktStr) > 100 {
+				wktStr = wktStr[:100] + "..."
+			}
+			fmt.Printf("  坐标系: %s\n", wktStr)
+			C.CPLFree(unsafe.Pointer(geogName))
+		}
+	} else {
+		fmt.Printf("  投影: 未定义\n")
+	}
+
+	// 打印前10个要素的属性信息
+	fmt.Printf("\n前10个要素的属性数据:\n")
+	gl.printFirst10Features()
+}
+
+// printFirst10Features 打印前10个要素的属性数据
+func (gl *GDALLayer) printFirst10Features() {
+	gl.ResetReading()
+
+	fieldCount := gl.GetFieldCount()
+	if fieldCount == 0 {
+		fmt.Println("  没有属性字段")
+		return
+	}
+
+	// 打印表头
+	fmt.Printf("%-6s", "FID")
+	for i := 0; i < fieldCount; i++ {
+		fieldName := gl.GetFieldName(i)
+		// 限制字段名显示长度
+		if len(fieldName) > 15 {
+			fieldName = fieldName[:12] + "..."
+		}
+		fmt.Printf("%-16s", fieldName)
+	}
+	fmt.Printf("%-15s\n", "几何类型")
+
+	// 打印分隔线
+	totalWidth := 6 + fieldCount*16 + 15
+	fmt.Println(strings.Repeat("-", totalWidth))
+
+	// 遍历前10个要素
+	for featureIndex := 0; featureIndex < 10; featureIndex++ {
+		feature := gl.GetNextFeature()
+		if feature == nil {
+			break
+		}
+
+		// 安全地处理要素，确保释放资源
+		func() {
+			defer C.OGR_F_Destroy(feature)
+
+			// 打印FID
+			fid := int(C.OGR_F_GetFID(feature))
+			fmt.Printf("%-6d", fid)
+
+			// 打印每个字段的值
+			for i := 0; i < fieldCount; i++ {
+				fieldValue := gl.getFieldValueAsString(feature, i)
+				// 限制值的显示长度
+				if len(fieldValue) > 15 {
+					fieldValue = fieldValue[:12] + "..."
+				}
+				fmt.Printf("%-16s", fieldValue)
+			}
+
+			// 打印几何类型
+			geometry := C.OGR_F_GetGeometryRef(feature)
+			geomTypeName := "NULL"
+			if geometry != nil {
+				geomType := C.OGR_G_GetGeometryType(geometry)
+				geomTypeName = C.GoString(C.OGRGeometryTypeToName(geomType))
+			}
+			fmt.Printf("%-15s\n", geomTypeName)
+		}()
+	}
+
+	// 如果要素数量大于10，显示提示信息
+	totalFeatures := gl.GetFeatureCount()
+	if totalFeatures > 10 {
+		fmt.Printf("\n... 还有 %d 个要素（仅显示前10个）\n", totalFeatures-10)
+	}
+
+	// 重置读取位置
+	gl.ResetReading()
+}
+
+// getFieldValueAsString 获取字段值的字符串表示
+func (gl *GDALLayer) getFieldValueAsString(feature C.OGRFeatureH, fieldIndex int) string {
+	// 检查字段是否设置
+	if C.OGR_F_IsFieldSet(feature, C.int(fieldIndex)) == 0 {
+		return "<NULL>"
+	}
+
+	// 获取字段定义
+	defn := gl.GetLayerDefn()
+	fieldDefn := C.OGR_FD_GetFieldDefn(defn, C.int(fieldIndex))
+	if fieldDefn == nil {
+		return "<ERROR>"
+	}
+
+	fieldType := C.OGR_Fld_GetType(fieldDefn)
+
+	// 根据字段类型返回相应的字符串值
+	switch fieldType {
+	case C.OFTInteger:
+		value := int(C.OGR_F_GetFieldAsInteger(feature, C.int(fieldIndex)))
+		return fmt.Sprintf("%d", value)
+
+	case C.OFTInteger64:
+		value := int64(C.OGR_F_GetFieldAsInteger64(feature, C.int(fieldIndex)))
+		return fmt.Sprintf("%d", value)
+
+	case C.OFTReal:
+		value := float64(C.OGR_F_GetFieldAsDouble(feature, C.int(fieldIndex)))
+		// 检查特殊值
+		if C.check_isnan(C.double(value)) != 0 {
+			return "<NaN>"
+		}
+		if C.check_isinf(C.double(value)) != 0 {
+			return "<Inf>"
+		}
+		// 格式化浮点数，最多显示6位小数
+		return fmt.Sprintf("%.6g", value)
+
+	case C.OFTString:
+		strPtr := C.OGR_F_GetFieldAsString(feature, C.int(fieldIndex))
+		if strPtr == nil {
+			return "<NULL>"
+		}
+		return C.GoString(strPtr)
+
+	case C.OFTDate:
+		var year, month, day, hour, minute, second, tzflag C.int
+		result := C.OGR_F_GetFieldAsDateTime(feature, C.int(fieldIndex),
+			&year, &month, &day, &hour, &minute, &second, &tzflag)
+		if result != 0 {
+			return fmt.Sprintf("%04d-%02d-%02d", int(year), int(month), int(day))
+		}
+		return "<NULL>"
+
+	case C.OFTTime:
+		var year, month, day, hour, minute, second, tzflag C.int
+		result := C.OGR_F_GetFieldAsDateTime(feature, C.int(fieldIndex),
+			&year, &month, &day, &hour, &minute, &second, &tzflag)
+		if result != 0 {
+			return fmt.Sprintf("%02d:%02d:%02d", int(hour), int(minute), int(second))
+		}
+		return "<NULL>"
+
+	case C.OFTDateTime:
+		var year, month, day, hour, minute, second, tzflag C.int
+		result := C.OGR_F_GetFieldAsDateTime(feature, C.int(fieldIndex),
+			&year, &month, &day, &hour, &minute, &second, &tzflag)
+		if result != 0 {
+			return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d",
+				int(year), int(month), int(day), int(hour), int(minute), int(second))
+		}
+		return "<NULL>"
+
+	case C.OFTBinary:
+		return "<BINARY>"
+
+	case C.OFTIntegerList, C.OFTRealList, C.OFTStringList:
+		return "<LIST>"
+
+	default:
+		// 对于未知类型，尝试作为字符串获取
+		strPtr := C.OGR_F_GetFieldAsString(feature, C.int(fieldIndex))
+		if strPtr != nil {
+			return C.GoString(strPtr)
+		}
+		return "<UNKNOWN>"
+	}
+}
+
+// PrintLayerSummary 打印图层摘要信息（简化版）
+func (gl *GDALLayer) PrintLayerSummary() {
+	fmt.Printf("图层摘要:\n")
+	fmt.Printf("  名称: %s\n", gl.GetLayerName())
+	fmt.Printf("  要素数: %d\n", gl.GetFeatureCount())
+	fmt.Printf("  几何类型: %s\n", gl.GetGeometryType())
+	fmt.Printf("  字段数: %d\n", gl.GetFieldCount())
+}
+
+// PrintFieldsInfo 仅打印字段信息
+func (gl *GDALLayer) PrintFieldsInfo() {
+	fmt.Printf("字段信息:\n")
+	fieldCount := gl.GetFieldCount()
+	defn := gl.GetLayerDefn()
+
+	for i := 0; i < fieldCount; i++ {
+		fieldDefn := C.OGR_FD_GetFieldDefn(defn, C.int(i))
+		if fieldDefn == nil {
+			continue
+		}
+
+		fieldName := C.GoString(C.OGR_Fld_GetNameRef(fieldDefn))
+		fieldType := C.GoString(C.OGR_GetFieldTypeName(C.OGR_Fld_GetType(fieldDefn)))
+		width := int(C.OGR_Fld_GetWidth(fieldDefn))
+		precision := int(C.OGR_Fld_GetPrecision(fieldDefn))
+
+		fmt.Printf("  %d. %s (%s", i+1, fieldName, fieldType)
+		if width > 0 {
+			fmt.Printf(", 宽度:%d", width)
+		}
+		if precision > 0 {
+			fmt.Printf(", 精度:%d", precision)
+		}
+		fmt.Printf(")\n")
 	}
 }
 
@@ -646,7 +883,7 @@ func (w *FileGeoWriter) WriteGDBFile(sourceLayer *GDALLayer, layerName string) e
 	InitializeGDAL()
 
 	// 获取FileGDB驱动
-	driver := C.OGRGetDriverByName(C.CString("FileGDB"))
+	driver := C.OGRGetDriverByName(C.CString("OpenFileGDB"))
 	if driver == nil {
 		// 如果FileGDB驱动不可用，尝试OpenFileGDB驱动（但OpenFileGDB通常是只读的）
 		return fmt.Errorf("无法获取FileGDB驱动（需要FileGDB驱动支持写入）")
@@ -719,9 +956,19 @@ func (w *FileGeoWriter) WriteLayer(sourceLayer *GDALLayer, layerName string) err
 	}
 }
 
-// copyFieldDefinitions 复制字段定义
+// copyFieldDefinitions 复制字段定义（改进版）
 func (w *FileGeoWriter) copyFieldDefinitions(sourceDefn C.OGRFeatureDefnH, targetLayer C.OGRLayerH) error {
 	fieldCount := int(C.OGR_FD_GetFieldCount(sourceDefn))
+
+	// GDB保留字段名列表
+	reservedFields := map[string]bool{
+		"objectid":   true,
+		"shape":      true,
+		"shape_area": true,
+		"shape_length": true,
+		"fid":        true,
+		"oid":        true,
+	}
 
 	for i := 0; i < fieldCount; i++ {
 		sourceFieldDefn := C.OGR_FD_GetFieldDefn(sourceDefn, C.int(i))
@@ -729,13 +976,30 @@ func (w *FileGeoWriter) copyFieldDefinitions(sourceDefn C.OGRFeatureDefnH, targe
 			continue
 		}
 
-		// 创建新的字段定义
-		fieldName := C.OGR_Fld_GetNameRef(sourceFieldDefn)
+		// 获取原始字段名
+		originalName := C.GoString(C.OGR_Fld_GetNameRef(sourceFieldDefn))
 		fieldType := C.OGR_Fld_GetType(sourceFieldDefn)
 
-		newFieldDefn := C.OGR_Fld_Create(fieldName, fieldType)
+		// 检查是否为保留字段，如果是则跳过
+		if reservedFields[strings.ToLower(originalName)] {
+			fmt.Printf("跳过保留字段: %s\n", originalName)
+			continue
+		}
+
+		// 处理字段名（确保符合GDB命名规范）
+		fieldName := w.sanitizeFieldName(originalName)
+
+		// 处理字段类型（确保与GDB兼容）
+		targetFieldType := w.mapFieldTypeForGDB(fieldType, w.FileType)
+
+		// 创建新的字段定义
+		cFieldName := C.CString(fieldName)
+		defer C.free(unsafe.Pointer(cFieldName))
+
+		newFieldDefn := C.OGR_Fld_Create(cFieldName, targetFieldType)
 		if newFieldDefn == nil {
-			return fmt.Errorf("无法创建字段定义")
+			fmt.Printf("警告: 无法创建字段定义 %s，跳过\n", fieldName)
+			continue
 		}
 
 		// 复制字段属性
@@ -743,15 +1007,58 @@ func (w *FileGeoWriter) copyFieldDefinitions(sourceDefn C.OGRFeatureDefnH, targe
 		C.OGR_Fld_SetPrecision(newFieldDefn, C.OGR_Fld_GetPrecision(sourceFieldDefn))
 
 		// 添加字段到目标图层
-		if C.OGR_L_CreateField(targetLayer, newFieldDefn, C.int(1)) != C.OGRERR_NONE {
-			C.OGR_Fld_Destroy(newFieldDefn)
-			return fmt.Errorf("无法创建字段: %s", C.GoString(fieldName))
+		result := C.OGR_L_CreateField(targetLayer, newFieldDefn, C.int(1))
+		if result != C.OGRERR_NONE {
+			fmt.Printf("警告: 无法创建字段 %s (错误代码: %d)，跳过\n", fieldName, int(result))
 		}
 
 		C.OGR_Fld_Destroy(newFieldDefn)
 	}
 
 	return nil
+}
+
+// sanitizeFieldName 清理字段名以符合目标格式要求
+func (w *FileGeoWriter) sanitizeFieldName(name string) string {
+	// 移除特殊字符，替换为下划线
+	sanitized := strings.ReplaceAll(name, " ", "_")
+	sanitized = strings.ReplaceAll(sanitized, "-", "_")
+	sanitized = strings.ReplaceAll(sanitized, ".", "_")
+
+	// 确保字段名不以数字开头
+	if len(sanitized) > 0 && sanitized[0] >= '0' && sanitized[0] <= '9' {
+		sanitized = "f_" + sanitized
+	}
+
+	// 限制字段名长度（Shapefile限制为10个字符）
+	if w.FileType == "shp" && len(sanitized) > 10 {
+		sanitized = sanitized[:10]
+	}
+
+	return sanitized
+}
+
+// mapFieldTypeForGDB 映射字段类型以兼容目标格式
+func (w *FileGeoWriter) mapFieldTypeForGDB(sourceType C.OGRFieldType, targetFormat string) C.OGRFieldType {
+	switch sourceType {
+	case C.OFTInteger64:
+		// GDB可能不完全支持64位整数，转换为双精度浮点数
+		if targetFormat == "gdb" {
+			return C.OFTReal
+		}
+		return sourceType
+
+	case C.OFTBinary:
+		// 二进制字段转换为字符串
+		return C.OFTString
+
+	case C.OFTIntegerList, C.OFTRealList, C.OFTStringList:
+		// 列表类型转换为字符串
+		return C.OFTString
+
+	default:
+		return sourceType
+	}
 }
 
 // copyFeatures 复制要素（跳过错误要素）
@@ -773,7 +1080,7 @@ func (w *FileGeoWriter) copyFeatures(sourceLayer *GDALLayer, targetLayer C.OGRLa
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Printf("要素 %d 处理时发生panic，跳过: %v\n", totalFeatures, r)
+
 					errorCount++
 				}
 				// 确保源要素被释放
@@ -782,7 +1089,7 @@ func (w *FileGeoWriter) copyFeatures(sourceLayer *GDALLayer, targetLayer C.OGRLa
 
 			// 尝试复制要素
 			if err := w.copyFeatureSafely(sourceFeature, targetLayer, targetDefn); err != nil {
-				fmt.Printf("要素 %d 复制失败，跳过: %v\n", totalFeatures, err)
+
 				errorCount++
 			} else {
 				successCount++
@@ -790,7 +1097,7 @@ func (w *FileGeoWriter) copyFeatures(sourceLayer *GDALLayer, targetLayer C.OGRLa
 		}()
 	}
 
-	fmt.Printf("要素复制完成 - 总计: %d, 成功: %d, 错误: %d\n",
+	fmt.Printf("要素复制完成 - 总计: %d, 成功: %d, 过滤非几何要素: %d\n",
 		totalFeatures, successCount, errorCount)
 
 	return nil
@@ -831,36 +1138,57 @@ func (w *FileGeoWriter) copyFeatureSafely(sourceFeature C.OGRFeatureH, targetLay
 	return nil
 }
 
-// copyGeometrySafely 安全地复制几何
+// 修改copyGeometrySafely方法以使用normalizeGeometryType
 func (w *FileGeoWriter) copyGeometrySafely(sourceFeature, newFeature C.OGRFeatureH) error {
 	geometry := C.OGR_F_GetGeometryRef(sourceFeature)
 	if geometry == nil {
-		// 几何为空，这是允许的
 		return nil
 	}
 
+	// 获取目标图层的几何类型
+	targetDefn := C.OGR_F_GetDefnRef(newFeature)
+	targetGeomType := C.OGR_FD_GetGeomType(targetDefn)
+
 	// 检查几何是否有效
 	if C.OGR_G_IsValid(geometry) == 0 {
-		// 尝试修复几何
 		validGeom := C.OGR_G_MakeValid(geometry)
 		if validGeom != nil {
 			defer C.OGR_G_DestroyGeometry(validGeom)
 			if C.OGR_G_IsValid(validGeom) != 0 {
-				clonedGeom := C.OGR_G_Clone(validGeom)
-				if clonedGeom != nil {
-					C.OGR_F_SetGeometry(newFeature, clonedGeom)
-					C.OGR_G_DestroyGeometry(clonedGeom)
-					return nil
-				}
+				geometry = validGeom
+			} else {
+				return fmt.Errorf("几何无效且无法修复")
 			}
+		} else {
+			return fmt.Errorf("几何无效且无法修复")
 		}
-		return fmt.Errorf("几何无效且无法修复")
 	}
 
-	// 克隆几何
-	clonedGeom := C.OGR_G_Clone(geometry)
+	// 使用normalizeGeometryType进行几何类型规范化
+	normalizedGeom := C.normalizeGeometryType(geometry, targetGeomType)
+	if normalizedGeom == nil {
+		return fmt.Errorf("无法规范化几何类型到目标类型: %s",
+			C.GoString(C.OGRGeometryTypeToName(targetGeomType)))
+	}
+
+	// 如果规范化产生了新的几何体，需要在使用后清理
+	shouldCleanup := (normalizedGeom != geometry)
+	if shouldCleanup {
+		defer C.OGR_G_DestroyGeometry(normalizedGeom)
+	}
+
+	// 再次验证规范化后的几何类型
+	normalizedType := C.OGR_G_GetGeometryType(normalizedGeom)
+	if !w.isGeometryTypeCompatible(normalizedType, targetGeomType) {
+		return fmt.Errorf("规范化后的几何类型 %s 仍不兼容目标类型 %s",
+			C.GoString(C.OGRGeometryTypeToName(normalizedType)),
+			C.GoString(C.OGRGeometryTypeToName(targetGeomType)))
+	}
+
+	// 克隆几何体用于设置
+	clonedGeom := C.OGR_G_Clone(normalizedGeom)
 	if clonedGeom == nil {
-		return fmt.Errorf("无法克隆几何")
+		return fmt.Errorf("无法克隆规范化的几何")
 	}
 
 	// 设置几何
@@ -873,7 +1201,33 @@ func (w *FileGeoWriter) copyGeometrySafely(sourceFeature, newFeature C.OGRFeatur
 
 	return nil
 }
+// 检查几何类型兼容性
+func (w *FileGeoWriter) isGeometryTypeCompatible(sourceType, targetType C.OGRwkbGeometryType) bool {
+	// 完全匹配
+	if sourceType == targetType {
+		return true
+	}
 
+	// 检查兼容的类型组合
+	compatiblePairs := map[C.OGRwkbGeometryType][]C.OGRwkbGeometryType{
+		C.wkbPolygon: {C.wkbPolygon, C.wkbMultiPolygon, C.wkbPolygon25D, C.wkbMultiPolygon25D},
+		C.wkbMultiPolygon: {C.wkbPolygon, C.wkbMultiPolygon, C.wkbPolygon25D, C.wkbMultiPolygon25D},
+		C.wkbLineString: {C.wkbLineString, C.wkbMultiLineString, C.wkbLineString25D, C.wkbMultiLineString25D},
+		C.wkbMultiLineString: {C.wkbLineString, C.wkbMultiLineString, C.wkbLineString25D, C.wkbMultiLineString25D},
+		C.wkbPoint: {C.wkbPoint, C.wkbMultiPoint, C.wkbPoint25D, C.wkbMultiPoint25D},
+		C.wkbMultiPoint: {C.wkbPoint, C.wkbMultiPoint, C.wkbPoint25D, C.wkbMultiPoint25D},
+	}
+
+	if compatibleTypes, exists := compatiblePairs[targetType]; exists {
+		for _, compatibleType := range compatibleTypes {
+			if sourceType == compatibleType {
+				return true
+			}
+		}
+	}
+
+	return false
+}
 // removeShapeFiles 删除Shapefile相关文件
 func (w *FileGeoWriter) removeShapeFiles() {
 	baseName := strings.TrimSuffix(w.FilePath, filepath.Ext(w.FilePath))
@@ -887,29 +1241,224 @@ func (w *FileGeoWriter) removeShapeFiles() {
 	}
 }
 
-// 便捷函数
-// copyFieldsSafely 安全地复制字段
+// copyFieldsSafely 安全地复制字段（修复版 - 按字段名匹配）
 func (w *FileGeoWriter) copyFieldsSafely(sourceFeature, newFeature C.OGRFeatureH) error {
-	fieldCount := int(C.OGR_F_GetFieldCount(sourceFeature))
+	// 获取源要素和目标要素的定义
+	sourceDefn := C.OGR_F_GetDefnRef(sourceFeature)
+	targetDefn := C.OGR_F_GetDefnRef(newFeature)
 
-	for i := 0; i < fieldCount; i++ {
-		// 检查字段是否设置
-		if C.OGR_F_IsFieldSet(sourceFeature, C.int(i)) == 0 {
+	if sourceDefn == nil || targetDefn == nil {
+		return fmt.Errorf("无法获取要素定义")
+	}
+
+	sourceFieldCount := int(C.OGR_FD_GetFieldCount(sourceDefn))
+	targetFieldCount := int(C.OGR_FD_GetFieldCount(targetDefn))
+
+	// 创建字段名到索引的映射
+	targetFieldMap := make(map[string]int)
+	for i := 0; i < targetFieldCount; i++ {
+		fieldDefn := C.OGR_FD_GetFieldDefn(targetDefn, C.int(i))
+		if fieldDefn != nil {
+			fieldName := C.GoString(C.OGR_Fld_GetNameRef(fieldDefn))
+			targetFieldMap[fieldName] = i
+		}
+	}
+
+	// GDB保留字段名列表（需要跳过的字段）
+	reservedFields := map[string]bool{
+		"objectid":     true,
+		"shape":        true,
+		"shape_area":   true,
+		"shape_length": true,
+		"fid":          true,
+		"oid":          true,
+	}
+
+	// 遍历源字段，按字段名匹配复制
+	for sourceIndex := 0; sourceIndex < sourceFieldCount; sourceIndex++ {
+		// 检查源字段是否设置
+		if C.OGR_F_IsFieldSet(sourceFeature, C.int(sourceIndex)) == 0 {
 			continue
 		}
 
-		// 获取字段定义
-		fieldDefn := C.OGR_F_GetFieldDefnRef(sourceFeature, C.int(i))
-		if fieldDefn == nil {
+		// 获取源字段定义
+		sourceFieldDefn := C.OGR_FD_GetFieldDefn(sourceDefn, C.int(sourceIndex))
+		if sourceFieldDefn == nil {
 			continue
 		}
 
-		fieldType := C.OGR_Fld_GetType(fieldDefn)
+		// 获取源字段名
+		originalFieldName := C.GoString(C.OGR_Fld_GetNameRef(sourceFieldDefn))
 
-		// 根据字段类型安全地复制值
-		if err := w.copyFieldValueSafely(sourceFeature, newFeature, i, fieldType); err != nil {
-			fmt.Printf("字段 %d 复制失败，跳过: %v\n", i, err)
+		// 跳过保留字段
+		if reservedFields[strings.ToLower(originalFieldName)] {
+			continue
+		}
+
+		// 处理字段名（与copyFieldDefinitions中的处理保持一致）
+		sanitizedFieldName := w.sanitizeFieldName(originalFieldName)
+
+		// 查找目标字段索引
+		targetIndex, exists := targetFieldMap[sanitizedFieldName]
+		if !exists {
+			// 如果找不到对应的目标字段，跳过
+			fmt.Printf("警告: 目标图层中未找到字段 '%s'（原字段名: '%s'），跳过\n",
+				sanitizedFieldName, originalFieldName)
+			continue
+		}
+
+		// 获取源字段类型
+		sourceFieldType := C.OGR_Fld_GetType(sourceFieldDefn)
+
+		// 获取目标字段类型
+		targetFieldDefn := C.OGR_FD_GetFieldDefn(targetDefn, C.int(targetIndex))
+		if targetFieldDefn == nil {
+			continue
+		}
+		targetFieldType := C.OGR_Fld_GetType(targetFieldDefn)
+
+		// 复制字段值（使用目标字段索引）
+		if err := w.copyFieldValueSafelyByName(sourceFeature, newFeature,
+			sourceIndex, targetIndex, sourceFieldType, targetFieldType,
+			originalFieldName); err != nil {
+			fmt.Printf("字段 '%s' 复制失败，跳过: %v\n", originalFieldName, err)
 			// 不返回错误，继续处理其他字段
+		}
+	}
+
+	return nil
+}
+
+// copyFieldValueSafelyByName 按字段名安全地复制字段值
+func (w *FileGeoWriter) copyFieldValueSafelyByName(sourceFeature, newFeature C.OGRFeatureH,
+	sourceIndex, targetIndex int, sourceFieldType, targetFieldType C.OGRFieldType,
+	fieldName string) error {
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("字段 '%s' 值复制时发生panic: %v\n", fieldName, r)
+		}
+	}()
+
+	// 如果源字段类型和目标字段类型不同，进行类型转换
+	if sourceFieldType != targetFieldType {
+		return w.copyFieldValueWithTypeConversion(sourceFeature, newFeature,
+			sourceIndex, targetIndex, sourceFieldType, targetFieldType, fieldName)
+	}
+
+	// 类型相同时的直接复制
+	switch sourceFieldType {
+	case C.OFTInteger:
+		value := C.OGR_F_GetFieldAsInteger(sourceFeature, C.int(sourceIndex))
+		C.OGR_F_SetFieldInteger(newFeature, C.int(targetIndex), value)
+
+	case C.OFTInteger64:
+		value := C.OGR_F_GetFieldAsInteger64(sourceFeature, C.int(sourceIndex))
+		C.OGR_F_SetFieldInteger64(newFeature, C.int(targetIndex), value)
+
+	case C.OFTReal:
+		value := C.OGR_F_GetFieldAsDouble(sourceFeature, C.int(sourceIndex))
+		// 检查是否为无效数值
+		if C.check_isnan(C.double(value)) != 0 || C.check_isinf(C.double(value)) != 0 {
+			return fmt.Errorf("字段包含无效数值 (NaN 或 Inf)")
+		}
+		C.OGR_F_SetFieldDouble(newFeature, C.int(targetIndex), value)
+
+	case C.OFTString:
+		value := C.OGR_F_GetFieldAsString(sourceFeature, C.int(sourceIndex))
+		if value == nil {
+			return fmt.Errorf("字符串字段为空指针")
+		}
+		C.OGR_F_SetFieldString(newFeature, C.int(targetIndex), value)
+
+	case C.OFTDate:
+		var year, month, day, hour, minute, second, tzflag C.int
+		result := C.OGR_F_GetFieldAsDateTime(sourceFeature, C.int(sourceIndex),
+			&year, &month, &day, &hour, &minute, &second, &tzflag)
+		if result != 0 {
+			C.OGR_F_SetFieldDateTime(newFeature, C.int(targetIndex),
+				year, month, day, hour, minute, second, tzflag)
+		}
+
+	case C.OFTTime:
+		var year, month, day, hour, minute, second, tzflag C.int
+		result := C.OGR_F_GetFieldAsDateTime(sourceFeature, C.int(sourceIndex),
+			&year, &month, &day, &hour, &minute, &second, &tzflag)
+		if result != 0 {
+			C.OGR_F_SetFieldDateTime(newFeature, C.int(targetIndex),
+				year, month, day, hour, minute, second, tzflag)
+		}
+
+	case C.OFTDateTime:
+		var year, month, day, hour, minute, second, tzflag C.int
+		result := C.OGR_F_GetFieldAsDateTime(sourceFeature, C.int(sourceIndex),
+			&year, &month, &day, &hour, &minute, &second, &tzflag)
+		if result != 0 {
+			C.OGR_F_SetFieldDateTime(newFeature, C.int(targetIndex),
+				year, month, day, hour, minute, second, tzflag)
+		}
+
+	default:
+		// 对于不支持的字段类型，尝试作为字符串处理
+		value := C.OGR_F_GetFieldAsString(sourceFeature, C.int(sourceIndex))
+		if value != nil {
+			C.OGR_F_SetFieldString(newFeature, C.int(targetIndex), value)
+		}
+	}
+
+	return nil
+}
+
+// copyFieldValueWithTypeConversion 带类型转换的字段值复制
+func (w *FileGeoWriter) copyFieldValueWithTypeConversion(sourceFeature, newFeature C.OGRFeatureH,
+	sourceIndex, targetIndex int, sourceFieldType, targetFieldType C.OGRFieldType,
+	fieldName string) error {
+
+	// 处理常见的类型转换情况
+	switch {
+	case sourceFieldType == C.OFTInteger64 && targetFieldType == C.OFTReal:
+		// Integer64 -> Real
+		value := C.OGR_F_GetFieldAsInteger64(sourceFeature, C.int(sourceIndex))
+		C.OGR_F_SetFieldDouble(newFeature, C.int(targetIndex), C.double(value))
+
+	case sourceFieldType == C.OFTInteger && targetFieldType == C.OFTReal:
+		// Integer -> Real
+		value := C.OGR_F_GetFieldAsInteger(sourceFeature, C.int(sourceIndex))
+		C.OGR_F_SetFieldDouble(newFeature, C.int(targetIndex), C.double(value))
+
+	case sourceFieldType == C.OFTReal && targetFieldType == C.OFTInteger:
+		// Real -> Integer (可能丢失精度)
+		value := C.OGR_F_GetFieldAsDouble(sourceFeature, C.int(sourceIndex))
+		if C.check_isnan(C.double(value)) != 0 || C.check_isinf(C.double(value)) != 0 {
+			return fmt.Errorf("无法将无效数值转换为整数")
+		}
+		C.OGR_F_SetFieldInteger(newFeature, C.int(targetIndex), C.int(value))
+
+	case sourceFieldType == C.OFTReal && targetFieldType == C.OFTInteger64:
+		// Real -> Integer64 (可能丢失精度)
+		value := C.OGR_F_GetFieldAsDouble(sourceFeature, C.int(sourceIndex))
+		if C.check_isnan(C.double(value)) != 0 || C.check_isinf(C.double(value)) != 0 {
+			return fmt.Errorf("无法将无效数值转换为整数")
+		}
+		C.OGR_F_SetFieldInteger64(newFeature, C.int(targetIndex), C.longlong(value))
+
+	case targetFieldType == C.OFTString:
+		// 任何类型 -> String
+		value := C.OGR_F_GetFieldAsString(sourceFeature, C.int(sourceIndex))
+		if value != nil {
+			C.OGR_F_SetFieldString(newFeature, C.int(targetIndex), value)
+		}
+
+	default:
+		// 不支持的类型转换，尝试作为字符串处理
+		fmt.Printf("警告: 字段 '%s' 类型转换不支持 (%s -> %s)，尝试作为字符串处理\n",
+			fieldName,
+			C.GoString(C.OGR_GetFieldTypeName(sourceFieldType)),
+			C.GoString(C.OGR_GetFieldTypeName(targetFieldType)))
+
+		value := C.OGR_F_GetFieldAsString(sourceFeature, C.int(sourceIndex))
+		if value != nil {
+			C.OGR_F_SetFieldString(newFeature, C.int(targetIndex), value)
 		}
 	}
 

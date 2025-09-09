@@ -18,16 +18,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package Gogeo
 
 /*
-#cgo windows CFLAGS: -IC:/OSGeo4W/include -IC:/OSGeo4W/include/gdal
+#cgo windows CFLAGS: -IC:/OSGeo4W/include -IC:/OSGeo4W/include/gdal -Wno-unused-result
 #cgo windows LDFLAGS: -LC:/OSGeo4W/lib -lgdal_i -lstdc++ -static-libgcc -static-libstdc++
-#cgo linux CFLAGS: -I/usr/include/gdal
+#cgo linux CFLAGS: -I/usr/include/gdal -Wno-unused-result
 #cgo linux LDFLAGS: -L/usr/lib -lgdal -lstdc++
-#cgo android CFLAGS: -I/data/data/com.termux/files/usr/include
+#cgo android CFLAGS: -I/data/data/com.termux/files/usr/include -Wno-unused-result
 #cgo android LDFLAGS: -L/data/data/com.termux/files/usr/lib -lgdal
 #include "osgeo_utils.h"
 
 // 初始化GDAL并修复PROJ配置问题
-void initializeGDALWithProjFix(const char* projDataPath) {
+void initializeGDALWithProjFix(const char* projDataPath, const char* shapeEncoding) {
     // 动态设置PROJ数据路径，支持自定义路径
     if (projDataPath && strlen(projDataPath) > 0) {
         CPLSetConfigOption("PROJ_DATA", projDataPath);      // 设置PROJ数据目录
@@ -38,11 +38,16 @@ void initializeGDALWithProjFix(const char* projDataPath) {
     CPLSetConfigOption("OSR_DEFAULT_AXIS_MAPPING_STRATEGY", "TRADITIONAL_GIS_ORDER");
 
 
-
+    // 动态设置Shapefile编码，支持不同字符集
+    if (shapeEncoding && strlen(shapeEncoding) > 0) {
+        CPLSetConfigOption("SHAPE_ENCODING", shapeEncoding); // 设置Shapefile文件编码
+    }
+	CPLSetErrorHandler(CPLQuietErrorHandler);
     // 注册所有GDAL驱动程序，启用栅格数据支持
     GDALAllRegister();
     // 注册所有OGR驱动程序，启用矢量数据支持
     OGRRegisterAll();
+
 }
 
 // 创建EPSG:4490坐标系并设置正确的轴顺序
@@ -242,14 +247,19 @@ func InitializeGDAL() error {
 		}
 	}
 
+	// 如果未指定编码，使用默认编码
+	shapeEncoding := ""
+
 	// 转换Go字符串为C字符串
 	cProjPath := C.CString(projDataPath)
+	cEncoding := C.CString(shapeEncoding)
 
 	// 确保C字符串资源被释放
 	defer C.free(unsafe.Pointer(cProjPath))
+	defer C.free(unsafe.Pointer(cEncoding))
 
 	// 调用C函数初始化GDAL
-	C.initializeGDALWithProjFix(cProjPath)
+	C.initializeGDALWithProjFix(cProjPath, cEncoding)
 
 	return nil // 初始化成功
 }

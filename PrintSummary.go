@@ -27,8 +27,8 @@ import (
 
 // 打印相交分析摘要
 func (result *GeosAnalysisResult) PrintIntersectionSummary() {
-	fmt.Printf("\n=== 空间相交分析结果摘要 ===\n")
-	fmt.Printf("相交要素数量: %d\n", result.ResultCount)
+	fmt.Printf("\n=== 空间分析结果摘要 ===\n")
+	fmt.Printf("要素数量: %d\n", result.ResultCount)
 
 	if result.OutputLayer != nil {
 		fmt.Printf("结果图层字段数量: %d\n", result.OutputLayer.GetFieldCount())

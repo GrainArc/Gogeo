@@ -33,98 +33,117 @@ import "C"
 import (
 	"fmt"
 	"runtime"
-	"sync"
+	"log"
+	"github.com/google/uuid"
+	"sync/atomic"
 	"time"
+	"sync"
 	"unsafe"
 )
 
 // SpatialClipAnalysis并行空间裁剪分析
-func SpatialClipAnalysis(layer1, layer2 *GDALLayer, config *ParallelGeosConfig) (*GeosAnalysisResult, error) {
+func SpatialClipAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGeosConfig) (*GeosAnalysisResult, error) {
 
-	defer layer1.Close()
+	defer inputLayer.Close()
+	defer methodlayer.Close()
 
-	defer layer2.Close()
 
-	// 执行并行裁剪分析
-	table1 := layer1.GetLayerName()
-	table2 := layer2.GetLayerName()
-	resultLayer, err := performParallelClipAnalysis(layer1, layer2, table1, table2, config)
+	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	if err != nil {
+		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
+	}
+	//执行裁剪分析
+	resultLayer, err := performParallelClipAnalysis(inputLayer, methodlayer, config)
 	if err != nil {
 		return nil, fmt.Errorf("执行并行裁剪分析失败: %v", err)
 	}
 
-	// 计算结果数量
 	resultCount := resultLayer.GetFeatureCount()
 
-	return &GeosAnalysisResult{
-		OutputLayer: resultLayer,
-		ResultCount: resultCount,
-	}, nil
-}
+	if config.IsMergeTile == true {
+		unionResult, err := performUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
+		if err != nil {
+			return nil, fmt.Errorf("执行融合操作失败: %v", err)
+		}
 
-func performParallelClipAnalysis(layer1, layer2 *GDALLayer, table1Name, table2Name string, config *ParallelGeosConfig) (*GDALLayer, error) {
-	// 获取数据范围 - 主要基于输入图层的范围
-	extent, err := getInputLayerExtent(layer1)
-	if err != nil {
-		return nil, fmt.Errorf("获取输入图层范围失败: %v", err)
+		fmt.Printf("融合操作完成，最终生成 %d 个要素\n", unionResult.ResultCount)
+		// 删除临时的字段
+		err = deleteFieldFromLayer(unionResult.OutputLayer, "gogeo_analysis_id")
+		if err != nil {
+			fmt.Printf("警告: 删除临时标识字段失败: %v\n", err)
+		}
+		return unionResult, nil
+	} else {
+
+		return &GeosAnalysisResult{
+			OutputLayer: resultLayer,
+			ResultCount: resultCount,
+		}, nil
 	}
 
-	// 创建分块
-	tiles := createTiles(extent, config.TileCount, config.BufferDistance)
-	fmt.Printf("创建了 %d 个分块进行并行处理\n", len(tiles))
+}
 
-	// 创建结果图层 - 基于输入图层结构
-	resultLayer, err := createClipResultLayer(layer1, layer2, table1Name, table2Name)
+func performParallelClipAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelGeosConfig) (*GDALLayer, error) {
+	if config.PrecisionConfig != nil {
+		// 创建内存副本
+		inputMemLayer, err := createMemoryLayerCopy(inputLayer, "input_mem_layer")
+		if err != nil {
+			return nil, fmt.Errorf("创建输入图层内存副本失败: %v", err)
+		}
+
+		methodMemLayer, err := createMemoryLayerCopy(methodLayer, "erase_mem_layer")
+		if err != nil {
+			inputMemLayer.Close()
+			return nil, fmt.Errorf("创建擦除图层内存副本失败: %v", err)
+		}
+
+		// 在内存图层上设置精度
+		if config.PrecisionConfig.Enabled {
+			flags := config.PrecisionConfig.getFlags()
+			gridSize := C.double(config.PrecisionConfig.GridSize)
+
+			C.setLayerGeometryPrecision(inputMemLayer.layer, gridSize, flags)
+			C.setLayerGeometryPrecision(methodMemLayer.layer, gridSize, flags)
+		}
+
+
+		// 使用内存图层进行后续处理
+		inputLayer = inputMemLayer
+		methodLayer = methodMemLayer
+	}
+	resultLayer, err := createClipResultLayer(inputLayer, methodLayer)
 	if err != nil {
 		return nil, fmt.Errorf("创建结果图层失败: %v", err)
 	}
-
-	// 为每个工作线程创建图层副本
-	layer1Copies, layer2Copies, err := createLayerCopies(layer1, layer2, config.MaxWorkers)
+	taskid := uuid.New().String()
+	//对A B图层进行分块,并创建bin文件
+	GenerateTiles(inputLayer,methodLayer,config.TileCount,taskid)
+	//读取文件列表，并发执行操作
+	GPbins ,err:= ReadAndGroupBinFiles(taskid)
 	if err != nil {
-		return nil, fmt.Errorf("创建图层副本失败: %v", err)
+		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
-	defer cleanupLayerCopies(layer1Copies, layer2Copies)
-
-	// 并行处理分块
-	err = processClipTilesInParallelSafe(layer1Copies, layer2Copies, resultLayer, tiles, table1Name, table2Name, config)
+	// 并发执行分析
+	err = executeConcurrentClipAnalysis(GPbins, resultLayer, config)
 	if err != nil {
-		return nil, fmt.Errorf("并行处理分块失败: %v", err)
+		resultLayer.Close()
+		return nil, fmt.Errorf("并发擦除分析失败: %v", err)
 	}
+	// 清理临时文件
+	defer func() {
+		err := cleanupTileFiles(taskid)
+		if err != nil {
+			log.Printf("清理临时文件失败: %v", err)
+		}
+	}()
 
-	resultCount := resultLayer.GetFeatureCount()
-	fmt.Printf("并行裁剪分析完成，共生成 %d 个裁剪要素\n", resultCount)
 
 	return resultLayer, nil
 }
 
-// getInputLayerExtent 获取输入图层的范围
-func getInputLayerExtent(layer *GDALLayer) (*Extent, error) {
-	type OGREnvelope struct {
-		MinX C.double
-		MaxX C.double
-		MinY C.double
-		MaxY C.double
-	}
-
-	var extent OGREnvelope
-
-	// 获取输入图层的范围
-	err := C.OGR_L_GetExtent(layer.layer, (*C.OGREnvelope)(unsafe.Pointer(&extent)), 1)
-	if err != C.OGRERR_NONE {
-		return nil, fmt.Errorf("获取输入图层范围失败，错误代码: %d", int(err))
-	}
-
-	return &Extent{
-		MinX: float64(extent.MinX),
-		MaxX: float64(extent.MaxX),
-		MinY: float64(extent.MinY),
-		MaxY: float64(extent.MaxY),
-	}, nil
-}
 
 // createClipResultLayer 创建裁剪结果图层
-func createClipResultLayer(layer1, layer2 *GDALLayer, table1Name, table2Name string) (*GDALLayer, error) {
+func createClipResultLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
 	layerName := C.CString("clip_result")
 	defer C.free(unsafe.Pointer(layerName))
 
@@ -142,7 +161,7 @@ func createClipResultLayer(layer1, layer2 *GDALLayer, table1Name, table2Name str
 	runtime.SetFinalizer(resultLayer, (*GDALLayer).cleanup)
 
 	// 根据策略添加字段定义 - 裁剪通常保留输入图层的字段
-	err := addClipFieldsBasedOnStrategy(resultLayer, layer1, layer2, table1Name, table2Name)
+	err := addLayerFields(resultLayer, layer1, "")
 	if err != nil {
 		resultLayer.Close()
 		return nil, fmt.Errorf("添加字段失败: %v", err)
@@ -151,181 +170,201 @@ func createClipResultLayer(layer1, layer2 *GDALLayer, table1Name, table2Name str
 	return resultLayer, nil
 }
 
-// addClipFieldsBasedOnStrategy 根据策略添加裁剪字段
-func addClipFieldsBasedOnStrategy(resultLayer, layer1, layer2 *GDALLayer, table1Name, table2Name string) error {
-	return addLayerFields(resultLayer, layer1, "")
-}
 
-// processClipTilesInParallelSafe 并行处理裁剪分块
-func processClipTilesInParallelSafe(layer1Copies, layer2Copies []*GDALLayer, resultLayer *GDALLayer, tiles []*TileInfo, table1Name, table2Name string, config *ParallelGeosConfig) error {
-	// 创建工作池
-	tilesChan := make(chan *TileInfo, len(tiles))
-	resultsChan := make(chan *TileResult, len(tiles))
+func executeConcurrentClipAnalysis(tileGroups []GroupTileFiles, resultLayer *GDALLayer, config *ParallelGeosConfig) error {
+	maxWorkers := config.MaxWorkers
+	if maxWorkers <= 0 {
+		maxWorkers = runtime.NumCPU()
+	}
 
-	// 启动工作协程
+	totalTasks := len(tileGroups)
+	if totalTasks == 0 {
+		return fmt.Errorf("没有分块需要处理")
+	}
+
+
+
+	// 创建任务队列和结果队列
+	taskQueue := make(chan GroupTileFiles, totalTasks)
+	results := make(chan taskResult, totalTasks)
+
+	// 启动固定数量的工作协程
 	var wg sync.WaitGroup
-	for i := 0; i < config.MaxWorkers; i++ {
+	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			processClipTileWorkerSafe(workerID, layer1Copies[workerID], layer2Copies[workerID], table1Name, table2Name, config.PrecisionConfig, tilesChan, resultsChan)
-		}(i)
+		go worker_clip(i, taskQueue, results, config, &wg)
 	}
 
-	// 发送分块任务
+	// 发送所有任务到队列
 	go func() {
-		defer close(tilesChan)
-		for _, tile := range tiles {
-			tilesChan <- tile
+		for _, tileGroup := range tileGroups {
+			taskQueue <- tileGroup
 		}
+		close(taskQueue) // 关闭任务队列，通知工作协程没有更多任务
 	}()
 
-	// 收集结果
+	// 启动结果收集协程
+	var resultWg sync.WaitGroup
+	resultWg.Add(1)
+	var processingError error
+	completed := 0
+
 	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
+		defer resultWg.Done()
 
-	// 使用边界要素去重的结果收集函数
-	return collectAndMergeResultsWithBorderDeduplication(resultsChan, resultLayer, len(tiles), config.ProgressCallback)
-}
+		var totalDuration time.Duration
+		var minDuration, maxDuration time.Duration
 
-// processClipTileWorkerSafe 裁剪分块工作协程
-func processClipTileWorkerSafe(workerID int, layer1Copy, layer2Copy *GDALLayer, table1Name, table2Name string, precisionConfig *GeometryPrecisionConfig, tilesChan <-chan *TileInfo, resultsChan chan<- *TileResult) {
-	for tile := range tilesChan {
-		startTime := time.Now()
+		for i := 0; i < totalTasks; i++ {
+			result := <-results
+			completed++
 
-		result := &TileResult{
-			TileIndex:        tile.Index,
-			InteriorFeatures: make([]C.OGRFeatureH, 0),
-			BorderFeatures:   make([]C.OGRFeatureH, 0),
-		}
+			if result.err != nil {
+				processingError = fmt.Errorf("分块 %d 处理失败: %v", result.index, result.err)
+				log.Printf("错误: %v", processingError)
+				return
+			}
 
-		// 处理单个分块，传入精度配置
-		interiorFeatures, borderFeatures, err := processSingleClipTileWithBorderDetection(layer1Copy, layer2Copy, tile, workerID, table1Name, table2Name, precisionConfig)
-		if err != nil {
-			result.Error = fmt.Errorf("工作协程 %d 处理裁剪分块 %d 失败: %v", workerID, tile.Index, err)
-		} else {
-			result.InteriorFeatures = interiorFeatures
-			result.BorderFeatures = borderFeatures
-		}
-
-		result.ProcessTime = time.Since(startTime)
-		resultsChan <- result
-
-		// 清理分块几何体
-		if tile.Envelope != nil {
-			C.OGR_G_DestroyGeometry(tile.Envelope)
-			tile.Envelope = nil
-		}
-	}
-}
-
-// processSingleClipTileWithBorderDetection 处理单个裁剪分块并检测边界要素
-func processSingleClipTileWithBorderDetection(
-	layer1Copy, layer2Copy *GDALLayer, tile *TileInfo, workerID int, table1Name, table2Name string, precisionConfig *GeometryPrecisionConfig) (
-	[]C.OGRFeatureH, []C.OGRFeatureH, error) {
-
-	// 创建当前分块的临时图层
-	tempLayer1Name := C.CString(fmt.Sprintf("temp1_worker%d_tile%d", workerID, tile.Index))
-	tempLayer2Name := C.CString(fmt.Sprintf("temp2_worker%d_tile%d", workerID, tile.Index))
-	defer C.free(unsafe.Pointer(tempLayer1Name))
-	defer C.free(unsafe.Pointer(tempLayer2Name))
-
-	srs := layer1Copy.GetSpatialRef()
-	tempLayer1Ptr := C.cloneLayerToMemory(layer1Copy.layer, tempLayer1Name)
-	tempLayer2Ptr := C.cloneLayerToMemory(layer2Copy.layer, tempLayer2Name)
-
-	if tempLayer1Ptr == nil || tempLayer2Ptr == nil {
-		if tempLayer1Ptr != nil {
-			C.OGR_L_Dereference(tempLayer1Ptr)
-		}
-		if tempLayer2Ptr != nil {
-			C.OGR_L_Dereference(tempLayer2Ptr)
-		}
-		return nil, nil, fmt.Errorf("创建临时分块图层失败")
-	}
-	defer C.OGR_L_Dereference(tempLayer1Ptr)
-	defer C.OGR_L_Dereference(tempLayer2Ptr)
-
-	// 复制过滤后的要素 - 输入图层使用空间过滤，裁剪图层可能需要更大的范围
-	count1 := C.copyFeaturesWithSpatialFilter(layer1Copy.layer, tempLayer1Ptr, tile.Envelope)
-	count2 := C.copyFeaturesWithSpatialFilter(layer2Copy.layer, tempLayer2Ptr, tile.Envelope)
-
-	if count1 == 0 {
-		// 输入图层没有要素，返回空结果
-		return []C.OGRFeatureH{}, []C.OGRFeatureH{}, nil
-	}
-
-	if count2 == 0 {
-		// 裁剪图层没有要素，可能需要保留原始要素或返回空结果
-		// 这里选择返回空结果，因为没有裁剪边界
-		return []C.OGRFeatureH{}, []C.OGRFeatureH{}, nil
-	}
-
-	// 如果启用了精度设置，对临时图层进行精度处理
-	if precisionConfig != nil && precisionConfig.Enabled && precisionConfig.GridSize > 0 {
-		flags := precisionConfig.getFlags()
-		gridSize := C.double(precisionConfig.GridSize)
-
-		// 处理两个临时图层的几何精度
-		processedCount1 := C.setLayerGeometryPrecision(tempLayer1Ptr, gridSize, flags)
-		processedCount2 := C.setLayerGeometryPrecision(tempLayer2Ptr, gridSize, flags)
-
-		fmt.Printf("分块 %d: 精度处理完成 - 输入图层: %d 要素, 裁剪图层: %d 要素\n",
-			tile.Index, int(processedCount1), int(processedCount2))
-	}
-
-	// 创建结果临时图层
-	resultTempName := C.CString(fmt.Sprintf("clip_result_worker%d_tile%d", workerID, tile.Index))
-	defer C.free(unsafe.Pointer(resultTempName))
-
-	// 保持输入图层的几何类型
-	inputGeomType := C.OGR_L_GetGeomType(tempLayer1Ptr)
-	resultTempPtr := C.createMemoryLayer(resultTempName, inputGeomType, srs)
-	if resultTempPtr == nil {
-		return nil, nil, fmt.Errorf("创建结果临时图层失败")
-	}
-	defer C.OGR_L_Dereference(resultTempPtr)
-
-	tempLayer1 := &GDALLayer{layer: tempLayer1Ptr}
-	tempLayer2 := &GDALLayer{layer: tempLayer2Ptr}
-	resultTemp := &GDALLayer{layer: resultTempPtr}
-
-	// 执行裁剪分析
-	err := executeClipWithStrategy(tempLayer1, tempLayer2, resultTemp, table1Name, table2Name, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("分块裁剪分析失败: %v", err)
-	}
-
-	// 分类收集结果要素：内部要素和边界要素
-	interiorFeatures := make([]C.OGRFeatureH, 0)
-	borderFeatures := make([]C.OGRFeatureH, 0)
-
-	resultTemp.ResetReading()
-	bufferDistance := C.double(0.001)
-
-	resultTemp.IterateFeatures(func(feature C.OGRFeatureH) {
-		isOnBorder := C.isFeatureOnBorder(feature,
-			C.double(tile.MinX), C.double(tile.MinY),
-			C.double(tile.MaxX), C.double(tile.MaxY),
-			bufferDistance)
-
-		clonedFeature := C.OGR_F_Clone(feature)
-		if clonedFeature != nil {
-			if isOnBorder == 1 {
-				borderFeatures = append(borderFeatures, clonedFeature)
+			// 统计执行时间
+			totalDuration += result.duration
+			if i == 0 {
+				minDuration = result.duration
+				maxDuration = result.duration
 			} else {
-				interiorFeatures = append(interiorFeatures, clonedFeature)
+				if result.duration < minDuration {
+					minDuration = result.duration
+				}
+				if result.duration > maxDuration {
+					maxDuration = result.duration
+				}
+			}
+
+			// 将结果合并到主图层
+			if result.layer != nil {
+				err := mergeResultsToMainLayer(result.layer, resultLayer)
+				if err != nil {
+					processingError = fmt.Errorf("合并分块 %d 结果失败: %v", result.index, err)
+					log.Printf("错误: %v", processingError)
+					return
+				}
+
+				// 释放临时图层资源
+				result.layer.Close()
+			}
+
+			// 进度回调
+			if config.ProgressCallback != nil {
+				progress := float64(completed) / float64(totalTasks)
+				avgDuration := totalDuration / time.Duration(completed)
+
+				var memStats runtime.MemStats
+				runtime.ReadMemStats(&memStats)
+
+				message := fmt.Sprintf("已完成: %d/%d, 平均耗时: %v, 内存: %.2fMB, 协程数: %d",
+					completed, totalTasks, avgDuration,
+					float64(memStats.Alloc)/1024/1024, runtime.NumGoroutine())
+
+				config.ProgressCallback(progress, message)
+			}
+
+			// 每处理50个任务输出一次详细统计
+			if completed%50 == 0 || completed == totalTasks {
+				avgDuration := totalDuration / time.Duration(completed)
+				log.Printf("进度统计 - 已完成: %d/%d, 平均耗时: %v, 最快: %v, 最慢: %v",
+					completed, totalTasks, avgDuration, minDuration, maxDuration)
 			}
 		}
-	})
 
-	return interiorFeatures, borderFeatures, nil
+		log.Printf("所有分块处理完成，总计: %d", completed)
+	}()
+
+	// 等待所有工作协程完成
+	wg.Wait()
+	close(results) // 关闭结果队列
+
+	// 等待结果收集完成
+	resultWg.Wait()
+
+	if processingError != nil {
+		return processingError
+	}
+
+	return nil
 }
 
-// executeClipWithStrategy 根据策略执行裁剪分析
-func executeClipWithStrategy(inputLayer, clipLayer, resultLayer *GDALLayer, table1Name, table2Name string, progressCallback ProgressCallback) error {
+func worker_clip(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	tasksProcessed := 0
+
+
+	for tileGroup := range taskQueue {
+
+		start := time.Now()
+
+		// 处理单个分块
+		layer, err := processTileGroupforClip(tileGroup, config)
+
+		duration := time.Since(start)
+
+		tasksProcessed++
+
+		// 发送结果
+		results <- taskResult{
+			layer:    layer,
+			err:      err,
+			duration: duration,
+			index:    tileGroup.Index,
+		}
+
+
+		// 定期强制垃圾回收
+
+		runtime.GC()
+
+	}
+
+}
+
+func processTileGroupforClip(tileGroup GroupTileFiles, config *ParallelGeosConfig) (*GDALLayer, error) {
+
+	// 加载layer1的bin文件
+	inputTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer1)
+	if err != nil {
+		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
+	}
+
+
+	// 加载layer2的bin文件
+	eraseTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
+	if err != nil {
+		return nil, fmt.Errorf("加载擦除分块文件失败: %v", err)
+	}
+	defer func() {
+		inputTileLayer.Close()
+		eraseTileLayer.Close()
+
+	}()
+
+	// 为当前分块创建临时结果图层
+	tileName := fmt.Sprintf("tile_result_%d", tileGroup.Index)
+	tileResultLayer, err := createTileResultLayer(inputTileLayer, tileName)
+	if err != nil {
+		return nil, fmt.Errorf("创建分块结果图层失败: %v", err)
+	}
+
+	// 执行裁剪分析 - 不使用进度回调
+	err = executeClipAnalysis(inputTileLayer, eraseTileLayer, tileResultLayer, nil)
+	if err != nil {
+		tileResultLayer.Close()
+		return nil, fmt.Errorf("执行擦除分析失败: %v", err)
+	}
+	return tileResultLayer, nil
+}
+
+// executeClipAnalysis 执行裁剪分析
+func executeClipAnalysis(inputLayer, eraseLayer, resultLayer *GDALLayer, progressCallback ProgressCallback) error {
+	// 设置GDAL选项
 	var options **C.char
 	defer func() {
 		if options != nil {
@@ -333,68 +372,75 @@ func executeClipWithStrategy(inputLayer, clipLayer, resultLayer *GDALLayer, tabl
 		}
 	}()
 
-	// 基本选项
 	skipFailuresOpt := C.CString("SKIP_FAILURES=YES")
 	promoteToMultiOpt := C.CString("PROMOTE_TO_MULTI=YES")
+	keepLowerDimOpt := C.CString("KEEP_LOWER_DIMENSION_GEOMETRIES=NO")
+	usePreparatedGeomOpt := C.CString("USE_PREPARED_GEOMETRIES=YES")
 	defer C.free(unsafe.Pointer(skipFailuresOpt))
 	defer C.free(unsafe.Pointer(promoteToMultiOpt))
-
+	defer C.free(unsafe.Pointer(keepLowerDimOpt))
+	defer C.free(unsafe.Pointer(usePreparatedGeomOpt))
 	options = C.CSLAddString(options, skipFailuresOpt)
 	options = C.CSLAddString(options, promoteToMultiOpt)
+	options = C.CSLAddString(options, keepLowerDimOpt)
+	options = C.CSLAddString(options, usePreparatedGeomOpt)
 
-	return executeGDALClipWithProgress(inputLayer, clipLayer, resultLayer, options, progressCallback)
+
+	// 执行擦除操作
+	return executeGDALClipWithProgress(inputLayer, eraseLayer, resultLayer, options, progressCallback)
 }
 
-// executeGDALClipWithProgress 带进度监测的GDAL裁剪分析
-func executeGDALClipWithProgress(inputLayer, clipLayer, resultLayer *GDALLayer, options **C.char, progressCallback ProgressCallback) error {
-	var progressData *ProgressData
-	var progressArg unsafe.Pointer
+// 执行函数
+func executeGDALClipWithProgress(inputLayer, methodLayer, resultLayer *GDALLayer, options **C.char, progressCallback ProgressCallback) error {
+	// 首先修复几何体拓扑
 
-	// 启用多线程处理
-	C.CPLSetConfigOption(C.CString("GDAL_NUM_THREADS"), C.CString("ALL_CPUS"))
-	defer C.CPLSetConfigOption(C.CString("GDAL_NUM_THREADS"), nil)
+	fixGeometryTopology(inputLayer)
+	fixGeometryTopology(methodLayer)
 
-	// 如果有进度回调，设置进度数据
+
+
+	var err C.OGRErr
+
 	if progressCallback != nil {
-		progressData = &ProgressData{
+		// 创建进度数据结构
+		progressData := &ProgressData{
 			callback:  progressCallback,
 			cancelled: false,
 		}
 
-		// 将进度数据存储到全局映射中
-		progressArg = unsafe.Pointer(progressData)
+		// 生成唯一ID
+		progressID := atomic.AddInt64(&progressIDCounter, 1)
+		progressKey := uintptr(progressID)
+
 		progressDataMutex.Lock()
-		progressDataMap[uintptr(progressArg)] = progressData
+		progressDataMap[progressKey] = progressData
 		progressDataMutex.Unlock()
 
-		// 确保在函数结束时清理进度数据
+		// 清理函数
 		defer func() {
 			progressDataMutex.Lock()
-			delete(progressDataMap, uintptr(progressArg))
+			delete(progressDataMap, progressKey)
 			progressDataMutex.Unlock()
 		}()
+
+		// 传递ID值
+		err = C.performClipWithProgress(inputLayer.layer, methodLayer.layer, resultLayer.layer, options, unsafe.Pointer(progressKey))
+	} else {
+		err = C.OGR_L_Clip(inputLayer.layer, methodLayer.layer, resultLayer.layer, options, nil, nil)
 	}
 
-	// 调用C函数执行裁剪分析
-	err := C.performClipWithProgress(
-		inputLayer.layer,
-		clipLayer.layer,
-		resultLayer.layer,
-		options,
-		progressArg,
-	)
+	// 执行后立即清理GDAL内部缓存
+	defer func() {
+		// 强制清理图层缓存
+		C.OGR_L_ResetReading(inputLayer.layer)
+		C.OGR_L_ResetReading(methodLayer.layer)
+
+
+	}()
 
 	if err != C.OGRERR_NONE {
-		// 检查是否是用户取消导致的错误
-		if progressData != nil {
-			progressData.mutex.RLock()
-			cancelled := progressData.cancelled
-			progressData.mutex.RUnlock()
-			if cancelled {
-				return fmt.Errorf("操作被用户取消")
-			}
-		}
-		return fmt.Errorf("GDAL裁剪分析失败，错误代码: %d", int(err))
+
+		return fmt.Errorf("GDAL分析操作失败，错误代码: %d", int(err))
 	}
 
 	return nil
