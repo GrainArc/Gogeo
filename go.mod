@@ -1,4 +1,4 @@
-module github.com/fmecool/Gogeo
+module github.com/GrainArc/Gogeo
 
 go 1.24.2
 
