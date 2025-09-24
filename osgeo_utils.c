@@ -272,7 +272,7 @@ OGRGeometryH setPrecisionIfNeeded(OGRGeometryH geom, double gridSize, int flags)
 
     // 记录原始几何类型
     OGRwkbGeometryType originalType = OGR_G_GetGeometryType(geom);
-
+#if GDAL_VERSION_NUM >= 3110000
     // 设置精度
     OGRGeometryH preciseGeom = OGR_G_SetPrecision(geom, gridSize, flags);
     if (!preciseGeom) {
@@ -289,6 +289,14 @@ OGRGeometryH setPrecisionIfNeeded(OGRGeometryH geom, double gridSize, int flags)
     }
 
     return preciseGeom;
+#else
+    // 对于较旧版本的 GDAL，使用替代方案
+    // 可以使用 GEOS 库的精度模型或简单返回原几何体
+    CPLError(CE_Warning, CPLE_AppDefined,
+             "Geometry precision setting requires GDAL 3.11+, current version: %s",
+             GDALVersionInfo("RELEASE_NAME"));
+    return OGR_G_Clone(geom);
+#endif
 }
 
 

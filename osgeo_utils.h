@@ -26,7 +26,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <cpl_conv.h>
 #include <cpl_string.h>
 #include <stdlib.h>
-
+#include <gdal_version.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
