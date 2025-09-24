@@ -22,16 +22,14 @@ package Gogeo
 import "C"
 import (
 	"fmt"
+	"math"
+	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
-	"runtime"
-	"os"
-	"math"
-	"strings"
 	"unsafe"
 )
-
-
 
 // 修改分块结果结构，标记边界要素
 type TileResult struct {
@@ -69,7 +67,6 @@ var (
 	progressDataMutex sync.RWMutex
 	progressIDCounter int64
 )
-
 
 // handleProgressUpdate 处理来自C的进度更新
 //
@@ -307,14 +304,6 @@ func addLayerFields(resultLayer, sourceLayer *GDALLayer, prefix string) error {
 func (config *GeometryPrecisionConfig) getFlags() C.int {
 	var flags C.int = 0
 
-	if !config.PreserveTopo {
-		flags |= C.OGR_GEOS_PREC_NO_TOPO
-	}
-
-	if config.KeepCollapsed {
-		flags |= C.OGR_GEOS_PREC_KEEP_COLLAPSED
-	}
-
 	return flags
 }
 
@@ -324,8 +313,9 @@ type BorderFeatureInfo struct {
 	TileIndices []int  // 该要素出现在哪些分块中
 	GeometryWKT string // 几何体的WKT表示，用于去重比较
 }
+
 // addUniqueIdentifierFieldForErase 为输入图层添加唯一标识字段
-func addIdentifierField(inputLayer *GDALLayer,AttName string) error {
+func addIdentifierField(inputLayer *GDALLayer, AttName string) error {
 	// 为输入图层创建带标识字段的副本
 	newLayer, err := createLayerWithIdentifierField(inputLayer, AttName)
 	if err != nil {
@@ -616,12 +606,13 @@ func deleteFieldFromLayer(layer *GDALLayer, fieldName string) error {
 	err := C.OGR_L_DeleteField(layer.layer, fieldIndex)
 	if err != C.OGRERR_NONE {
 		return fmt.Errorf("删除字段失败，错误代码: %d", int(err))
-	}else {
+	} else {
 		fmt.Println("删除成功")
 	}
 
 	return nil
 }
+
 // deleteFieldFromLayerFuzzy 从图层中模糊匹配删除包含指定字段名的所有字段
 func deleteFieldFromLayerFuzzy(layer *GDALLayer, fieldName string) error {
 	layerDefn := C.OGR_L_GetLayerDefn(layer.layer)
@@ -688,7 +679,7 @@ func performUnionByFields(inputLayer *GDALLayer,
 		fieldDefn := C.OGR_FD_GetFieldDefn(layerDefn, C.int(i))
 		fieldName := C.GoString(C.OGR_Fld_GetNameRef(fieldDefn))
 
-		if strings.Contains(fieldName,"gogeo_analysis_id" ) {
+		if strings.Contains(fieldName, "gogeo_analysis_id") {
 			groupFields = append(groupFields, fieldName)
 			break
 		}
@@ -858,7 +849,6 @@ func mergeResultsToMainLayer(sourceLayer, targetLayer *GDALLayer) error {
 			}
 		}()
 
-
 	}
 
 	return nil
@@ -870,6 +860,7 @@ type taskResult struct {
 	duration time.Duration
 	index    int
 }
+
 // createTileResultLayer 为分块创建结果图层
 func createTileResultLayer(inputLayer *GDALLayer, layerName string) (*GDALLayer, error) {
 	layerNameC := C.CString(layerName)
@@ -896,7 +887,6 @@ func createTileResultLayer(inputLayer *GDALLayer, layerName string) (*GDALLayer,
 
 	return resultLayer, nil
 }
-
 
 // cleanupTileFiles 清理临时分块文件
 func cleanupTileFiles(taskid string) error {
@@ -925,6 +915,7 @@ func fixGeometryTopology(layer *GDALLayer) error {
 	})
 	return nil
 }
+
 // getLayersExtent 获取两个图层的合并范围
 func getLayersExtent(layer1, layer2 *GDALLayer) (*Extent, error) {
 	// 定义 OGREnvelope 结构体
