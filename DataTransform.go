@@ -1635,6 +1635,7 @@ func getSHPFieldInfos(hLayerDefn C.OGRFeatureDefnH) ([]FieldInfo, error) {
 }
 
 // processSHPFeature 处理SHP要素
+// processSHPFeature 处理SHP要素
 func processSHPFeature(hFeature C.OGRFeatureH, fieldInfos []FieldInfo, hTransform C.OGRCoordinateTransformationH) (FeatureData, error) {
 	var feature FeatureData
 	feature.Properties = make(map[string]interface{})
@@ -1682,8 +1683,16 @@ func processSHPFeature(hFeature C.OGRFeatureH, fieldInfos []FieldInfo, hTransfor
 	// 处理几何数据
 	hGeometry := C.OGR_F_GetGeometryRef(hFeature)
 	if hGeometry != nil {
+		// 检查原始几何体是否有效
+		if C.OGR_G_IsValid(hGeometry) == 0 {
+			return feature, fmt.Errorf("原始几何体无效")
+		}
+
 		// 克隆几何对象以避免修改原始数据
 		hGeomClone := C.OGR_G_Clone(hGeometry)
+		if hGeomClone == nil {
+			return feature, fmt.Errorf("几何体克隆失败")
+		}
 		defer C.OGR_G_DestroyGeometry(hGeomClone)
 
 		// 坐标转换
@@ -1693,18 +1702,36 @@ func processSHPFeature(hFeature C.OGRFeatureH, fieldInfos []FieldInfo, hTransfor
 			}
 		}
 
-		// 转换为WKB格式
-		var wkbSize C.int
-		wkbPtr := C.malloc(C.size_t(1024 * 1024)) // 分配1MB缓冲区
+		// 再次检查转换后的几何体是否有效
+		if C.OGR_G_IsValid(hGeomClone) == 0 {
+			return feature, fmt.Errorf("转换后几何体无效")
+		}
+
+		// 获取WKB大小并动态分配内存
+		wkbSize := C.OGR_G_WkbSize(hGeomClone)
+		if wkbSize <= 0 {
+			return feature, fmt.Errorf("无法获取WKB大小")
+		}
+
+		// 动态分配内存，添加一些额外空间以防万一
+		bufferSize := wkbSize + 1024
+		wkbPtr := C.malloc(C.size_t(bufferSize))
+		if wkbPtr == nil {
+			return feature, fmt.Errorf("内存分配失败")
+		}
 		defer C.free(wkbPtr)
 
-		if C.OGR_G_ExportToWkb(hGeomClone, C.wkbNDR, (*C.uchar)(wkbPtr)) == C.OGRERR_NONE {
-			// 获取实际WKB大小
-			wkbSize = C.OGR_G_WkbSize(hGeomClone)
+		// 清零内存
+		C.memset(wkbPtr, 0, C.size_t(bufferSize))
 
+		// 转换为WKB格式
+		result := C.OGR_G_ExportToWkb(hGeomClone, C.wkbNDR, (*C.uchar)(wkbPtr))
+		if result == C.OGRERR_NONE {
 			// 转换为十六进制字符串
 			wkbBytes := C.GoBytes(wkbPtr, wkbSize)
 			feature.WKBHex = hex.EncodeToString(wkbBytes)
+		} else {
+			return feature, fmt.Errorf("WKB导出失败，错误码: %d", int(result))
 		}
 	}
 
