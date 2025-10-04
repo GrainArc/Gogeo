@@ -1635,7 +1635,6 @@ func getSHPFieldInfos(hLayerDefn C.OGRFeatureDefnH) ([]FieldInfo, error) {
 }
 
 // processSHPFeature 处理SHP要素
-// processSHPFeature 处理SHP要素
 func processSHPFeature(hFeature C.OGRFeatureH, fieldInfos []FieldInfo, hTransform C.OGRCoordinateTransformationH) (FeatureData, error) {
 	var feature FeatureData
 	feature.Properties = make(map[string]interface{})
@@ -1685,7 +1684,14 @@ func processSHPFeature(hFeature C.OGRFeatureH, fieldInfos []FieldInfo, hTransfor
 	if hGeometry != nil {
 		// 检查原始几何体是否有效
 		if C.OGR_G_IsValid(hGeometry) == 0 {
-			return feature, fmt.Errorf("原始几何体无效")
+			hFixedGeom := C.OGR_G_MakeValid(hGeometry)
+			if hFixedGeom != nil && C.OGR_G_IsValid(hFixedGeom) == 1 {
+				hGeometry = hFixedGeom
+				defer C.OGR_G_DestroyGeometry(hFixedGeom)
+			} else {
+				return feature, fmt.Errorf("原始几何体无效")
+			}
+
 		}
 
 		// 克隆几何对象以避免修改原始数据
