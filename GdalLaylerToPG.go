@@ -350,6 +350,8 @@ func convertOGRGeometryTypeForPG(geomType C.OGRwkbGeometryType) string {
 }
 
 // createTableFromLayerInfo 根据图层信息创建表
+// createTableFromLayerInfo 根据图层信息创建表（跳过冲突字段版本）
+// createTableFromLayerInfo 根据图层信息创建表（跳过冲突字段版本）
 func createTableFromLayerInfo(db *sql.DB, layerInfo *LayerAnalysisResult, tableName, schema string, srid int) error {
 	// 检查表是否存在
 	var exists bool
@@ -365,7 +367,6 @@ func createTableFromLayerInfo(db *sql.DB, layerInfo *LayerAnalysisResult, tableN
 	}
 
 	if exists {
-		// 删除已存在的表
 		dropQuery := fmt.Sprintf(`DROP TABLE IF EXISTS %s.%s CASCADE`, schema, tableName)
 		_, err = db.Exec(dropQuery)
 		if err != nil {
@@ -380,11 +381,28 @@ func createTableFromLayerInfo(db *sql.DB, layerInfo *LayerAnalysisResult, tableN
 	// 添加ID字段
 	fieldDefs = append(fieldDefs, "id SERIAL PRIMARY KEY")
 
-	// 添加属性字段
+	// 保留字段列表
+	reservedFields := map[string]bool{
+		"id":   true,
+		"geom": true,
+	}
+
+	// 添加属性字段，跳过保留字段
+	var validFields []FieldAnalysisResult
 	for _, field := range layerInfo.Fields {
+		// 检查是否为保留字段（不区分大小写）
+		if reservedFields[strings.ToLower(field.Name)] {
+			log.Printf("警告: 跳过保留字段 '%s'", field.Name)
+			continue
+		}
+
 		fieldDef := fmt.Sprintf("%s %s", field.Name, field.DBType)
 		fieldDefs = append(fieldDefs, fieldDef)
+		validFields = append(validFields, field)
 	}
+
+	// 更新layerInfo，只保留有效字段
+	layerInfo.Fields = validFields
 
 	// 添加几何字段
 	geomFieldDef := fmt.Sprintf("geom GEOMETRY(%s, %d)", layerInfo.GeomType, srid)
