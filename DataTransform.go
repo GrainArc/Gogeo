@@ -362,35 +362,110 @@ func getFieldTypeName(fieldType C.OGRFieldType) string {
 func getGeometryTypeName(geomType C.OGRwkbGeometryType) string {
 	switch geomType {
 	case C.wkbPoint:
-		return "Point"
-	case C.wkbPoint25D:
-		return "Point25D"
+		return "POINT"
 	case C.wkbLineString:
-		return "LineString"
-	case C.wkbLineString25D:
-		return "LineString25D"
+		return "LINESTRING"
 	case C.wkbPolygon:
-		return "Polygon"
-	case C.wkbPolygon25D:
-		return "Polygon25D"
+		return "POLYGON"
 	case C.wkbMultiPoint:
-		return "MultiPoint"
-	case C.wkbMultiPoint25D:
-		return "MultiPoint25D"
+		return "MULTIPOINT"
 	case C.wkbMultiLineString:
-		return "MultiLineString"
-	case C.wkbMultiLineString25D:
-		return "MultiLineString25D"
+		return "MULTILINESTRING"
 	case C.wkbMultiPolygon:
-		return "MultiPolygon"
-	case C.wkbMultiPolygon25D:
-		return "MultiPolygon25D"
+		return "MULTIPOLYGON"
 	case C.wkbGeometryCollection:
-		return "GeometryCollection"
-	case C.wkbGeometryCollection25D:
-		return "GeometryCollection25D"
+		return "GEOMETRYCOLLECTION"
+
+	// 带 Z 坐标 (3D)
+	case C.wkbPointZ, C.wkbPoint25D:
+		return "POINT"
+	case C.wkbLineStringZ, C.wkbLineString25D:
+		return "LINESTRING"
+	case C.wkbPolygonZ, C.wkbPolygon25D:
+		return "POLYGON"
+	case C.wkbMultiPointZ, C.wkbMultiPoint25D:
+		return "MULTIPOINT"
+	case C.wkbMultiLineStringZ, C.wkbMultiLineString25D:
+		return "MULTILINESTRING"
+	case C.wkbMultiPolygonZ, C.wkbMultiPolygon25D:
+		return "MULTIPOLYGON"
+	case C.wkbGeometryCollectionZ, C.wkbGeometryCollection25D:
+		return "GEOMETRYCOLLECTION"
+
+	// 带 M 坐标
+	case C.wkbPointM:
+		return "POINT"
+	case C.wkbLineStringM:
+		return "LINESTRING"
+	case C.wkbPolygonM:
+		return "POLYGON"
+	case C.wkbMultiPointM:
+		return "MULTIPOINT"
+	case C.wkbMultiLineStringM:
+		return "MULTILINESTRING"
+	case C.wkbMultiPolygonM:
+		return "MULTIPOLYGON"
+	case C.wkbGeometryCollectionM:
+		return "GEOMETRYCOLLECTION"
+
+	// 带 Z 和 M 坐标
+	case C.wkbPointZM:
+		return "POINT"
+	case C.wkbLineStringZM:
+		return "LINESTRING"
+	case C.wkbPolygonZM:
+		return "POLYGON"
+	case C.wkbMultiPointZM:
+		return "MULTIPOINT"
+	case C.wkbMultiLineStringZM:
+		return "MULTILINESTRING"
+	case C.wkbMultiPolygonZM:
+		return "MULTIPOLYGON"
+	case C.wkbGeometryCollectionZM:
+		return "GEOMETRYCOLLECTION"
+
 	default:
-		return fmt.Sprintf("Unknown(%d)", int(geomType))
+		// 尝试解析类型
+		geomTypeInt := int(geomType)
+
+		// 处理 ZM 类型 (3000 系列)
+		if geomTypeInt >= 3000 && geomTypeInt < 4000 {
+			baseType := geomTypeInt - 3000
+			return getBaseGeometryName(baseType)
+		}
+		// 处理 M 类型 (2000 系列)
+		if geomTypeInt >= 2000 && geomTypeInt < 3000 {
+			baseType := geomTypeInt - 2000
+			return getBaseGeometryName(baseType)
+		}
+		// 处理 Z 类型 (1000 系列)
+		if geomTypeInt >= 1000 && geomTypeInt < 2000 {
+			baseType := geomTypeInt - 1000
+			return getBaseGeometryName(baseType)
+		}
+
+		return "GEOMETRY" // 默认使用通用类型
+	}
+}
+
+func getBaseGeometryName(baseType int) string {
+	switch baseType {
+	case 1:
+		return "POINT"
+	case 2:
+		return "LINESTRING"
+	case 3:
+		return "POLYGON"
+	case 4:
+		return "MULTIPOINT"
+	case 5:
+		return "MULTILINESTRING"
+	case 6:
+		return "MULTIPOLYGON"
+	case 7:
+		return "GEOMETRYCOLLECTION"
+	default:
+		return "GEOMETRY"
 	}
 }
 
@@ -1531,7 +1606,7 @@ func processSHPLayerDirect(hLayer C.OGRLayerH, hTargetSRS C.OGRSpatialReferenceH
 
 	// 获取几何类型
 	geoType := C.OGR_FD_GetGeomType(hLayerDefn)
-	layerInfo.GeoType = convertOGRGeometryType(geoType)
+	layerInfo.GeoType = getGeometryTypeName(geoType)
 
 	// 获取字段信息
 	fieldInfos, err := getSHPFieldInfos(hLayerDefn)
@@ -1765,27 +1840,5 @@ func convertOGRFieldTypeToDBType(fieldType C.OGRFieldType) string {
 		return "BYTEA"
 	default:
 		return "TEXT"
-	}
-}
-
-// convertOGRGeometryType 转换OGR几何类型
-func convertOGRGeometryType(geoType C.OGRwkbGeometryType) string {
-	switch geoType {
-	case C.wkbPoint, C.wkbPoint25D:
-		return "POINT"
-	case C.wkbLineString, C.wkbLineString25D:
-		return "MULTILINESTRING"
-	case C.wkbPolygon, C.wkbPolygon25D:
-		return "MULTIPOLYGON"
-	case C.wkbMultiPoint, C.wkbMultiPoint25D:
-		return "MULTIPOINT"
-	case C.wkbMultiLineString, C.wkbMultiLineString25D:
-		return "MULTILINESTRING"
-	case C.wkbMultiPolygon, C.wkbMultiPolygon25D:
-		return "MULTIPOLYGON"
-	case C.wkbGeometryCollection, C.wkbGeometryCollection25D:
-		return "GEOMETRYCOLLECTION"
-	default:
-		return "GEOMETRY"
 	}
 }
