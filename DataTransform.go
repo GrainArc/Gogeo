@@ -359,114 +359,64 @@ func getFieldTypeName(fieldType C.OGRFieldType) string {
 }
 
 // 获取几何类型名称
-func getGeometryTypeName(geomType C.OGRwkbGeometryType) string {
-	switch geomType {
-	case C.wkbPoint:
-		return "POINT"
-	case C.wkbLineString:
-		return "LINESTRING"
-	case C.wkbPolygon:
-		return "POLYGON"
-	case C.wkbMultiPoint:
-		return "MULTIPOINT"
-	case C.wkbMultiLineString:
-		return "MULTILINESTRING"
-	case C.wkbMultiPolygon:
-		return "MULTIPOLYGON"
-	case C.wkbGeometryCollection:
-		return "GEOMETRYCOLLECTION"
 
-	// 带 Z 坐标 (3D)
-	case C.wkbPointZ, C.wkbPoint25D:
-		return "POINT"
-	case C.wkbLineStringZ, C.wkbLineString25D:
-		return "LINESTRING"
-	case C.wkbPolygonZ, C.wkbPolygon25D:
-		return "POLYGON"
-	case C.wkbMultiPointZ, C.wkbMultiPoint25D:
-		return "MULTIPOINT"
-	case C.wkbMultiLineStringZ, C.wkbMultiLineString25D:
-		return "MULTILINESTRING"
-	case C.wkbMultiPolygonZ, C.wkbMultiPolygon25D:
-		return "MULTIPOLYGON"
-	case C.wkbGeometryCollectionZ, C.wkbGeometryCollection25D:
-		return "GEOMETRYCOLLECTION"
+func getGeometryTypeName(geoType C.OGRwkbGeometryType) string {
+	geomTypeInt := int(geoType)
 
-	// 带 M 坐标
-	case C.wkbPointM:
-		return "POINT"
-	case C.wkbLineStringM:
-		return "LINESTRING"
-	case C.wkbPolygonM:
-		return "POLYGON"
-	case C.wkbMultiPointM:
-		return "MULTIPOINT"
-	case C.wkbMultiLineStringM:
-		return "MULTILINESTRING"
-	case C.wkbMultiPolygonM:
-		return "MULTIPOLYGON"
-	case C.wkbGeometryCollectionM:
-		return "GEOMETRYCOLLECTION"
+	// 提取基础类型（去除维度标志）
+	baseType := geomTypeInt % 1000
 
-	// 带 Z 和 M 坐标
-	case C.wkbPointZM:
-		return "POINT"
-	case C.wkbLineStringZM:
-		return "LINESTRING"
-	case C.wkbPolygonZM:
-		return "POLYGON"
-	case C.wkbMultiPointZM:
-		return "MULTIPOINT"
-	case C.wkbMultiLineStringZM:
-		return "MULTILINESTRING"
-	case C.wkbMultiPolygonZM:
-		return "MULTIPOLYGON"
-	case C.wkbGeometryCollectionZM:
-		return "GEOMETRYCOLLECTION"
+	// 检测维度标志
+	hasZ := false
+	hasM := false
 
-	default:
-		// 尝试解析类型
-		geomTypeInt := int(geomType)
-
-		// 处理 ZM 类型 (3000 系列)
-		if geomTypeInt >= 3000 && geomTypeInt < 4000 {
-			baseType := geomTypeInt - 3000
-			return getBaseGeometryName(baseType)
-		}
-		// 处理 M 类型 (2000 系列)
-		if geomTypeInt >= 2000 && geomTypeInt < 3000 {
-			baseType := geomTypeInt - 2000
-			return getBaseGeometryName(baseType)
-		}
-		// 处理 Z 类型 (1000 系列)
-		if geomTypeInt >= 1000 && geomTypeInt < 2000 {
-			baseType := geomTypeInt - 1000
-			return getBaseGeometryName(baseType)
-		}
-
-		return "GEOMETRY" // 默认使用通用类型
+	if geomTypeInt >= 3000 && geomTypeInt < 4000 {
+		// ZM 类型 (3000 系列)
+		hasZ = true
+		hasM = true
+	} else if geomTypeInt >= 2000 && geomTypeInt < 3000 {
+		// M 类型 (2000 系列)
+		hasM = true
+	} else if geomTypeInt >= 1000 && geomTypeInt < 2000 {
+		// Z 类型 (1000 系列)
+		hasZ = true
+	} else if (geomTypeInt & 0x80000000) != 0 {
+		// 25D 类型（旧格式，带 0x80000000 标志）
+		hasZ = true
+		baseType = geomTypeInt & 0x7FFFFFFF
 	}
-}
 
-func getBaseGeometryName(baseType int) string {
+	// 根据基础类型返回几何类型名称
+	var geomName string
 	switch baseType {
-	case 1:
-		return "POINT"
-	case 2:
-		return "LINESTRING"
-	case 3:
-		return "POLYGON"
-	case 4:
-		return "MULTIPOINT"
-	case 5:
-		return "MULTILINESTRING"
-	case 6:
-		return "MULTIPOLYGON"
-	case 7:
-		return "GEOMETRYCOLLECTION"
+	case 1: // wkbPoint
+		geomName = "POINT"
+	case 2: // wkbLineString
+		geomName = "MULTILINESTRING"
+	case 3: // wkbPolygon
+		geomName = "MULTIPOLYGON"
+	case 4: // wkbMultiPoint
+		geomName = "MULTIPOINT"
+	case 5: // wkbMultiLineString
+		geomName = "MULTILINESTRING"
+	case 6: // wkbMultiPolygon
+		geomName = "MULTIPOLYGON"
+	case 7: // wkbGeometryCollection
+		geomName = "GEOMETRYCOLLECTION"
 	default:
 		return "GEOMETRY"
 	}
+
+	// 添加维度后缀
+	if hasZ && hasM {
+		return geomName
+	} else if hasZ {
+		return geomName
+	} else if hasM {
+		return geomName
+	}
+
+	return geomName
 }
 
 // GDBLayerInfo 直接从GDB获取的图层信息
