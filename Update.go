@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024 [fmecool]
+Copyright (C) 2024 [GrainArc]
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -32,11 +32,11 @@ static OGRErr performUpdateWithProgress(OGRLayerH inputLayer,
 import "C"
 import (
 	"fmt"
-	"runtime"
-	"time"
-	"sync"
-	"log"
 	"github.com/google/uuid"
+	"log"
+	"runtime"
+	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -47,11 +47,11 @@ func SpatialUpdateAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelG
 	defer methodLayer.Close()
 
 	// 为两个图层添加唯一标识字段
-	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	err := addIdentifierField(inputLayer, "gogeo_analysis_id")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
-	err = addIdentifierField(methodLayer,"gogeo_analysis_id2")
+	err = addIdentifierField(methodLayer, "gogeo_analysis_id2")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
@@ -125,9 +125,9 @@ func performUpdateAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelG
 	}
 	taskid := uuid.New().String()
 	//对A B图层进行分块,并创建bin文件
-	GenerateTiles(inputLayer,methodLayer,config.TileCount,taskid)
+	GenerateTiles(inputLayer, methodLayer, config.TileCount, taskid)
 	//读取文件列表，并发执行操作
-	GPbins ,err:= ReadAndGroupBinFiles(taskid)
+	GPbins, err := ReadAndGroupBinFiles(taskid)
 	if err != nil {
 		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
@@ -145,7 +145,6 @@ func performUpdateAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelG
 		}
 	}()
 
-
 	return resultLayer, nil
 }
 
@@ -159,8 +158,6 @@ func executeConcurrentUpdateAnalysis(tileGroups []GroupTileFiles, resultLayer *G
 	if totalTasks == 0 {
 		return fmt.Errorf("没有分块需要处理")
 	}
-
-
 
 	// 创建任务队列和结果队列
 	taskQueue := make(chan GroupTileFiles, totalTasks)
@@ -293,7 +290,6 @@ func worker_update(workerID int, taskQueue <-chan GroupTileFiles, results chan<-
 			index:    tileGroup.Index,
 		}
 
-
 		// 定期强制垃圾回收
 
 		runtime.GC()
@@ -309,7 +305,6 @@ func processTileGroupforUpdate(tileGroup GroupTileFiles, config *ParallelGeosCon
 		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
 	}
 
-
 	// 加载layer2的bin文件
 	methodTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
 	if err != nil {
@@ -323,7 +318,7 @@ func processTileGroupforUpdate(tileGroup GroupTileFiles, config *ParallelGeosCon
 
 	// 为当前分块创建临时结果图层
 	tileName := fmt.Sprintf("tile_result_%d", tileGroup.Index)
-	tileResultLayer, err := createUpdateTileResultLayer(inputTileLayer, methodTileLayer,tileName)
+	tileResultLayer, err := createUpdateTileResultLayer(inputTileLayer, methodTileLayer, tileName)
 	if err != nil {
 		return nil, fmt.Errorf("创建分块结果图层失败: %v", err)
 	}
@@ -364,8 +359,6 @@ func createUpdateTileResultLayer(layer1, layer2 *GDALLayer, layerName string) (*
 	return resultLayer, nil
 }
 
-
-
 // createUpdateAnalysisResultLayer 创建更新分析结果图层
 func createUpdateAnalysisResultLayer(inputLayer, updateLayer *GDALLayer) (*GDALLayer, error) {
 	layerName := C.CString("update_result")
@@ -399,14 +392,13 @@ func createUpdateAnalysisResultLayer(inputLayer, updateLayer *GDALLayer) (*GDALL
 // addUpdateFields 添加更新分析的字段
 func addUpdateFields(resultLayer, inputLayer, updateLayer *GDALLayer) error {
 
-
 	// 合并两个图层的字段（不使用前缀）
-	err1 := addLayerFields(resultLayer, inputLayer,"")
+	err1 := addLayerFields(resultLayer, inputLayer, "")
 	if err1 != nil {
 		return fmt.Errorf("添加输入图层字段失败: %v", err1)
 	}
 
-	err2 := addLayerFields(resultLayer, updateLayer,"")
+	err2 := addLayerFields(resultLayer, updateLayer, "")
 	if err2 != nil {
 		return fmt.Errorf("添加更新图层字段失败: %v", err2)
 	}
@@ -478,4 +470,3 @@ func executeGDALUpdateWithProgress(inputLayer, updateLayer, resultLayer *GDALLay
 
 	return nil
 }
-

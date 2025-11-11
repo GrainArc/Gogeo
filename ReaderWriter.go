@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025 [fmecool]
+Copyright (C) 2025 [GrainArc]
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -962,12 +962,12 @@ func (w *FileGeoWriter) copyFieldDefinitions(sourceDefn C.OGRFeatureDefnH, targe
 
 	// GDB保留字段名列表
 	reservedFields := map[string]bool{
-		"objectid":   true,
-		"shape":      true,
-		"shape_area": true,
+		"objectid":     true,
+		"shape":        true,
+		"shape_area":   true,
 		"shape_length": true,
-		"fid":        true,
-		"oid":        true,
+		"fid":          true,
+		"oid":          true,
 	}
 
 	for i := 0; i < fieldCount; i++ {
@@ -1201,6 +1201,7 @@ func (w *FileGeoWriter) copyGeometrySafely(sourceFeature, newFeature C.OGRFeatur
 
 	return nil
 }
+
 // 检查几何类型兼容性
 func (w *FileGeoWriter) isGeometryTypeCompatible(sourceType, targetType C.OGRwkbGeometryType) bool {
 	// 完全匹配
@@ -1210,12 +1211,12 @@ func (w *FileGeoWriter) isGeometryTypeCompatible(sourceType, targetType C.OGRwkb
 
 	// 检查兼容的类型组合
 	compatiblePairs := map[C.OGRwkbGeometryType][]C.OGRwkbGeometryType{
-		C.wkbPolygon: {C.wkbPolygon, C.wkbMultiPolygon, C.wkbPolygon25D, C.wkbMultiPolygon25D},
-		C.wkbMultiPolygon: {C.wkbPolygon, C.wkbMultiPolygon, C.wkbPolygon25D, C.wkbMultiPolygon25D},
-		C.wkbLineString: {C.wkbLineString, C.wkbMultiLineString, C.wkbLineString25D, C.wkbMultiLineString25D},
+		C.wkbPolygon:         {C.wkbPolygon, C.wkbMultiPolygon, C.wkbPolygon25D, C.wkbMultiPolygon25D},
+		C.wkbMultiPolygon:    {C.wkbPolygon, C.wkbMultiPolygon, C.wkbPolygon25D, C.wkbMultiPolygon25D},
+		C.wkbLineString:      {C.wkbLineString, C.wkbMultiLineString, C.wkbLineString25D, C.wkbMultiLineString25D},
 		C.wkbMultiLineString: {C.wkbLineString, C.wkbMultiLineString, C.wkbLineString25D, C.wkbMultiLineString25D},
-		C.wkbPoint: {C.wkbPoint, C.wkbMultiPoint, C.wkbPoint25D, C.wkbMultiPoint25D},
-		C.wkbMultiPoint: {C.wkbPoint, C.wkbMultiPoint, C.wkbPoint25D, C.wkbMultiPoint25D},
+		C.wkbPoint:           {C.wkbPoint, C.wkbMultiPoint, C.wkbPoint25D, C.wkbMultiPoint25D},
+		C.wkbMultiPoint:      {C.wkbPoint, C.wkbMultiPoint, C.wkbPoint25D, C.wkbMultiPoint25D},
 	}
 
 	if compatibleTypes, exists := compatiblePairs[targetType]; exists {
@@ -1228,6 +1229,7 @@ func (w *FileGeoWriter) isGeometryTypeCompatible(sourceType, targetType C.OGRwkb
 
 	return false
 }
+
 // removeShapeFiles 删除Shapefile相关文件
 func (w *FileGeoWriter) removeShapeFiles() {
 	baseName := strings.TrimSuffix(w.FilePath, filepath.Ext(w.FilePath))

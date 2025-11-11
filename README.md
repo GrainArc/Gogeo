@@ -63,7 +63,7 @@ Download and install [OSGeo4W](https://trac.osgeo.org/osgeo4w/) or [GDAL Windows
 
 ### Install Gogeo
 ```bash
-go get github.com/fmecool/Gogeo
+go get github.com/GrainArc/Gogeo
 ```
 
 ## 🚀 Quick Start
@@ -80,7 +80,7 @@ import (
    "runtime"
    "time"
 
-   "github.com/fmecool/Gogeo" // 根据您的实际包路径调整
+   "github.com/GrainArc/Gogeo" // 根据您的实际包路径调整
 )
 
 func main() {
@@ -668,8 +668,8 @@ The complete AGPL-3.0 license text is available at: https://www.gnu.org/licenses
 
 ## 📞 Contact
 
-- Project Homepage: https://github.com/fmecool/gogeo
-- Issue Tracker: https://github.com/fmecool/gogeo/issues
+- Project Homepage: https://github.com/GrainArc/gogeo
+- Issue Tracker: https://github.com/GrainArc/gogeo/issues
 - Email: 1131698384@qq.com
 - qq交流群：767449805
 ## 🔗 Related Projects

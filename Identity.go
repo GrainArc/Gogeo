@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025 [fmecool]
+Copyright (C) 2025 [GrainArc]
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -30,14 +30,13 @@ static OGRErr performIdentityWithProgress(OGRLayerH inputLayer,
 import "C"
 import (
 	"fmt"
+	"github.com/google/uuid"
+	"log"
 	"runtime"
 	"sync"
-	"log"
 	"time"
-	"github.com/google/uuid"
 	"unsafe"
 )
-
 
 func SpatialIdentityAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelGeosConfig) (*GeosAnalysisResult, error) {
 
@@ -46,23 +45,22 @@ func SpatialIdentityAnalysis(inputLayer, methodLayer *GDALLayer, config *Paralle
 	defer methodLayer.Close()
 
 	// 为两个图层添加唯一标识字段
-	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	err := addIdentifierField(inputLayer, "gogeo_analysis_id")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
-	err = addIdentifierField(methodLayer,"gogeo_analysis_id2")
+	err = addIdentifierField(methodLayer, "gogeo_analysis_id2")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
 
-	resultLayer, err := performTileIdentityAnalysis(inputLayer, methodLayer, config,1)
+	resultLayer, err := performTileIdentityAnalysis(inputLayer, methodLayer, config, 1)
 	if err != nil {
 		return nil, fmt.Errorf("执行瓦片裁剪Identity分析失败: %v", err)
 	}
 
 	// 计算结果数量
 	resultCount := resultLayer.GetFeatureCount()
-
 
 	if config.IsMergeTile {
 		// 执行按标识字段的融合操作
@@ -80,7 +78,6 @@ func SpatialIdentityAnalysis(inputLayer, methodLayer *GDALLayer, config *Paralle
 		return unionResult, nil
 	} else {
 
-
 		return &GeosAnalysisResult{
 			OutputLayer: resultLayer,
 			ResultCount: resultCount,
@@ -89,11 +86,9 @@ func SpatialIdentityAnalysis(inputLayer, methodLayer *GDALLayer, config *Paralle
 
 }
 
-
-
 // performTileClipIdentityAnalysis 执行基于瓦片裁剪的并行Identity分析
-func performTileIdentityAnalysis(inputLayer, methodLayer *GDALLayer,  config *ParallelGeosConfig,strategy FieldMergeStrategy) (*GDALLayer, error) {
-	if config.PrecisionConfig != nil  {
+func performTileIdentityAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelGeosConfig, strategy FieldMergeStrategy) (*GDALLayer, error) {
+	if config.PrecisionConfig != nil {
 		// 创建内存副本
 		inputMemLayer, err := createMemoryLayerCopy(inputLayer, "input_mem_layer")
 		if err != nil {
@@ -105,7 +100,7 @@ func performTileIdentityAnalysis(inputLayer, methodLayer *GDALLayer,  config *Pa
 			inputMemLayer.Close()
 			return nil, fmt.Errorf("创建图层内存副本失败: %v", err)
 		}
-		if  config.PrecisionConfig.Enabled {
+		if config.PrecisionConfig.Enabled {
 			// 在内存图层上设置精度
 			flags := config.PrecisionConfig.getFlags()
 			gridSize := C.double(config.PrecisionConfig.GridSize)
@@ -119,7 +114,6 @@ func performTileIdentityAnalysis(inputLayer, methodLayer *GDALLayer,  config *Pa
 		methodLayer = methodMemLayer
 	}
 
-
 	// 创建结果图层
 	resultLayer, err := createIdentityAnalysisResultLayer(inputLayer, methodLayer, strategy)
 	if err != nil {
@@ -127,9 +121,9 @@ func performTileIdentityAnalysis(inputLayer, methodLayer *GDALLayer,  config *Pa
 	}
 	taskid := uuid.New().String()
 	//对A B图层进行分块,并创建bin文件
-	GenerateTiles(inputLayer,methodLayer,config.TileCount,taskid)
+	GenerateTiles(inputLayer, methodLayer, config.TileCount, taskid)
 	//读取文件列表，并发执行擦除操作
-	GPbins ,err:= ReadAndGroupBinFiles(taskid)
+	GPbins, err := ReadAndGroupBinFiles(taskid)
 	if err != nil {
 		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
@@ -159,8 +153,6 @@ func executeConcurrentIdentityAnalysis(tileGroups []GroupTileFiles, resultLayer 
 	if totalTasks == 0 {
 		return fmt.Errorf("没有分块需要处理")
 	}
-
-
 
 	// 创建任务队列和结果队列
 	taskQueue := make(chan GroupTileFiles, totalTasks)
@@ -270,18 +262,17 @@ func executeConcurrentIdentityAnalysis(tileGroups []GroupTileFiles, resultLayer 
 	return nil
 }
 
-func worker_identity(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup , strategy FieldMergeStrategy) {
+func worker_identity(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup, strategy FieldMergeStrategy) {
 	defer wg.Done()
 
 	tasksProcessed := 0
-
 
 	for tileGroup := range taskQueue {
 
 		start := time.Now()
 
 		// 处理单个分块
-		layer, err := processTileGroupforIdentity(tileGroup, config ,strategy)
+		layer, err := processTileGroupforIdentity(tileGroup, config, strategy)
 
 		duration := time.Since(start)
 
@@ -295,7 +286,6 @@ func worker_identity(workerID int, taskQueue <-chan GroupTileFiles, results chan
 			index:    tileGroup.Index,
 		}
 
-
 		// 定期强制垃圾回收
 
 		runtime.GC()
@@ -303,14 +293,13 @@ func worker_identity(workerID int, taskQueue <-chan GroupTileFiles, results chan
 	}
 
 }
-func processTileGroupforIdentity(tileGroup GroupTileFiles, config *ParallelGeosConfig ,  strategy FieldMergeStrategy) (*GDALLayer, error) {
+func processTileGroupforIdentity(tileGroup GroupTileFiles, config *ParallelGeosConfig, strategy FieldMergeStrategy) (*GDALLayer, error) {
 
 	// 加载layer1的bin文件
 	inputTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer1)
 	if err != nil {
 		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
 	}
-
 
 	// 加载layer2的bin文件
 	methodTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
@@ -325,13 +314,13 @@ func processTileGroupforIdentity(tileGroup GroupTileFiles, config *ParallelGeosC
 
 	// 为当前分块创建临时结果图层
 	tileName := fmt.Sprintf("tile_result_%d", tileGroup.Index)
-	tileResultLayer, err := createIdentityTileResultLayer(inputTileLayer, methodTileLayer,tileName,strategy)
+	tileResultLayer, err := createIdentityTileResultLayer(inputTileLayer, methodTileLayer, tileName, strategy)
 	if err != nil {
 		return nil, fmt.Errorf("创建分块结果图层失败: %v", err)
 	}
 
 	// 执行裁剪分析 - 不使用进度回调
-	err = executeIdentidyAnalysis(inputTileLayer, methodTileLayer, tileResultLayer, nil ,strategy)
+	err = executeIdentidyAnalysis(inputTileLayer, methodTileLayer, tileResultLayer, nil, strategy)
 	if err != nil {
 		tileResultLayer.Close()
 		return nil, fmt.Errorf("执行擦除分析失败: %v", err)
@@ -340,7 +329,7 @@ func processTileGroupforIdentity(tileGroup GroupTileFiles, config *ParallelGeosC
 }
 
 // executeIdentityAnalysis 执行Identity分析
-func executeIdentidyAnalysis(inputLayer, methodLayer, resultLayer *GDALLayer, progressCallback ProgressCallback ,strategy FieldMergeStrategy) error {
+func executeIdentidyAnalysis(inputLayer, methodLayer, resultLayer *GDALLayer, progressCallback ProgressCallback, strategy FieldMergeStrategy) error {
 	// 设置GDAL选项
 	var options **C.char
 	defer func() {
@@ -368,11 +357,12 @@ func executeIdentidyAnalysis(inputLayer, methodLayer, resultLayer *GDALLayer, pr
 		defer C.free(unsafe.Pointer(inputPrefixOpt))
 		options = C.CSLAddString(options, methodPrefixOpt)
 		options = C.CSLAddString(options, methodPrefixOpt)
-		}
+	}
 
 	// 执行Identity操作
 	return executeGDALIdentityWithProgress(inputLayer, methodLayer, resultLayer, options, progressCallback)
 }
+
 // executeGDALIdentityWithProgress 执行带进度的GDAL Identity操作
 func executeGDALIdentityWithProgress(inputLayer, methodLayer, resultLayer *GDALLayer, options **C.char, progressCallback ProgressCallback) error {
 	var progressData *ProgressData
@@ -436,7 +426,7 @@ func createIdentityAnalysisResultLayer(inputLayer, methodLayer *GDALLayer, strat
 	runtime.SetFinalizer(resultLayer, (*GDALLayer).cleanup)
 
 	// 添加字段定义
-	err := addIdentityFields(resultLayer, inputLayer, methodLayer,strategy)
+	err := addIdentityFields(resultLayer, inputLayer, methodLayer, strategy)
 	if err != nil {
 		resultLayer.Close()
 		return nil, fmt.Errorf("添加字段失败: %v", err)
@@ -444,8 +434,6 @@ func createIdentityAnalysisResultLayer(inputLayer, methodLayer *GDALLayer, strat
 
 	return resultLayer, nil
 }
-
-
 
 // addIdentityFields 添加Identity分析的字段
 func addIdentityFields(resultLayer, inputLayer, methodLayer *GDALLayer, strategy FieldMergeStrategy) error {
@@ -484,14 +472,12 @@ func addIdentityFields(resultLayer, inputLayer, methodLayer *GDALLayer, strategy
 		if err2 != nil {
 			return fmt.Errorf("添加方法图层字段失败: %v", err2)
 		}
-		}
+	}
 
 	return nil
 }
 
-
-
-func createIdentityTileResultLayer(inputLayer,methodLayer *GDALLayer, layerName string  ,strategy FieldMergeStrategy) (*GDALLayer, error) {
+func createIdentityTileResultLayer(inputLayer, methodLayer *GDALLayer, layerName string, strategy FieldMergeStrategy) (*GDALLayer, error) {
 	layerNameC := C.CString(layerName)
 	defer C.free(unsafe.Pointer(layerNameC))
 
@@ -508,7 +494,7 @@ func createIdentityTileResultLayer(inputLayer,methodLayer *GDALLayer, layerName 
 	runtime.SetFinalizer(resultLayer, (*GDALLayer).cleanup)
 
 	// 添加字段定义
-	err := addIdentityFields(resultLayer, inputLayer, methodLayer ,strategy)
+	err := addIdentityFields(resultLayer, inputLayer, methodLayer, strategy)
 	if err != nil {
 		resultLayer.Close()
 		return nil, fmt.Errorf("添加字段失败: %v", err)

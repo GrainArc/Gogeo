@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025 [fmecool]
+Copyright (C) 2025 [GrainArc]
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -33,11 +33,11 @@ static OGRErr performSymDifferenceWithProgress(OGRLayerH inputLayer,
 import "C"
 import (
 	"fmt"
-	"runtime"
-	"time"
-	"sync"
-	"log"
 	"github.com/google/uuid"
+	"log"
+	"runtime"
+	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -48,11 +48,11 @@ func SpatialSymDifferenceAnalysis(inputLayer, methodLayer *GDALLayer, config *Pa
 	defer methodLayer.Close()
 
 	// 为两个图层添加唯一标识字段
-	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	err := addIdentifierField(inputLayer, "gogeo_analysis_id")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
-	err = addIdentifierField(methodLayer,"gogeo_analysis_id2")
+	err = addIdentifierField(methodLayer, "gogeo_analysis_id2")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
@@ -123,9 +123,9 @@ func performSymDifferenceAnalysis(inputLayer, methodLayer *GDALLayer, config *Pa
 	}
 	taskid := uuid.New().String()
 	//对A B图层进行分块,并创建bin文件
-	GenerateTiles(inputLayer,methodLayer,config.TileCount,taskid)
+	GenerateTiles(inputLayer, methodLayer, config.TileCount, taskid)
 	//读取文件列表，并发执行操作
-	GPbins ,err:= ReadAndGroupBinFiles(taskid)
+	GPbins, err := ReadAndGroupBinFiles(taskid)
 	if err != nil {
 		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
@@ -143,7 +143,6 @@ func performSymDifferenceAnalysis(inputLayer, methodLayer *GDALLayer, config *Pa
 		}
 	}()
 
-
 	return resultLayer, nil
 }
 func executeConcurrentSymDifferenceAnalysis(tileGroups []GroupTileFiles, resultLayer *GDALLayer, config *ParallelGeosConfig) error {
@@ -156,8 +155,6 @@ func executeConcurrentSymDifferenceAnalysis(tileGroups []GroupTileFiles, resultL
 	if totalTasks == 0 {
 		return fmt.Errorf("没有分块需要处理")
 	}
-
-
 
 	// 创建任务队列和结果队列
 	taskQueue := make(chan GroupTileFiles, totalTasks)
@@ -273,7 +270,6 @@ func worker_symDifference(workerID int, taskQueue <-chan GroupTileFiles, results
 
 	tasksProcessed := 0
 
-
 	for tileGroup := range taskQueue {
 
 		start := time.Now()
@@ -293,7 +289,6 @@ func worker_symDifference(workerID int, taskQueue <-chan GroupTileFiles, results
 			index:    tileGroup.Index,
 		}
 
-
 		// 定期强制垃圾回收
 
 		runtime.GC()
@@ -309,7 +304,6 @@ func processTileGroupforSymDifference(tileGroup GroupTileFiles, config *Parallel
 		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
 	}
 
-
 	// 加载layer2的bin文件
 	methodTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
 	if err != nil {
@@ -323,7 +317,7 @@ func processTileGroupforSymDifference(tileGroup GroupTileFiles, config *Parallel
 
 	// 为当前分块创建临时结果图层
 	tileName := fmt.Sprintf("tile_result_%d", tileGroup.Index)
-	tileResultLayer, err := createSymDifferenceTileResultLayer(inputTileLayer, methodTileLayer,tileName)
+	tileResultLayer, err := createSymDifferenceTileResultLayer(inputTileLayer, methodTileLayer, tileName)
 	if err != nil {
 		return nil, fmt.Errorf("创建分块结果图层失败: %v", err)
 	}
@@ -344,7 +338,6 @@ func createSymDifferenceTileResultLayer(inputLayer, methodLayer *GDALLayer, laye
 	// 获取空间参考系统
 	srs := inputLayer.GetSpatialRef()
 
-
 	// 创建结果图层
 	resultLayerPtr := C.createMemoryLayer(layerNameC, C.wkbMultiPolygon, srs)
 	if resultLayerPtr == nil {
@@ -363,6 +356,7 @@ func createSymDifferenceTileResultLayer(inputLayer, methodLayer *GDALLayer, laye
 
 	return resultLayer, nil
 }
+
 // createGeosAnalysisResultLayer 创建对称差异结果图层
 func createSymDifferenceResultLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
 	layerName := C.CString("symdifference_result")
@@ -396,21 +390,19 @@ func createSymDifferenceResultLayer(layer1, layer2 *GDALLayer) (*GDALLayer, erro
 // addSymDifferenceFields 添加对称差异分析的字段（修改版本）
 func addSymDifferenceFields(resultLayer, layer1, layer2 *GDALLayer) error {
 
-
 	// 合并两个图层的字段（不使用前缀）
-	err1 := addLayerFields(resultLayer, layer1,"")
+	err1 := addLayerFields(resultLayer, layer1, "")
 	if err1 != nil {
 		return fmt.Errorf("添加图层1字段失败: %v", err1)
 	}
 
-	err2 := addLayerFields(resultLayer, layer2,"")
+	err2 := addLayerFields(resultLayer, layer2, "")
 	if err2 != nil {
 		return fmt.Errorf("添加图层2字段失败: %v", err2)
 	}
 
 	return nil
 }
-
 
 // executeSymDifferenceAnalysis 执行对称差异分析
 func executeSymDifferenceAnalysis(layer1, layer2, resultLayer *GDALLayer, progressCallback ProgressCallback) error {

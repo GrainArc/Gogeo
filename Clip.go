@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025 [fmecool]
+Copyright (C) 2025 [GrainArc]
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -32,12 +32,12 @@ import "C"
 
 import (
 	"fmt"
-	"runtime"
-	"log"
 	"github.com/google/uuid"
+	"log"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
-	"sync"
 	"unsafe"
 )
 
@@ -47,8 +47,7 @@ func SpatialClipAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGeo
 	defer inputLayer.Close()
 	defer methodlayer.Close()
 
-
-	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	err := addIdentifierField(inputLayer, "gogeo_analysis_id")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
@@ -106,7 +105,6 @@ func performParallelClipAnalysis(inputLayer, methodLayer *GDALLayer, config *Par
 			C.setLayerGeometryPrecision(methodMemLayer.layer, gridSize, flags)
 		}
 
-
 		// 使用内存图层进行后续处理
 		inputLayer = inputMemLayer
 		methodLayer = methodMemLayer
@@ -117,9 +115,9 @@ func performParallelClipAnalysis(inputLayer, methodLayer *GDALLayer, config *Par
 	}
 	taskid := uuid.New().String()
 	//对A B图层进行分块,并创建bin文件
-	GenerateTiles(inputLayer,methodLayer,config.TileCount,taskid)
+	GenerateTiles(inputLayer, methodLayer, config.TileCount, taskid)
 	//读取文件列表，并发执行操作
-	GPbins ,err:= ReadAndGroupBinFiles(taskid)
+	GPbins, err := ReadAndGroupBinFiles(taskid)
 	if err != nil {
 		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
@@ -137,10 +135,8 @@ func performParallelClipAnalysis(inputLayer, methodLayer *GDALLayer, config *Par
 		}
 	}()
 
-
 	return resultLayer, nil
 }
-
 
 // createClipResultLayer 创建裁剪结果图层
 func createClipResultLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
@@ -170,7 +166,6 @@ func createClipResultLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
 	return resultLayer, nil
 }
 
-
 func executeConcurrentClipAnalysis(tileGroups []GroupTileFiles, resultLayer *GDALLayer, config *ParallelGeosConfig) error {
 	maxWorkers := config.MaxWorkers
 	if maxWorkers <= 0 {
@@ -181,8 +176,6 @@ func executeConcurrentClipAnalysis(tileGroups []GroupTileFiles, resultLayer *GDA
 	if totalTasks == 0 {
 		return fmt.Errorf("没有分块需要处理")
 	}
-
-
 
 	// 创建任务队列和结果队列
 	taskQueue := make(chan GroupTileFiles, totalTasks)
@@ -297,7 +290,6 @@ func worker_clip(workerID int, taskQueue <-chan GroupTileFiles, results chan<- t
 
 	tasksProcessed := 0
 
-
 	for tileGroup := range taskQueue {
 
 		start := time.Now()
@@ -317,7 +309,6 @@ func worker_clip(workerID int, taskQueue <-chan GroupTileFiles, results chan<- t
 			index:    tileGroup.Index,
 		}
 
-
 		// 定期强制垃圾回收
 
 		runtime.GC()
@@ -333,7 +324,6 @@ func processTileGroupforClip(tileGroup GroupTileFiles, config *ParallelGeosConfi
 	if err != nil {
 		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
 	}
-
 
 	// 加载layer2的bin文件
 	eraseTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
@@ -385,7 +375,6 @@ func executeClipAnalysis(inputLayer, eraseLayer, resultLayer *GDALLayer, progres
 	options = C.CSLAddString(options, keepLowerDimOpt)
 	options = C.CSLAddString(options, usePreparatedGeomOpt)
 
-
 	// 执行擦除操作
 	return executeGDALClipWithProgress(inputLayer, eraseLayer, resultLayer, options, progressCallback)
 }
@@ -396,8 +385,6 @@ func executeGDALClipWithProgress(inputLayer, methodLayer, resultLayer *GDALLayer
 
 	fixGeometryTopology(inputLayer)
 	fixGeometryTopology(methodLayer)
-
-
 
 	var err C.OGRErr
 
@@ -434,7 +421,6 @@ func executeGDALClipWithProgress(inputLayer, methodLayer, resultLayer *GDALLayer
 		// 强制清理图层缓存
 		C.OGR_L_ResetReading(inputLayer.layer)
 		C.OGR_L_ResetReading(methodLayer.layer)
-
 
 	}()
 

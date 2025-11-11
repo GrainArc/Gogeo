@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025 [fmecool]
+Copyright (C) 2025 [GrainArc]
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -32,12 +32,12 @@ static OGRErr performEraseWithProgress(OGRLayerH inputLayer,
 import "C"
 import (
 	"fmt"
-	"runtime"
-	"log"
-	"sync/atomic"
-	"sync"
-	"time"
 	"github.com/google/uuid"
+	"log"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -52,7 +52,7 @@ func SpatialEraseAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGe
 	defer methodlayer.Close()
 
 	// 为输入图层添加唯一标识字段（用于后续融合）
-	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	err := addIdentifierField(inputLayer, "gogeo_analysis_id")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
@@ -67,7 +67,6 @@ func SpatialEraseAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGe
 
 	// 计算结果数量
 	resultCount := resultLayer.GetFeatureCount()
-
 
 	if config.IsMergeTile == true {
 		fmt.Println("配置要求执行融合操作，开始融合...")
@@ -93,7 +92,6 @@ func SpatialEraseAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGe
 
 }
 
-
 // performTileClipEraseAnalysis 执行基于瓦片裁剪的并行擦除分析
 func performTileClipEraseAnalysis(inputLayer, eraseLayer *GDALLayer, inputTableName, eraseTableName string, config *ParallelGeosConfig) (*GDALLayer, error) {
 	// 如果启用了精度设置，在分块裁剪前对原始图层进行精度处理
@@ -112,7 +110,7 @@ func performTileClipEraseAnalysis(inputLayer, eraseLayer *GDALLayer, inputTableN
 		}
 
 		// 在内存图层上设置精度
-		if  config.PrecisionConfig.Enabled {
+		if config.PrecisionConfig.Enabled {
 			flags := config.PrecisionConfig.getFlags()
 			gridSize := C.double(config.PrecisionConfig.GridSize)
 
@@ -131,9 +129,9 @@ func performTileClipEraseAnalysis(inputLayer, eraseLayer *GDALLayer, inputTableN
 	taskid := uuid.New().String()
 
 	//对A B图层进行分块,并创建bin文件
-	GenerateTiles(inputLayer,eraseLayer,config.TileCount,taskid)
+	GenerateTiles(inputLayer, eraseLayer, config.TileCount, taskid)
 	//读取文件列表，并发执行擦除操作
-	GPbins ,err:= ReadAndGroupBinFiles(taskid)
+	GPbins, err := ReadAndGroupBinFiles(taskid)
 	if err != nil {
 		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
@@ -153,8 +151,6 @@ func performTileClipEraseAnalysis(inputLayer, eraseLayer *GDALLayer, inputTableN
 		}
 	}()
 
-
-
 	return resultLayer, nil
 }
 
@@ -168,8 +164,6 @@ func executeConcurrentEraseAnalysis(tileGroups []GroupTileFiles, resultLayer *GD
 	if totalTasks == 0 {
 		return fmt.Errorf("没有分块需要处理")
 	}
-
-
 
 	// 创建任务队列和结果队列
 	taskQueue := make(chan GroupTileFiles, totalTasks)
@@ -284,7 +278,6 @@ func worker(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskRe
 
 	tasksProcessed := 0
 
-
 	for tileGroup := range taskQueue {
 
 		start := time.Now()
@@ -304,7 +297,6 @@ func worker(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskRe
 			index:    tileGroup.Index,
 		}
 
-
 		// 定期强制垃圾回收
 
 		runtime.GC()
@@ -313,7 +305,6 @@ func worker(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskRe
 
 }
 
-
 func processTileGroup(tileGroup GroupTileFiles, config *ParallelGeosConfig) (*GDALLayer, error) {
 
 	// 加载layer1的bin文件
@@ -321,7 +312,6 @@ func processTileGroup(tileGroup GroupTileFiles, config *ParallelGeosConfig) (*GD
 	if err != nil {
 		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
 	}
-
 
 	// 加载layer2的bin文件
 	eraseTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
@@ -350,10 +340,6 @@ func processTileGroup(tileGroup GroupTileFiles, config *ParallelGeosConfig) (*GD
 	return tileResultLayer, nil
 }
 
-
-
-
-
 // createEraseAnalysisResultLayer 创建擦除分析结果图层
 func createEraseAnalysisResultLayer(inputLayer *GDALLayer) (*GDALLayer, error) {
 	layerName := C.CString("erase_result")
@@ -381,8 +367,6 @@ func createEraseAnalysisResultLayer(inputLayer *GDALLayer) (*GDALLayer, error) {
 
 	return resultLayer, nil
 }
-
-
 
 // executeEraseAnalysis 执行擦除分析
 func executeEraseAnalysis(inputLayer, eraseLayer, resultLayer *GDALLayer, progressCallback ProgressCallback) error {
@@ -421,8 +405,6 @@ func executeGDALEraseWithProgress(inputLayer, eraseLayer, resultLayer *GDALLayer
 	fixGeometryTopology(inputLayer)
 	fixGeometryTopology(eraseLayer)
 
-
-
 	var err C.OGRErr
 
 	if progressCallback != nil {
@@ -458,7 +440,6 @@ func executeGDALEraseWithProgress(inputLayer, eraseLayer, resultLayer *GDALLayer
 		// 强制清理图层缓存
 		C.OGR_L_ResetReading(inputLayer.layer)
 		C.OGR_L_ResetReading(eraseLayer.layer)
-
 
 	}()
 

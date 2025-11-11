@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025 [fmecool]
+Copyright (C) 2025 [GrainArc]
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
@@ -32,10 +32,10 @@ import "C"
 
 import (
 	"fmt"
-	"sync"
-	"runtime"
-	"log"
 	"github.com/google/uuid"
+	"log"
+	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 )
@@ -48,12 +48,12 @@ func SpatialIntersectionAnalysis(inputLayer, methodLayer *GDALLayer, config *Par
 	defer methodLayer.Close()
 	// 执行并行相交分析
 
-	err := addIdentifierField(inputLayer,"gogeo_analysis_id")
+	err := addIdentifierField(inputLayer, "gogeo_analysis_id")
 	if err != nil {
 		return nil, fmt.Errorf("添加唯一标识字段失败: %v", err)
 	}
-	if strategy == UseTable2Fields{
-		err = addIdentifierField(methodLayer,"gogeo_analysis_id")
+	if strategy == UseTable2Fields {
+		err = addIdentifierField(methodLayer, "gogeo_analysis_id")
 	}
 	resultLayer, err := performIntersectionAnalysis(inputLayer, methodLayer, strategy, config)
 	if err != nil {
@@ -79,7 +79,6 @@ func SpatialIntersectionAnalysis(inputLayer, methodLayer *GDALLayer, config *Par
 		return unionResult, nil
 	} else {
 
-
 		return &GeosAnalysisResult{
 			OutputLayer: resultLayer,
 			ResultCount: resultCount,
@@ -88,7 +87,7 @@ func SpatialIntersectionAnalysis(inputLayer, methodLayer *GDALLayer, config *Par
 }
 
 func performIntersectionAnalysis(inputLayer, methodLayer *GDALLayer, strategy FieldMergeStrategy, config *ParallelGeosConfig) (*GDALLayer, error) {
-	if config.PrecisionConfig != nil  {
+	if config.PrecisionConfig != nil {
 		// 创建内存副本
 		inputMemLayer, err := createMemoryLayerCopy(inputLayer, "input_mem_layer")
 		if err != nil {
@@ -102,7 +101,7 @@ func performIntersectionAnalysis(inputLayer, methodLayer *GDALLayer, strategy Fi
 		}
 
 		// 在内存图层上设置精度
-		if config.PrecisionConfig.Enabled  {
+		if config.PrecisionConfig.Enabled {
 			flags := config.PrecisionConfig.getFlags()
 			gridSize := C.double(config.PrecisionConfig.GridSize)
 
@@ -115,7 +114,6 @@ func performIntersectionAnalysis(inputLayer, methodLayer *GDALLayer, strategy Fi
 		methodLayer = methodMemLayer
 	}
 
-
 	// 创建结果图层
 	resultLayer, err := createIntersectionResultLayer(inputLayer, methodLayer, strategy)
 	if err != nil {
@@ -123,9 +121,9 @@ func performIntersectionAnalysis(inputLayer, methodLayer *GDALLayer, strategy Fi
 	}
 	taskid := uuid.New().String()
 	//对A B图层进行分块,并创建bin文件
-	GenerateTiles(inputLayer,methodLayer,config.TileCount,taskid)
+	GenerateTiles(inputLayer, methodLayer, config.TileCount, taskid)
 	//读取文件列表，并发执行擦除操作
-	GPbins ,err:= ReadAndGroupBinFiles(taskid)
+	GPbins, err := ReadAndGroupBinFiles(taskid)
 	if err != nil {
 		return nil, fmt.Errorf("提取分组文件失败: %v", err)
 	}
@@ -155,8 +153,6 @@ func executeConcurrentIntersectionAnalysis(tileGroups []GroupTileFiles, resultLa
 	if totalTasks == 0 {
 		return fmt.Errorf("没有分块需要处理")
 	}
-
-
 
 	// 创建任务队列和结果队列
 	taskQueue := make(chan GroupTileFiles, totalTasks)
@@ -266,20 +262,17 @@ func executeConcurrentIntersectionAnalysis(tileGroups []GroupTileFiles, resultLa
 	return nil
 }
 
-
-
-func worker_intersection(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup , strategy FieldMergeStrategy) {
+func worker_intersection(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup, strategy FieldMergeStrategy) {
 	defer wg.Done()
 
 	tasksProcessed := 0
-
 
 	for tileGroup := range taskQueue {
 
 		start := time.Now()
 
 		// 处理单个分块
-		layer, err := processTileGroupforIntersection(tileGroup, config ,strategy)
+		layer, err := processTileGroupforIntersection(tileGroup, config, strategy)
 
 		duration := time.Since(start)
 
@@ -298,14 +291,13 @@ func worker_intersection(workerID int, taskQueue <-chan GroupTileFiles, results 
 
 }
 
-func processTileGroupforIntersection(tileGroup GroupTileFiles, config *ParallelGeosConfig ,  strategy FieldMergeStrategy) (*GDALLayer, error) {
+func processTileGroupforIntersection(tileGroup GroupTileFiles, config *ParallelGeosConfig, strategy FieldMergeStrategy) (*GDALLayer, error) {
 
 	// 加载layer1的bin文件
 	inputTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer1)
 	if err != nil {
 		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
 	}
-
 
 	// 加载layer2的bin文件
 	methodTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
@@ -320,29 +312,27 @@ func processTileGroupforIntersection(tileGroup GroupTileFiles, config *ParallelG
 
 	// 为当前分块创建临时结果图层
 	tileName := fmt.Sprintf("tile_result_%d", tileGroup.Index)
-	tileResultLayer, err := createIntersectionTileResultLayer(inputTileLayer, methodTileLayer,tileName,strategy)
+	tileResultLayer, err := createIntersectionTileResultLayer(inputTileLayer, methodTileLayer, tileName, strategy)
 	if err != nil {
 		return nil, fmt.Errorf("创建分块结果图层失败: %v", err)
 	}
 
 	// 执行裁剪分析 - 不使用进度回调
-	err = executeIntersectionWithStrategy(inputTileLayer, methodTileLayer, tileResultLayer,strategy, nil)
+	err = executeIntersectionWithStrategy(inputTileLayer, methodTileLayer, tileResultLayer, strategy, nil)
 	if err != nil {
 		tileResultLayer.Close()
 		return nil, fmt.Errorf("执行擦除分析失败: %v", err)
 	}
 
-
 	return tileResultLayer, nil
 }
 
-func createIntersectionTileResultLayer(inputLayer, methodLayer *GDALLayer, layerName string,strategy FieldMergeStrategy) (*GDALLayer, error) {
+func createIntersectionTileResultLayer(inputLayer, methodLayer *GDALLayer, layerName string, strategy FieldMergeStrategy) (*GDALLayer, error) {
 	layerNameC := C.CString(layerName)
 	defer C.free(unsafe.Pointer(layerNameC))
 
 	// 获取空间参考系统
 	srs := inputLayer.GetSpatialRef()
-
 
 	// 创建结果图层
 	resultLayerPtr := C.createMemoryLayer(layerNameC, C.wkbMultiPolygon, srs)
@@ -362,8 +352,6 @@ func createIntersectionTileResultLayer(inputLayer, methodLayer *GDALLayer, layer
 
 	return resultLayer, nil
 }
-
-
 
 func executeIntersectionWithStrategy(layer1, layer2, resultLayer *GDALLayer, strategy FieldMergeStrategy, progressCallback ProgressCallback) error {
 	var options **C.char
@@ -581,11 +569,7 @@ func addNonConflictingFields(resultLayer, sourceLayer, existingLayer *GDALLayer,
 	return nil
 }
 
-
-
-
-
-//  GDAL相交分析
+// GDAL相交分析
 func executeGDALIntersection(inputLayer, methodLayer, resultLayer *GDALLayer, options **C.char, progressCallback ProgressCallback) error {
 	var progressData *ProgressData
 	var progressArg unsafe.Pointer
@@ -629,4 +613,3 @@ func executeGDALIntersection(inputLayer, methodLayer, resultLayer *GDALLayer, op
 
 	return nil
 }
-
