@@ -14,6 +14,7 @@ import (
 type MBTilesGenerator struct {
 	dataset          *RasterDataset
 	tileSize         int
+	imagePath        string
 	minZoom          int
 	maxZoom          int
 	useTMS           bool
@@ -49,13 +50,11 @@ type RasterTileResult struct {
 
 // NewMBTilesGenerator 创建MBTiles生成器
 func NewMBTilesGenerator(imagePath string, options *MBTilesOptions) (*MBTilesGenerator, error) {
-	// 打开栅格数据集
 	dataset, err := OpenRasterDataset(imagePath)
 	if err != nil {
 		return nil, err
 	}
 
-	// 设置默认选项
 	if options == nil {
 		options = &MBTilesOptions{}
 	}
@@ -71,6 +70,7 @@ func NewMBTilesGenerator(imagePath string, options *MBTilesOptions) (*MBTilesGen
 
 	gen := &MBTilesGenerator{
 		dataset:          dataset,
+		imagePath:        imagePath, // 保存路径
 		tileSize:         options.TileSize,
 		minZoom:          options.MinZoom,
 		maxZoom:          options.MaxZoom,
@@ -137,11 +137,10 @@ func (gen *MBTilesGenerator) GenerateWithConcurrency(outputPath string, metadata
 	}
 
 	// 并发生成瓦片
-	if err := gen.generateTilesConcurrent(db, concurrency); err != nil {
+	if err := gen.generateTilesConcurrent(db, concurrency, gen.imagePath); err != nil {
 		return fmt.Errorf("failed to generate tiles: %w", err)
 	}
 
-	log.Printf("MBTiles generation completed: %s", outputPath)
 	return nil
 }
 
@@ -295,7 +294,7 @@ func (gen *MBTilesGenerator) generateTiles(db *sql.DB) error {
 }
 
 // generateTilesConcurrent 并发生成所有瓦片
-func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int) error {
+func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int, imagePath string) error {
 	if concurrency <= 0 {
 		concurrency = 4 // 默认并发数
 	}
@@ -310,9 +309,6 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 	var cancelled int32
 	estimatedTotal := gen.EstimateTileCount()
 
-	log.Printf("Estimated total tiles: %d", estimatedTotal)
-	log.Printf("Using %d concurrent workers", concurrency)
-
 	// 调用进度回调 - 开始
 	if gen.progressCallback != nil {
 		if !gen.progressCallback(0, "Starting concurrent tile generation") {
@@ -326,7 +322,7 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			gen.tileWorker(workerID, taskChan, resultChan, &cancelled)
+			gen.tileWorker(workerID, imagePath, taskChan, resultChan, &cancelled)
 		}(i)
 	}
 
@@ -394,15 +390,22 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 }
 
 // tileWorker 瓦片生成工作协程
-func (gen *MBTilesGenerator) tileWorker(workerID int, tasks <-chan TileTask, results chan<- RasterTileResult, cancelled *int32) {
+func (gen *MBTilesGenerator) tileWorker(workerID int, imagePath string, tasks <-chan TileTask, results chan<- RasterTileResult, cancelled *int32) {
+	// 每个worker打开自己的数据集副本
+	dataset, err := OpenRasterDataset(imagePath)
+	if err != nil {
+		log.Printf("Worker %d failed to open dataset: %v", workerID, err)
+		return
+	}
+	defer dataset.Close()
+
 	for task := range tasks {
-		// 检查是否已取消
 		if atomic.LoadInt32(cancelled) == 1 {
 			return
 		}
 
-		// 读取瓦片数据
-		tileData, err := gen.dataset.ReadTile(task.Zoom, task.X, task.Y, gen.tileSize)
+		// 使用worker自己的数据集读取
+		tileData, err := dataset.ReadTile(task.Zoom, task.X, task.Y, gen.tileSize)
 
 		results <- RasterTileResult{
 			Zoom:  task.Zoom,
