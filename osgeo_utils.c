@@ -591,37 +591,46 @@ int readTileData(GDALDatasetH hDS, double minX, double minY, double maxX, double
         return 0;
     }
 
-    // 🔥 第一步：计算瓦片的世界坐标范围
+    // 瓦片的世界坐标范围
     double tileWorldWidth = maxX - minX;
     double tileWorldHeight = maxY - minY;
 
-    // 🔥 第二步：获取影像的世界坐标范围
+    // 影像的世界坐标范围
     int rasterXSize = GDALGetRasterXSize(hDS);
     int rasterYSize = GDALGetRasterYSize(hDS);
 
     double imageMinX = adfGeoTransform[0];
     double imageMaxX = adfGeoTransform[0] + rasterXSize * adfGeoTransform[1];
     double imageMaxY = adfGeoTransform[3];
-    double imageMinY = adfGeoTransform[3] + rasterYSize * adfGeoTransform[5];  // 注意：[5]是负数
+    double imageMinY = adfGeoTransform[3] + rasterYSize * adfGeoTransform[5];
 
-    // 🔥 第三步：计算瓦片和影像的交集
+    // 计算交集
     double intersectMinX = fmax(minX, imageMinX);
     double intersectMaxX = fmin(maxX, imageMaxX);
     double intersectMinY = fmax(minY, imageMinY);
     double intersectMaxY = fmin(maxY, imageMaxY);
 
-    // 检查是否有交集
     if (intersectMinX >= intersectMaxX || intersectMinY >= intersectMaxY) {
-        return 0;  // 无交集，返回空瓦片
+        return 0;
     }
 
-    // 🔥 第四步：计算交集在影像中的像素坐标
-    int srcXOff = (int)((intersectMinX - adfGeoTransform[0]) / adfGeoTransform[1]);
-    int srcYOff = (int)((intersectMaxY - adfGeoTransform[3]) / adfGeoTransform[5]);
-    int srcXSize = (int)((intersectMaxX - intersectMinX) / adfGeoTransform[1]);
-    int srcYSize = (int)((intersectMinY - intersectMaxY) / adfGeoTransform[5]);
+    // 🔥 优化1：使用更精确的像素坐标计算
+    // 计算交集在影像中的精确像素坐标（浮点数）
+    double srcXOffFloat = (intersectMinX - adfGeoTransform[0]) / adfGeoTransform[1];
+    double srcYOffFloat = (intersectMaxY - adfGeoTransform[3]) / adfGeoTransform[5];
+    double srcXEndFloat = (intersectMaxX - adfGeoTransform[0]) / adfGeoTransform[1];
+    double srcYEndFloat = (intersectMinY - adfGeoTransform[3]) / adfGeoTransform[5];
 
-    // 边界检查和裁剪
+    // 🔥 优化2：使用 floor 和 ceil 确保边界完整
+    int srcXOff = (int)floor(srcXOffFloat);
+    int srcYOff = (int)floor(srcYOffFloat);
+    int srcXEnd = (int)ceil(srcXEndFloat);
+    int srcYEnd = (int)ceil(srcYEndFloat);
+
+    int srcXSize = srcXEnd - srcXOff;
+    int srcYSize = srcYEnd - srcYOff;
+
+    // 边界检查
     if (srcXOff < 0) { srcXSize += srcXOff; srcXOff = 0; }
     if (srcYOff < 0) { srcYSize += srcYOff; srcYOff = 0; }
     if (srcXOff + srcXSize > rasterXSize) { srcXSize = rasterXSize - srcXOff; }
@@ -631,41 +640,66 @@ int readTileData(GDALDatasetH hDS, double minX, double minY, double maxX, double
         return 0;
     }
 
-    // 🔥 第五步：计算交集在瓦片中的像素坐标
-    int dstXOff = (int)((intersectMinX - minX) / tileWorldWidth * tileSize);
-    int dstYOff = (int)((maxY - intersectMaxY) / tileWorldHeight * tileSize);  // 注意Y轴方向
-    int dstXSize = (int)((intersectMaxX - intersectMinX) / tileWorldWidth * tileSize);
-    int dstYSize = (int)((intersectMaxY - intersectMinY) / tileWorldHeight * tileSize);
+    // 🔥 优化3：精确计算目标像素坐标（使用 round 而不是直接转换）
+    // 计算交集在瓦片中的精确位置（浮点数）
+    double dstXOffFloat = (intersectMinX - minX) / tileWorldWidth * tileSize;
+    double dstYOffFloat = (maxY - intersectMaxY) / tileWorldHeight * tileSize;
+    double dstXEndFloat = (intersectMaxX - minX) / tileWorldWidth * tileSize;
+    double dstYEndFloat = (maxY - intersectMinY) / tileWorldHeight * tileSize;
 
-    // 确保目标尺寸在瓦片范围内
-    if (dstXOff < 0) { dstXOff = 0; }
-    if (dstYOff < 0) { dstYOff = 0; }
-    if (dstXOff + dstXSize > tileSize) { dstXSize = tileSize - dstXOff; }
-    if (dstYOff + dstYSize > tileSize) { dstYSize = tileSize - dstYOff; }
+    // 🔥 优化4：使用四舍五入确保像素对齐
+    int dstXOff = (int)round(dstXOffFloat);
+    int dstYOff = (int)round(dstYOffFloat);
+    int dstXEnd = (int)round(dstXEndFloat);
+    int dstYEnd = (int)round(dstYEndFloat);
+
+    int dstXSize = dstXEnd - dstXOff;
+    int dstYSize = dstYEnd - dstYOff;
+
+    // 🔥 优化5：确保至少有1个像素
+    if (dstXSize < 1) dstXSize = 1;
+    if (dstYSize < 1) dstYSize = 1;
+
+    // 边界裁剪
+    if (dstXOff < 0) {
+        dstXSize += dstXOff;
+        dstXOff = 0;
+    }
+    if (dstYOff < 0) {
+        dstYSize += dstYOff;
+        dstYOff = 0;
+    }
+    if (dstXOff + dstXSize > tileSize) {
+        dstXSize = tileSize - dstXOff;
+    }
+    if (dstYOff + dstYSize > tileSize) {
+        dstYSize = tileSize - dstYOff;
+    }
 
     if (dstXSize <= 0 || dstYSize <= 0) {
         return 0;
     }
 
     #ifdef DEBUG
-    printf("Tile world bounds: [%.2f, %.2f, %.2f, %.2f]\n", minX, minY, maxX, maxY);
-    printf("Intersect bounds: [%.2f, %.2f, %.2f, %.2f]\n",
+    printf("Tile: [%.6f, %.6f, %.6f, %.6f]\n", minX, minY, maxX, maxY);
+    printf("Intersect: [%.6f, %.6f, %.6f, %.6f]\n",
            intersectMinX, intersectMinY, intersectMaxX, intersectMaxY);
-    printf("Source: offset=[%d, %d], size=[%d, %d]\n", srcXOff, srcYOff, srcXSize, srcYSize);
-    printf("Dest: offset=[%d, %d], size=[%d, %d]\n", dstXOff, dstYOff, dstXSize, dstYSize);
+    printf("Src: offset=[%d, %d], size=[%d, %d]\n", srcXOff, srcYOff, srcXSize, srcYSize);
+    printf("Dst: offset=[%d, %d], size=[%d, %d]\n", dstXOff, dstYOff, dstXSize, dstYSize);
+    printf("Dst float: offset=[%.3f, %.3f], end=[%.3f, %.3f]\n",
+           dstXOffFloat, dstYOffFloat, dstXEndFloat, dstYEndFloat);
     #endif
 
-    // 🔥 第六步：创建临时缓冲区读取影像数据
     int bandCount = GDALGetRasterCount(hDS);
     if (bandCount < 1) return 0;
 
     int bands = bandCount > 4 ? 4 : bandCount;
 
-    // 为重采样创建临时缓冲区
+    // 临时缓冲区
     unsigned char* tempBuffer = (unsigned char*)malloc(dstXSize * dstYSize * bands);
     if (!tempBuffer) return 0;
 
-    // 🔥 第七步：从影像读取数据并重采样到目标尺寸
+    // 🔥 优化6：使用高质量重采样算法
     for (int i = 0; i < bands; i++) {
         GDALRasterBandH hBand = GDALGetRasterBand(hDS, i + 1);
         if (!hBand) {
@@ -673,30 +707,52 @@ int readTileData(GDALDatasetH hDS, double minX, double minY, double maxX, double
             return 0;
         }
 
-        CPLErr err = GDALRasterIO(
+        // 设置重采样算法为双线性或立方卷积
+        GDALRasterIOExtraArg sExtraArg;
+        INIT_RASTERIO_EXTRA_ARG(sExtraArg);
+        sExtraArg.eResampleAlg = GRIORA_Bilinear;  // 或 GRIORA_Cubic
+
+        CPLErr err = GDALRasterIOEx(
             hBand, GF_Read,
             srcXOff, srcYOff, srcXSize, srcYSize,
             tempBuffer + i * dstXSize * dstYSize,
             dstXSize, dstYSize,
-            GDT_Byte, 0, 0
+            GDT_Byte,
+            0, 0,
+            &sExtraArg
         );
 
         if (err != CE_None) {
-            free(tempBuffer);
-            return 0;
+            // 如果 GDALRasterIOEx 失败，回退到普通方法
+            err = GDALRasterIO(
+                hBand, GF_Read,
+                srcXOff, srcYOff, srcXSize, srcYSize,
+                tempBuffer + i * dstXSize * dstYSize,
+                dstXSize, dstYSize,
+                GDT_Byte, 0, 0
+            );
+
+            if (err != CE_None) {
+                free(tempBuffer);
+                return 0;
+            }
         }
     }
 
-    // 🔥 第八步：将重采样后的数据复制到瓦片的正确位置
-    // 先清空buffer（设为透明）
+    // 清空buffer（透明背景）
     memset(buffer, 0, tileSize * tileSize * 4);
 
+    // 复制数据到瓦片
     for (int i = 0; i < bands; i++) {
         for (int row = 0; row < dstYSize; row++) {
+            int dstRow = dstYOff + row;
+            if (dstRow >= tileSize) break;  // 安全检查
+
             for (int col = 0; col < dstXSize; col++) {
-                int srcIdx = i * dstXSize * dstYSize + row * dstXSize + col;
-                int dstRow = dstYOff + row;
                 int dstCol = dstXOff + col;
+                if (dstCol >= tileSize) break;  // 安全检查
+
+                int srcIdx = i * dstXSize * dstYSize + row * dstXSize + col;
                 int dstIdx = i * tileSize * tileSize + dstRow * tileSize + dstCol;
 
                 buffer[dstIdx] = tempBuffer[srcIdx];
@@ -704,26 +760,26 @@ int readTileData(GDALDatasetH hDS, double minX, double minY, double maxX, double
         }
     }
 
-    // 🔥 第九步：处理单波段（灰度）转RGB
+    // 处理灰度图
     if (bands == 1) {
-        for (int row = dstYOff; row < dstYOff + dstYSize; row++) {
-            for (int col = dstXOff; col < dstXOff + dstXSize; col++) {
+        for (int row = dstYOff; row < dstYOff + dstYSize && row < tileSize; row++) {
+            for (int col = dstXOff; col < dstXOff + dstXSize && col < tileSize; col++) {
                 int idx = row * tileSize + col;
                 unsigned char val = buffer[idx];
-                buffer[idx] = val;                          // R
-                buffer[tileSize * tileSize + idx] = val;    // G
-                buffer[2 * tileSize * tileSize + idx] = val; // B
+                buffer[idx] = val;
+                buffer[tileSize * tileSize + idx] = val;
+                buffer[2 * tileSize * tileSize + idx] = val;
             }
         }
         bands = 3;
     }
 
-    // 🔥 第十步：设置Alpha通道
+    // 设置Alpha通道
     if (bands == 3) {
-        for (int row = dstYOff; row < dstYOff + dstYSize; row++) {
-            for (int col = dstXOff; col < dstXOff + dstXSize; col++) {
+        for (int row = dstYOff; row < dstYOff + dstYSize && row < tileSize; row++) {
+            for (int col = dstXOff; col < dstXOff + dstXSize && col < tileSize; col++) {
                 int idx = row * tileSize + col;
-                buffer[3 * tileSize * tileSize + idx] = 255;  // 不透明
+                buffer[3 * tileSize * tileSize + idx] = 255;
             }
         }
         bands = 4;
