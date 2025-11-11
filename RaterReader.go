@@ -127,33 +127,43 @@ func (rd *RasterDataset) GetBounds() (minX, minY, maxX, maxY float64) {
 func (rd *RasterDataset) GetBoundsLatLon() (minLon, minLat, maxLon, maxLat float64) {
 	minX, minY, maxX, maxY := rd.GetBounds()
 
-	minLon = minX * 180 / 20037508.34
-	maxLon = maxX * 180 / 20037508.34
-	minLat = math.Atan(math.Exp(minY*math.Pi/20037508.34))*360/math.Pi - 90
-	maxLat = math.Atan(math.Exp(maxY*math.Pi/20037508.34))*360/math.Pi - 90
+	minLon, minLat = WebMercatorToLatLon(minX, minY)
+	maxLon, maxLat = WebMercatorToLatLon(maxX, maxY)
 
 	return
 }
 
-// GetTileRange 获取指定缩放级别的瓦片范围
+// GetTileRange 获取指定缩放级别的瓦片范围（符合Mapbox规范）
 func (rd *RasterDataset) GetTileRange(zoom int) (minTileX, minTileY, maxTileX, maxTileY int) {
 	minX, minY, maxX, maxY := rd.GetBounds()
 
-	n := math.Pow(2, float64(zoom))
+	const (
+		EarthRadius = 6378137.0
+		OriginShift = math.Pi * EarthRadius // 20037508.342789244
+	)
 
-	minTileX = int((minX + 20037508.343) / 40075016.686 * n)
-	maxTileX = int((maxX + 20037508.343) / 40075016.686 * n)
-	minTileY = int((20037508.343 - maxY) / 40075016.686 * n)
-	maxTileY = int((20037508.343 - minY) / 40075016.686 * n)
+	// 🔥 修正：计算该缩放级别的瓦片总数
+	numTiles := math.Exp2(float64(zoom))
+
+	// 🔥 修正：计算单个瓦片的世界尺寸（米）
+	tileWorldSize := (2 * OriginShift) / numTiles
+
+	// 计算瓦片行列号（XYZ方案）
+	minTileX = int(math.Floor((minX + OriginShift) / tileWorldSize))
+	maxTileX = int(math.Floor((maxX + OriginShift) / tileWorldSize))
+
+	// Y坐标：XYZ方案，Y轴向下
+	minTileY = int(math.Floor((OriginShift - maxY) / tileWorldSize))
+	maxTileY = int(math.Floor((OriginShift - minY) / tileWorldSize))
 
 	// 边界检查
+	maxTiles := int(numTiles) - 1
 	if minTileX < 0 {
 		minTileX = 0
 	}
 	if minTileY < 0 {
 		minTileY = 0
 	}
-	maxTiles := int(n) - 1
 	if maxTileX > maxTiles {
 		maxTileX = maxTiles
 	}
@@ -164,7 +174,7 @@ func (rd *RasterDataset) GetTileRange(zoom int) (minTileX, minTileY, maxTileX, m
 	return
 }
 
-// ReadTile 读取瓦片数据
+// ReadTile 读取瓦片数据（黑色背景转透明）
 func (rd *RasterDataset) ReadTile(zoom, x, y, tileSize int) ([]byte, error) {
 	var minX, minY, maxX, maxY C.double
 
@@ -185,53 +195,132 @@ func (rd *RasterDataset) ReadTile(zoom, x, y, tileSize int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read tile data")
 	}
 
-	// 创建图像
-	var img image.Image
+	// 创建 RGBA 图像（始终包含 Alpha 通道）
+	rgbaImg := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
 
 	if bands == 3 {
-		// RGB
-		rgbImg := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
+		// RGB -> RGBA（黑色转透明）
 		for i := 0; i < tileSize*tileSize; i++ {
-			rgbImg.Pix[i*4] = buffer[i]
-			rgbImg.Pix[i*4+1] = buffer[i+tileSize*tileSize]
-			rgbImg.Pix[i*4+2] = buffer[i+2*tileSize*tileSize]
-			rgbImg.Pix[i*4+3] = 255
+			r := buffer[i]
+			g := buffer[i+tileSize*tileSize]
+			b := buffer[i+2*tileSize*tileSize]
+
+			rgbaImg.Pix[i*4] = r
+			rgbaImg.Pix[i*4+1] = g
+			rgbaImg.Pix[i*4+2] = b
+
+			// 黑色背景转透明（可以设置阈值，比如 r+g+b < 10）
+			if r == 0 && g == 0 && b == 0 {
+				rgbaImg.Pix[i*4+3] = 0 // 完全透明
+			} else {
+				rgbaImg.Pix[i*4+3] = 255 // 完全不透明
+			}
 		}
-		img = rgbImg
 	} else if bands == 4 {
-		// RGBA
-		rgbaImg := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
+		// RGBA（直接使用）
 		for i := 0; i < tileSize*tileSize; i++ {
-			rgbaImg.Pix[i*4] = buffer[i]
-			rgbaImg.Pix[i*4+1] = buffer[i+tileSize*tileSize]
-			rgbaImg.Pix[i*4+2] = buffer[i+2*tileSize*tileSize]
-			rgbaImg.Pix[i*4+3] = buffer[i+3*tileSize*tileSize]
+			r := buffer[i]
+			g := buffer[i+tileSize*tileSize]
+			b := buffer[i+2*tileSize*tileSize]
+			a := buffer[i+3*tileSize*tileSize]
+
+			rgbaImg.Pix[i*4] = r
+			rgbaImg.Pix[i*4+1] = g
+			rgbaImg.Pix[i*4+2] = b
+
+			// 如果是黑色，强制设为透明
+			if r == 0 && g == 0 && b == 0 {
+				rgbaImg.Pix[i*4+3] = 0
+			} else {
+				rgbaImg.Pix[i*4+3] = a
+			}
 		}
-		img = rgbaImg
 	} else {
 		return nil, fmt.Errorf("unsupported band count: %d", bands)
 	}
 
-	// 编码为PNG
+	// 编码为 PNG（PNG 支持透明度）
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
+	if err := png.Encode(&buf, rgbaImg); err != nil {
 		return nil, err
 	}
 
 	return buf.Bytes(), nil
 }
 
-// LatLonToWebMercator 经纬度转Web墨卡托
+// LatLonToWebMercator 经纬度转Web墨卡托（符合Mapbox规范）
 func LatLonToWebMercator(lon, lat float64) (x, y float64) {
-	x = lon * 20037508.34 / 180.0
-	y = math.Log(math.Tan((90+lat)*math.Pi/360.0)) / (math.Pi / 180.0)
-	y = y * 20037508.34 / 180.0
+	const (
+		EarthRadius = 6378137.0
+		OriginShift = math.Pi * EarthRadius
+	)
+
+	x = lon * OriginShift / 180.0
+	y = math.Log(math.Tan((90+lat)*math.Pi/360.0)) * OriginShift / math.Pi
 	return
 }
 
-// WebMercatorToLatLon Web墨卡托转经纬度
+// WebMercatorToLatLon Web墨卡托转经纬度（符合Mapbox规范）
 func WebMercatorToLatLon(x, y float64) (lon, lat float64) {
-	lon = x * 180 / 20037508.34
-	lat = math.Atan(math.Exp(y*math.Pi/20037508.34))*360/math.Pi - 90
+	const (
+		EarthRadius = 6378137.0
+		OriginShift = math.Pi * EarthRadius
+	)
+
+	lon = x * 180.0 / OriginShift
+	lat = math.Atan(math.Exp(y*math.Pi/OriginShift))*360.0/math.Pi - 90.0
+	return
+}
+
+// LonLatToTile 经纬度转瓦片坐标（符合Mapbox规范）
+func LonLatToTile(lon, lat float64, zoom int) (x, y int) {
+	const (
+		EarthRadius = 6378137.0
+		OriginShift = math.Pi * EarthRadius
+	)
+
+	// 转换为Web墨卡托
+	mercX := lon * OriginShift / 180.0
+	mercY := math.Log(math.Tan((90+lat)*math.Pi/360.0)) * OriginShift / math.Pi
+
+	// **关键修复：使用整数位运算**
+	numTiles := int64(1 << uint(zoom))
+	tileSize := (2.0 * OriginShift) / float64(numTiles)
+
+	x = int(math.Floor((mercX + OriginShift) / tileSize))
+	y = int(math.Floor((OriginShift - mercY) / tileSize))
+
+	// 边界检查
+	maxTile := int(numTiles) - 1
+	if x < 0 {
+		x = 0
+	} else if x > maxTile {
+		x = maxTile
+	}
+	if y < 0 {
+		y = 0
+	} else if y > maxTile {
+		y = maxTile
+	}
+
+	return
+}
+
+// TileToWebMercatorBounds 瓦片坐标转Web墨卡托边界
+func TileToWebMercatorBounds(x, y, zoom int) (minX, minY, maxX, maxY float64) {
+	const (
+		EarthRadius = 6378137.0
+		OriginShift = math.Pi * EarthRadius
+	)
+
+	// **关键修复：使用整数位运算**
+	numTiles := int64(1 << uint(zoom))
+	tileSize := (2.0 * OriginShift) / float64(numTiles)
+
+	minX = float64(x)*tileSize - OriginShift
+	maxX = float64(x+1)*tileSize - OriginShift
+	maxY = OriginShift - float64(y)*tileSize
+	minY = OriginShift - float64(y+1)*tileSize
+
 	return
 }

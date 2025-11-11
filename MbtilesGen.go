@@ -12,22 +12,22 @@ import (
 
 // MBTilesGenerator MBTiles生成器
 type MBTilesGenerator struct {
-	dataset          *RasterDataset
-	tileSize         int
-	imagePath        string
-	minZoom          int
-	maxZoom          int
-	useTMS           bool
+	dataset   *RasterDataset
+	tileSize  int
+	imagePath string
+	minZoom   int
+	maxZoom   int
+
 	progressCallback ProgressCallback
 }
 
 // MBTilesOptions MBTiles生成选项
 type MBTilesOptions struct {
-	TileSize         int               // 瓦片大小，默认256
-	MinZoom          int               // 最小缩放级别，默认0
-	MaxZoom          int               // 最大缩放级别，默认18
-	Metadata         map[string]string // 自定义元数据
-	UseTMS           bool
+	TileSize int               // 瓦片大小，默认256
+	MinZoom  int               // 最小缩放级别，默认0
+	MaxZoom  int               // 最大缩放级别，默认18
+	Metadata map[string]string // 自定义元数据
+
 	Concurrency      int              // 并发数，默认为CPU核心数
 	ProgressCallback ProgressCallback // 进度回调函数
 }
@@ -69,12 +69,12 @@ func NewMBTilesGenerator(imagePath string, options *MBTilesOptions) (*MBTilesGen
 	}
 
 	gen := &MBTilesGenerator{
-		dataset:          dataset,
-		imagePath:        imagePath, // 保存路径
-		tileSize:         options.TileSize,
-		minZoom:          options.MinZoom,
-		maxZoom:          options.MaxZoom,
-		useTMS:           options.UseTMS,
+		dataset:   dataset,
+		imagePath: imagePath, // 保存路径
+		tileSize:  options.TileSize,
+		minZoom:   options.MinZoom,
+		maxZoom:   options.MaxZoom,
+
 		progressCallback: options.ProgressCallback,
 	}
 
@@ -239,10 +239,6 @@ func (gen *MBTilesGenerator) generateTiles(db *sql.DB) error {
 	for zoom := gen.minZoom; zoom <= gen.maxZoom; zoom++ {
 		minTileX, minTileY, maxTileX, maxTileY := gen.dataset.GetTileRange(zoom)
 
-		tileCount := (maxTileX - minTileX + 1) * (maxTileY - minTileY + 1)
-		log.Printf("Generating zoom level %d: tiles %d-%d, %d-%d (total: %d)",
-			zoom, minTileX, maxTileX, minTileY, maxTileY, tileCount)
-
 		// 遍历瓦片
 		for x := minTileX; x <= maxTileX; x++ {
 			for y := minTileY; y <= maxTileY; y++ {
@@ -254,9 +250,6 @@ func (gen *MBTilesGenerator) generateTiles(db *sql.DB) error {
 				}
 
 				tileY := y
-				if gen.useTMS {
-					tileY = (1 << uint(zoom)) - 1 - y
-				}
 
 				if _, err := stmt.Exec(zoom, x, tileY, tileData); err != nil {
 					return err
@@ -449,9 +442,6 @@ func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileRes
 		}
 
 		tileY := result.Y
-		if gen.useTMS {
-			tileY = (1 << uint(result.Zoom)) - 1 - result.Y
-		}
 
 		if _, err := stmt.Exec(result.Zoom, result.X, tileY, result.Data); err != nil {
 			log.Printf("Error writing tile %d/%d/%d: %v", result.Zoom, result.X, result.Y, err)
@@ -486,8 +476,6 @@ func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileRes
 		if current%100 == 0 {
 			progress := float64(current) / float64(estimatedTotal)
 			message := fmt.Sprintf("Progress: %d/%d tiles (%.2f%%)", current, estimatedTotal, progress*100)
-			log.Printf(message)
-
 			if gen.progressCallback != nil {
 				if !gen.progressCallback(progress, message) {
 					atomic.StoreInt32(cancelled, 1)
