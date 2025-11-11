@@ -3,135 +3,7 @@ package Gogeo
 /*
 #include "osgeo_utils.h"
 
-// 计算瓦片边界（Web墨卡托坐标）
-void getTileBounds(int x, int y, int zoom, double* minX, double* minY, double* maxX, double* maxY) {
-    double n = pow(2.0, zoom);
-    *minX = (x / n) * 40075016.686 - 20037508.343;
-    *maxX = ((x + 1) / n) * 40075016.686 - 20037508.343;
-    *maxY = 20037508.343 - (y / n) * 40075016.686;
-    *minY = 20037508.343 - ((y + 1) / n) * 40075016.686;
-}
 
-// 重投影数据集到Web墨卡托
-GDALDatasetH reprojectToWebMercator(GDALDatasetH hSrcDS) {
-    if (!hSrcDS) return NULL;
-
-    // 创建Web墨卡托坐标系
-    OGRSpatialReferenceH hDstSRS = OSRNewSpatialReference(NULL);
-    OSRImportFromEPSG(hDstSRS, 3857);
-    OSRSetAxisMappingStrategy(hDstSRS, OAMS_TRADITIONAL_GIS_ORDER);
-
-    char *pszDstWKT = NULL;
-    OSRExportToWkt(hDstSRS, &pszDstWKT);
-
-    // 获取源坐标系
-    const char *pszSrcWKT = GDALGetProjectionRef(hSrcDS);
-
-    // 使用AutoCreateWarpedVRT进行重投影
-    GDALDatasetH hWarpedDS = GDALAutoCreateWarpedVRT(
-        hSrcDS, pszSrcWKT, pszDstWKT,
-        GRA_Bilinear, 0.125, NULL
-    );
-
-    OSRDestroySpatialReference(hDstSRS);
-    CPLFree(pszDstWKT);
-
-    return hWarpedDS;
-}
-
-// 读取瓦片数据
-int readTileData(GDALDatasetH hDS, double minX, double minY, double maxX, double maxY,
-                 int tileSize, unsigned char* buffer) {
-    if (!hDS || !buffer) return 0;
-
-    double adfGeoTransform[6];
-    if (GDALGetGeoTransform(hDS, adfGeoTransform) != CE_None) {
-        return 0;
-    }
-
-    // 计算像素坐标
-    int xOff = (int)((minX - adfGeoTransform[0]) / adfGeoTransform[1]);
-    int yOff = (int)((maxY - adfGeoTransform[3]) / adfGeoTransform[5]);
-    int xSize = (int)((maxX - minX) / adfGeoTransform[1]);
-    int ySize = (int)((minY - maxY) / adfGeoTransform[5]);
-
-    // 边界检查
-    int rasterXSize = GDALGetRasterXSize(hDS);
-    int rasterYSize = GDALGetRasterYSize(hDS);
-
-    if (xOff < 0) xOff = 0;
-    if (yOff < 0) yOff = 0;
-    if (xOff + xSize > rasterXSize) xSize = rasterXSize - xOff;
-    if (yOff + ySize > rasterYSize) ySize = rasterYSize - yOff;
-
-    if (xSize <= 0 || ySize <= 0) return 0;
-
-    int bandCount = GDALGetRasterCount(hDS);
-    if (bandCount < 1) return 0;
-
-    // 读取波段数据（最多4个波段：RGBA）
-    int bands = bandCount > 4 ? 4 : bandCount;
-
-    for (int i = 0; i < bands; i++) {
-        GDALRasterBandH hBand = GDALGetRasterBand(hDS, i + 1);
-        if (!hBand) continue;
-
-        CPLErr err = GDALRasterIO(
-            hBand, GF_Read,
-            xOff, yOff, xSize, ySize,
-            buffer + i * tileSize * tileSize,
-            tileSize, tileSize,
-            GDT_Byte, 0, 0
-        );
-
-        if (err != CE_None) return 0;
-    }
-
-    // 如果只有1个波段，转换为RGB
-    if (bands == 1) {
-        // 灰度转RGB
-        for (int i = tileSize * tileSize - 1; i >= 0; i--) {
-            unsigned char val = buffer[i];
-            buffer[i * 3] = val;
-            buffer[i * 3 + 1] = val;
-            buffer[i * 3 + 2] = val;
-        }
-        bands = 3;
-    }
-
-    return bands;
-}
-
-// 获取数据集信息
-typedef struct {
-    int width;
-    int height;
-    int bandCount;
-    double geoTransform[6];
-    char projection[2048];
-} DatasetInfo;
-
-int getDatasetInfo(GDALDatasetH hDS, DatasetInfo* info) {
-    if (!hDS || !info) return 0;
-
-    info->width = GDALGetRasterXSize(hDS);
-    info->height = GDALGetRasterYSize(hDS);
-    info->bandCount = GDALGetRasterCount(hDS);
-
-    if (GDALGetGeoTransform(hDS, info->geoTransform) != CE_None) {
-        return 0;
-    }
-
-    const char* proj = GDALGetProjectionRef(hDS);
-    if (proj) {
-        strncpy(info->projection, proj, sizeof(info->projection) - 1);
-        info->projection[sizeof(info->projection) - 1] = '\0';
-    } else {
-        info->projection[0] = '\0';
-    }
-
-    return 1;
-}
 */
 import "C"
 
@@ -166,6 +38,8 @@ type DatasetInfo struct {
 
 // OpenRasterDataset 打开栅格数据集
 func OpenRasterDataset(imagePath string) (*RasterDataset, error) {
+	InitializeGDAL()
+
 	cPath := C.CString(imagePath)
 	defer C.free(unsafe.Pointer(cPath))
 

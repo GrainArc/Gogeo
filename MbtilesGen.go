@@ -14,6 +14,7 @@ type MBTilesGenerator struct {
 	tileSize int
 	minZoom  int
 	maxZoom  int
+	useTMS   bool
 }
 
 // MBTilesOptions MBTiles生成选项
@@ -22,6 +23,7 @@ type MBTilesOptions struct {
 	MinZoom  int               // 最小缩放级别，默认0
 	MaxZoom  int               // 最大缩放级别，默认18
 	Metadata map[string]string // 自定义元数据
+	UseTMS   bool
 }
 
 // NewMBTilesGenerator 创建MBTiles生成器
@@ -51,6 +53,7 @@ func NewMBTilesGenerator(imagePath string, options *MBTilesOptions) (*MBTilesGen
 		tileSize: options.TileSize,
 		minZoom:  options.MinZoom,
 		maxZoom:  options.MaxZoom,
+		useTMS:   options.UseTMS,
 	}
 
 	return gen, nil
@@ -193,11 +196,12 @@ func (gen *MBTilesGenerator) generateTiles(db *sql.DB) error {
 					continue
 				}
 
-				// MBTiles使用TMS坐标系（Y轴反转）
-				tmsY := (1 << uint(zoom)) - 1 - y
+				tileY := y
+				if gen.useTMS {
+					tileY = (1 << uint(zoom)) - 1 - y
+				}
 
-				// 插入瓦片
-				if _, err := stmt.Exec(zoom, x, tmsY, tileData); err != nil {
+				if _, err := stmt.Exec(zoom, x, tileY, tileData); err != nil {
 					return err
 				}
 

@@ -20,6 +20,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <math.h>
 #include <gdal.h>
 #include <gdal_alg.h>
+#include <gdalwarper.h> 
 #include <ogr_api.h>
 #include <ogr_srs_api.h>
 #include <cpl_error.h>
@@ -33,7 +34,14 @@ extern "C" {
 
 // 声明外部函数，避免重复定义
 extern int handleProgressUpdate(double, char*, void*);
-
+// 获取数据集信息
+typedef struct {
+    int width;
+    int height;
+    int bandCount;
+    double geoTransform[6];
+    char projection[2048];
+} DatasetInfo;
 
 OGRLayerH createMemoryLayer(const char* layerName, OGRwkbGeometryType geomType, OGRSpatialReferenceH srs);
 int check_isnan(double x);
@@ -54,7 +62,11 @@ OGRGeometryH mergeGeometryCollection(OGRGeometryH geomCollection, OGRwkbGeometry
 OGRGeometryH normalizeGeometryType(OGRGeometryH geom, OGRwkbGeometryType expectedType);
 OGRGeometryH createTileClipGeometry(double minX, double minY, double maxX, double maxY);
 OGRLayerH clipLayerToTile(OGRLayerH sourceLayer, double minX, double minY, double maxX, double maxY, const char* layerName, const char* sourceIdentifier);
-
+void getTileBounds(int x, int y, int zoom, double* minX, double* minY, double* maxX, double* maxY);
+GDALDatasetH reprojectToWebMercator(GDALDatasetH hSrcDS);
+int readTileData(GDALDatasetH hDS, double minX, double minY, double maxX, double maxY,
+                 int tileSize, unsigned char* buffer);
+int getDatasetInfo(GDALDatasetH hDS, DatasetInfo* info);
 
 #ifdef __cplusplus
 }
