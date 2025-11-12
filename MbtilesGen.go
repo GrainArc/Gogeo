@@ -152,18 +152,14 @@ func (gen *MBTilesGenerator) GenerateWithConcurrency(outputPath string, metadata
 func (gen *MBTilesGenerator) createTables(db *sql.DB) error {
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS metadata (
-			name TEXT PRIMARY KEY, 
+			name TEXT, 
 			value TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS tiles (
 			zoom_level INTEGER,
 			tile_column INTEGER,
 			tile_row INTEGER,
-			tile_data BLOB,
-			PRIMARY KEY (zoom_level, tile_column, tile_row)
-		)`,
-		`CREATE INDEX IF NOT EXISTS tile_index ON tiles (
-			zoom_level, tile_column, tile_row
+			tile_data BLOB
 		)`,
 	}
 
@@ -199,7 +195,7 @@ func (gen *MBTilesGenerator) writeMetadata(db *sql.DB, customMetadata map[string
 	}
 
 	// 插入元数据
-	stmt, err := db.Prepare("INSERT OR REPLACE INTO metadata (name, value) VALUES (?, ?)")
+	stmt, err := db.Prepare("INSERT INTO metadata (name, value) VALUES (?, ?)")
 	if err != nil {
 		return err
 	}
@@ -215,15 +211,9 @@ func (gen *MBTilesGenerator) writeMetadata(db *sql.DB, customMetadata map[string
 }
 
 // generateTiles 生成所有瓦片（单线程版本）
+// generateTiles 生成所有瓦片（单线程版本）
 func (gen *MBTilesGenerator) generateTiles(db *sql.DB) error {
-	// 开始事务
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare("INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)")
+	stmt, err := db.Prepare("INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -256,7 +246,8 @@ func (gen *MBTilesGenerator) generateTiles(db *sql.DB) error {
 				tileY := y
 
 				if _, err := stmt.Exec(zoom, x, tileY, tileData); err != nil {
-					return err
+					log.Printf("Warning: failed to insert tile %d/%d/%d: %v", zoom, x, y, err)
+					continue
 				}
 
 				totalTiles++
@@ -276,17 +267,59 @@ func (gen *MBTilesGenerator) generateTiles(db *sql.DB) error {
 		}
 	}
 
-	// 提交事务
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
 	// 调用进度回调 - 完成
 	if gen.progressCallback != nil {
 		gen.progressCallback(1.0, fmt.Sprintf("Successfully generated %d tiles", totalTiles))
 	}
 
 	log.Printf("Successfully generated %d tiles", totalTiles)
+	return nil
+}
+
+// tileWriter 瓦片写入协程
+func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileResult, totalTiles, errorCount, cancelled, earlyReturn *int32, estimatedTotal int) error {
+	stmt, err := db.Prepare("INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for result := range results {
+		// 检查是否已取消（但不检查earlyReturn，继续处理）
+		if atomic.LoadInt32(cancelled) == 1 {
+			return fmt.Errorf("operation cancelled by user")
+		}
+
+		if result.Error != nil {
+			log.Printf("Warning: failed to generate tile %d/%d/%d: %v",
+				result.Zoom, result.X, result.Y, result.Error)
+			atomic.AddInt32(errorCount, 1)
+			continue
+		}
+
+		tileY := result.Y
+
+		if _, err := stmt.Exec(result.Zoom, result.X, tileY, result.Data); err != nil {
+			log.Printf("Error writing tile %d/%d/%d: %v", result.Zoom, result.X, result.Y, err)
+			atomic.AddInt32(errorCount, 1)
+			continue
+		}
+
+		current := atomic.AddInt32(totalTiles, 1)
+
+		// 定期输出进度和调用回调（如果没有提前返回）
+		if current%100 == 0 && atomic.LoadInt32(earlyReturn) == 0 {
+			progress := float64(current) / float64(estimatedTotal)
+			message := fmt.Sprintf("Progress: %d/%d tiles (%.2f%%)", current, estimatedTotal, progress*100)
+			if gen.progressCallback != nil {
+				if !gen.progressCallback(progress, message) {
+					atomic.StoreInt32(cancelled, 1)
+					return fmt.Errorf("operation cancelled by user")
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -482,90 +515,6 @@ func (gen *MBTilesGenerator) tileWorker(workerID int, imagePath string, tasks <-
 			Error: err,
 		}
 	}
-}
-
-// tileWriter 瓦片写入协程
-// tileWriter 瓦片写入协程（更新签名）
-func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileResult, totalTiles, errorCount, cancelled, earlyReturn *int32, estimatedTotal int) error {
-	// 开始事务
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare("INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	batchSize := 0
-	maxBatchSize := 1000
-
-	for result := range results {
-		// 检查是否已取消（但不检查earlyReturn，继续处理）
-		if atomic.LoadInt32(cancelled) == 1 {
-			return fmt.Errorf("operation cancelled by user")
-		}
-
-		if result.Error != nil {
-			log.Printf("Warning: failed to generate tile %d/%d/%d: %v",
-				result.Zoom, result.X, result.Y, result.Error)
-			atomic.AddInt32(errorCount, 1)
-			continue
-		}
-
-		tileY := result.Y
-
-		if _, err := stmt.Exec(result.Zoom, result.X, tileY, result.Data); err != nil {
-			log.Printf("Error writing tile %d/%d/%d: %v", result.Zoom, result.X, result.Y, err)
-			atomic.AddInt32(errorCount, 1)
-			continue
-		}
-
-		current := atomic.AddInt32(totalTiles, 1)
-		batchSize++
-
-		// 定期提交事务
-		if batchSize >= maxBatchSize {
-			if err := tx.Commit(); err != nil {
-				return err
-			}
-
-			// 开始新事务
-			tx, err = db.Begin()
-			if err != nil {
-				return err
-			}
-
-			stmt, err = tx.Prepare("INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)")
-			if err != nil {
-				return err
-			}
-
-			batchSize = 0
-		}
-
-		// 定期输出进度和调用回调（如果没有提前返回）
-		if current%100 == 0 && atomic.LoadInt32(earlyReturn) == 0 {
-			progress := float64(current) / float64(estimatedTotal)
-			message := fmt.Sprintf("Progress: %d/%d tiles (%.2f%%)", current, estimatedTotal, progress*100)
-			if gen.progressCallback != nil {
-				if !gen.progressCallback(progress, message) {
-					atomic.StoreInt32(cancelled, 1)
-					return fmt.Errorf("operation cancelled by user")
-				}
-			}
-		}
-	}
-
-	// 提交最后的事务
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // GetDatasetInfo 获取数据集信息
