@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -462,7 +464,7 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			gen.tileWorker(workerID, imagePath, taskChan, resultChan, &cancelled)
+			gen.tileWorker(workerID, imagePath, taskChan, resultChan, &cancelled, &earlyReturn)
 		}(i)
 	}
 
@@ -478,7 +480,7 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 
 		for zoom := gen.minZoom; zoom <= gen.maxZoom; zoom++ {
 			if atomic.LoadInt32(&cancelled) == 1 || atomic.LoadInt32(&earlyReturn) == 1 {
-				log.Printf("Task generation stopped")
+				log.Printf("Task generation stopped due to early return")
 				return
 			}
 
@@ -504,90 +506,87 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 		}
 	}()
 
-	// 监控进度
-	progressMonitor := make(chan bool, 1)
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
+	// 监控进度并在99%时强制返回
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-		for {
-			select {
-			case <-ticker.C:
-				current := atomic.LoadInt32(&totalTiles)
-				progress := float64(current) / float64(estimatedTotal)
+	for {
+		select {
+		case <-ticker.C:
+			current := atomic.LoadInt32(&totalTiles)
+			progress := float64(current) / float64(estimatedTotal)
 
-				// 当进度达到99%时，标记提前返回
-				if progress >= 0.99 && atomic.LoadInt32(&earlyReturn) == 0 {
-					atomic.StoreInt32(&earlyReturn, 1)
-					log.Printf("Progress reached 99%%, returning early. Background processing continues...")
+			// 当进度达到99%时，强制关闭并返回
+			if progress >= 0.99 && atomic.LoadInt32(&earlyReturn) == 0 {
+				atomic.StoreInt32(&earlyReturn, 1)
 
-					// 启动后台完成协程
-					go func() {
-						wg.Wait()
-						close(resultChan)
+				log.Printf("Progress reached 99%% (%d/%d tiles), forcing completion...", current, estimatedTotal)
 
-						if err := <-writerDone; err != nil {
-							log.Printf("Background processing error: %v", err)
-						}
-
-						if err := db.Close(); err != nil {
-							log.Printf("Error closing database: %v", err)
-						}
-
-						finalCount := atomic.LoadInt32(&totalTiles)
-						finalErrors := atomic.LoadInt32(&errorCount)
-						log.Printf("Background processing completed: %d tiles generated with %d errors", finalCount, finalErrors)
-					}()
-
-					progressMonitor <- true
-					return
+				// 回调通知99%完成
+				if gen.progressCallback != nil {
+					gen.progressCallback(0.99, fmt.Sprintf("99%% completed (%d/%d tiles), forcing shutdown...", current, estimatedTotal))
 				}
 
-				if current >= int32(estimatedTotal) || atomic.LoadInt32(&cancelled) == 1 {
-					progressMonitor <- false
-					return
+				// 等待一小段时间让当前批次写入完成
+				time.Sleep(200 * time.Millisecond)
+
+				// 强制关闭数据库
+				if err := db.Close(); err != nil {
+					log.Printf("Warning: Error closing database: %v", err)
+				} else {
+					log.Printf("Database closed successfully")
 				}
+
+				// 强制GC回收
+				log.Printf("Forcing garbage collection...")
+				runtime.GC()
+				runtime.GC()         // 调用两次确保彻底回收
+				debug.FreeOSMemory() // 释放内存给操作系统
+
+				log.Printf("Memory cleanup completed")
+
+				// 立即返回,视为完成
+				if gen.progressCallback != nil {
+					gen.progressCallback(1.0, fmt.Sprintf("Force completed with %d tiles", current))
+				}
+
+				return nil
+			}
+
+			// 正常完成检查
+			if current >= int32(estimatedTotal) {
+				// 等待所有协程完成
+				wg.Wait()
+				close(resultChan)
+
+				if err := <-writerDone; err != nil {
+					db.Close()
+					return err
+				}
+
+				if err := db.Close(); err != nil {
+					return fmt.Errorf("error closing database: %w", err)
+				}
+
+				if gen.progressCallback != nil {
+					gen.progressCallback(1.0, fmt.Sprintf("Successfully generated %d tiles with %d errors", totalTiles, errorCount))
+				}
+
+				log.Printf("Successfully generated %d tiles with %d errors", totalTiles, errorCount)
+				return nil
+			}
+
+			// 取消检查
+			if atomic.LoadInt32(&cancelled) == 1 {
+				db.Close()
+				return fmt.Errorf("operation cancelled by user")
 			}
 		}
-	}()
-
-	// 等待提前返回信号或正常完成
-	earlyExit := <-progressMonitor
-
-	if earlyExit {
-		if gen.progressCallback != nil {
-			gen.progressCallback(0.99, "99% completed, finishing in background...")
-		}
-		return nil
 	}
-
-	// 正常流程
-	wg.Wait()
-	close(resultChan)
-
-	if err := <-writerDone; err != nil {
-		db.Close()
-		return err
-	}
-
-	if err := db.Close(); err != nil {
-		return fmt.Errorf("error closing database: %w", err)
-	}
-
-	if atomic.LoadInt32(&cancelled) == 1 {
-		return fmt.Errorf("operation cancelled by user")
-	}
-
-	if gen.progressCallback != nil {
-		gen.progressCallback(1.0, fmt.Sprintf("Successfully generated %d tiles with %d errors", totalTiles, errorCount))
-	}
-
-	log.Printf("Successfully generated %d tiles with %d errors", totalTiles, errorCount)
-	return nil
 }
 
-// tileWorker 瓦片生成工作协程
-func (gen *MBTilesGenerator) tileWorker(workerID int, imagePath string, tasks <-chan TileTask, results chan<- RasterTileResult, cancelled *int32) {
+// tileWorker 瓦片生成工作协程 (修改签名,添加earlyReturn参数)
+func (gen *MBTilesGenerator) tileWorker(workerID int, imagePath string, tasks <-chan TileTask, results chan<- RasterTileResult, cancelled *int32, earlyReturn *int32) {
 	dataset, err := OpenRasterDataset(imagePath)
 	if err != nil {
 		log.Printf("Worker %d failed to open dataset: %v", workerID, err)
@@ -596,18 +595,27 @@ func (gen *MBTilesGenerator) tileWorker(workerID int, imagePath string, tasks <-
 	defer dataset.Close()
 
 	for task := range tasks {
-		if atomic.LoadInt32(cancelled) == 1 {
+		// 检查是否需要提前返回
+		if atomic.LoadInt32(cancelled) == 1 || atomic.LoadInt32(earlyReturn) == 1 {
 			return
 		}
 
 		tileData, err := dataset.ReadTile(task.Zoom, task.X, task.Y, gen.tileSize)
 
-		results <- RasterTileResult{
+		// 尝试发送结果,如果通道已关闭则退出
+		select {
+		case results <- RasterTileResult{
 			Zoom:  task.Zoom,
 			X:     task.X,
 			Y:     task.Y,
 			Data:  tileData,
 			Error: err,
+		}:
+		default:
+			// 通道可能已关闭,直接返回
+			if atomic.LoadInt32(earlyReturn) == 1 {
+				return
+			}
 		}
 	}
 }
