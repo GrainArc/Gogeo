@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -124,23 +125,26 @@ func (gen *MBTilesGenerator) GenerateWithConcurrency(outputPath string, metadata
 	if err != nil {
 		return fmt.Errorf("failed to create database: %w", err)
 	}
-	defer db.Close()
 
 	// 创建表结构
 	if err := gen.createTables(db); err != nil {
+		db.Close()
 		return fmt.Errorf("failed to create tables: %w", err)
 	}
 
 	// 写入元数据
 	if err := gen.writeMetadata(db, metadata); err != nil {
+		db.Close()
 		return fmt.Errorf("failed to write meta%w", err)
 	}
 
-	// 并发生成瓦片
+	// 并发生成瓦片，传入db的关闭责任
 	if err := gen.generateTilesConcurrent(db, concurrency, gen.imagePath); err != nil {
+		db.Close()
 		return fmt.Errorf("failed to generate tiles: %w", err)
 	}
 
+	// 注意：如果提前返回，db会在后台goroutine中关闭
 	return nil
 }
 
@@ -300,11 +304,13 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 	var totalTiles int32
 	var errorCount int32
 	var cancelled int32
+	var earlyReturn int32 // 新增：标记是否提前返回
 	estimatedTotal := gen.EstimateTileCount()
 
 	// 调用进度回调 - 开始
 	if gen.progressCallback != nil {
 		if !gen.progressCallback(0, "Starting concurrent tile generation") {
+			db.Close()
 			return fmt.Errorf("operation cancelled by user")
 		}
 	}
@@ -322,7 +328,7 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 	// 启动结果写入协程
 	writerDone := make(chan error, 1)
 	go func() {
-		writerDone <- gen.tileWriter(db, resultChan, &totalTiles, &errorCount, &cancelled, estimatedTotal)
+		writerDone <- gen.tileWriter(db, resultChan, &totalTiles, &errorCount, &cancelled, &earlyReturn, estimatedTotal)
 	}()
 
 	// 生成任务
@@ -330,9 +336,9 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 		defer close(taskChan)
 
 		for zoom := gen.minZoom; zoom <= gen.maxZoom; zoom++ {
-			// 检查是否已取消
-			if atomic.LoadInt32(&cancelled) == 1 {
-				log.Printf("Task generation cancelled")
+			// 检查是否已取消或提前返回
+			if atomic.LoadInt32(&cancelled) == 1 || atomic.LoadInt32(&earlyReturn) == 1 {
+				log.Printf("Task generation stopped")
 				return
 			}
 
@@ -344,8 +350,8 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 
 			for x := minTileX; x <= maxTileX; x++ {
 				for y := minTileY; y <= maxTileY; y++ {
-					// 检查是否已取消
-					if atomic.LoadInt32(&cancelled) == 1 {
+					// 检查是否已取消或提前返回
+					if atomic.LoadInt32(&cancelled) == 1 || atomic.LoadInt32(&earlyReturn) == 1 {
 						return
 					}
 
@@ -359,13 +365,81 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 		}
 	}()
 
-	// 等待所有工作协程完成
+	// 监控进度，达到99%时提前返回
+	progressMonitor := make(chan bool, 1)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				current := atomic.LoadInt32(&totalTiles)
+				progress := float64(current) / float64(estimatedTotal)
+
+				// 当进度达到99%时，标记提前返回
+				if progress >= 0.99 && atomic.LoadInt32(&earlyReturn) == 0 {
+					atomic.StoreInt32(&earlyReturn, 1)
+					log.Printf("Progress reached 99%%, returning early. Background processing continues...")
+
+					// 启动后台完成协程
+					go func() {
+						// 等待所有工作协程完成
+						wg.Wait()
+						close(resultChan)
+
+						// 等待写入完成
+						if err := <-writerDone; err != nil {
+							log.Printf("Background processing error: %v", err)
+						}
+
+						// 关闭数据库
+						if err := db.Close(); err != nil {
+							log.Printf("Error closing database: %v", err)
+						}
+
+						finalCount := atomic.LoadInt32(&totalTiles)
+						finalErrors := atomic.LoadInt32(&errorCount)
+						log.Printf("Background processing completed: %d tiles generated with %d errors", finalCount, finalErrors)
+					}()
+
+					progressMonitor <- true
+					return
+				}
+
+				// 如果已经完成或取消，退出监控
+				if current >= int32(estimatedTotal) || atomic.LoadInt32(&cancelled) == 1 {
+					progressMonitor <- false
+					return
+				}
+			}
+		}
+	}()
+
+	// 等待提前返回信号或正常完成
+	earlyExit := <-progressMonitor
+
+	if earlyExit {
+		// 提前返回，后台继续处理
+		if gen.progressCallback != nil {
+			gen.progressCallback(0.99, "99% completed, finishing in background...")
+		}
+		return nil
+	}
+
+	// 正常流程：等待所有工作协程完成
 	wg.Wait()
 	close(resultChan)
 
 	// 等待写入完成
 	if err := <-writerDone; err != nil {
+		db.Close()
 		return err
+	}
+
+	// 关闭数据库
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("error closing database: %w", err)
 	}
 
 	// 检查是否被取消
@@ -411,7 +485,8 @@ func (gen *MBTilesGenerator) tileWorker(workerID int, imagePath string, tasks <-
 }
 
 // tileWriter 瓦片写入协程
-func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileResult, totalTiles, errorCount, cancelled *int32, estimatedTotal int) error {
+// tileWriter 瓦片写入协程（更新签名）
+func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileResult, totalTiles, errorCount, cancelled, earlyReturn *int32, estimatedTotal int) error {
 	// 开始事务
 	tx, err := db.Begin()
 	if err != nil {
@@ -429,7 +504,7 @@ func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileRes
 	maxBatchSize := 1000
 
 	for result := range results {
-		// 检查是否已取消
+		// 检查是否已取消（但不检查earlyReturn，继续处理）
 		if atomic.LoadInt32(cancelled) == 1 {
 			return fmt.Errorf("operation cancelled by user")
 		}
@@ -472,8 +547,8 @@ func (gen *MBTilesGenerator) tileWriter(db *sql.DB, results <-chan RasterTileRes
 			batchSize = 0
 		}
 
-		// 定期输出进度和调用回调
-		if current%100 == 0 {
+		// 定期输出进度和调用回调（如果没有提前返回）
+		if current%100 == 0 && atomic.LoadInt32(earlyReturn) == 0 {
 			progress := float64(current) / float64(estimatedTotal)
 			message := fmt.Sprintf("Progress: %d/%d tiles (%.2f%%)", current, estimatedTotal, progress*100)
 			if gen.progressCallback != nil {
