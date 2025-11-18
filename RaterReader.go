@@ -27,6 +27,7 @@ type RasterDataset struct {
 	bounds        [4]float64 // minX, minY, maxX, maxY (Web Mercator)
 	projection    string
 	isReprojected bool // 标记是否已重投影
+	hasGeoInfo    bool // 标记是否有地理信息
 }
 
 // DatasetInfo 数据集信息
@@ -36,10 +37,10 @@ type DatasetInfo struct {
 	BandCount    int
 	GeoTransform [6]float64
 	Projection   string
+	HasGeoInfo   bool
 }
 
 // imagePath: 影像文件路径
-// reProj: 是否重投影到Web墨卡托坐标系（EPSG:3857）
 func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 	cPath := C.CString(imagePath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -54,8 +55,28 @@ func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 	var warpedDS C.GDALDatasetH
 	var activeDS C.GDALDatasetH // 实际使用的数据集
 
-	// 根据参数决定是否重投影
-	if reProj {
+	// 获取基本信息
+	width := int(C.GDALGetRasterXSize(dataset))
+	height := int(C.GDALGetRasterYSize(dataset))
+	bandCount := int(C.GDALGetRasterCount(dataset))
+
+	// 检查是否有地理信息
+	var geoTransform [6]C.double
+	hasGeoInfo := C.GDALGetGeoTransform(dataset, &geoTransform[0]) == C.CE_None
+
+	// 获取投影信息
+	projection := C.GoString(C.GDALGetProjectionRef(dataset))
+
+	// 如果没有地理信息，检查是否有投影信息
+	if !hasGeoInfo && projection == "" {
+		hasGeoInfo = false
+	} else if !hasGeoInfo && projection != "" {
+		// 有投影但没有地理变换，仍然认为没有完整的地理信息
+		hasGeoInfo = false
+	}
+
+	// 根据参数和地理信息决定是否重投影
+	if reProj && hasGeoInfo {
 		// 重投影到Web墨卡托
 		warpedDS = C.reprojectToWebMercator(dataset)
 		if warpedDS == nil {
@@ -63,34 +84,43 @@ func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 			return nil, fmt.Errorf("failed to reproject image to Web Mercator")
 		}
 		activeDS = warpedDS
+
+		// 重新获取重投影后的地理变换
+		if C.GDALGetGeoTransform(activeDS, &geoTransform[0]) != C.CE_None {
+			C.GDALClose(warpedDS)
+			C.GDALClose(dataset)
+			return nil, fmt.Errorf("failed to get geotransform from reprojected dataset")
+		}
 	} else {
 		// 不重投影，直接使用原始数据集
 		activeDS = dataset
 		warpedDS = nil
-	}
 
-	// 获取基本信息
-	width := int(C.GDALGetRasterXSize(activeDS))
-	height := int(C.GDALGetRasterYSize(activeDS))
-	bandCount := int(C.GDALGetRasterCount(activeDS))
+		// 如果没有地理信息，创建默认的地理变换
+		if !hasGeoInfo {
+			// 创建像素坐标系的地理变换 (0,0) 到 (width, height)
+			geoTransform[0] = 0.0  // 左上角X坐标
+			geoTransform[1] = 1.0  // X方向像素分辨率
+			geoTransform[2] = 0.0  // 旋转参数
+			geoTransform[3] = 0.0  // 左上角Y坐标
+			geoTransform[4] = 0.0  // 旋转参数
+			geoTransform[5] = -1.0 // Y方向像素分辨率(负值，因为图像Y轴向下)
+		}
+	}
 
 	// 计算边界
-	var geoTransform [6]C.double
-	if C.GDALGetGeoTransform(activeDS, &geoTransform[0]) != C.CE_None {
-		if warpedDS != nil {
-			C.GDALClose(warpedDS)
-		}
-		C.GDALClose(dataset)
-		return nil, fmt.Errorf("failed to get geotransform")
-	}
-
 	minX := float64(geoTransform[0])
 	maxY := float64(geoTransform[3])
 	maxX := minX + float64(width)*float64(geoTransform[1])
 	minY := maxY + float64(height)*float64(geoTransform[5])
 
-	// 获取投影信息
-	projection := C.GoString(C.GDALGetProjectionRef(activeDS))
+	// 如果没有地理信息，更新投影信息
+	if !hasGeoInfo {
+		projection = "PIXEL" // 标记为像素坐标系
+	} else if reProj {
+		// 获取重投影后的投影信息
+		projection = C.GoString(C.GDALGetProjectionRef(activeDS))
+	}
 
 	rd := &RasterDataset{
 		dataset:       dataset,
@@ -100,7 +130,8 @@ func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 		bandCount:     bandCount,
 		bounds:        [4]float64{minX, minY, maxX, maxY},
 		projection:    projection,
-		isReprojected: reProj,
+		isReprojected: reProj && hasGeoInfo,
+		hasGeoInfo:    hasGeoInfo,
 	}
 
 	runtime.SetFinalizer(rd, (*RasterDataset).Close)
