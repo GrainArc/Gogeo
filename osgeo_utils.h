@@ -19,6 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define OSGEO_UTILS_H
 #include <math.h>
 #include <gdal.h>
+#include <gdal_utils.h>
 #include <gdal_alg.h>
 #include <gdalwarper.h> 
 #include <ogr_api.h>
@@ -27,6 +28,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <cpl_conv.h>
 #include <cpl_string.h>
 #include <stdlib.h>
+#include <cpl_vsi.h>
 #include <gdal_version.h>
 #ifdef __cplusplus
 extern "C" {
@@ -42,7 +44,10 @@ typedef struct {
     double geoTransform[6];
     char projection[2048];
 } DatasetInfo;
-
+typedef struct {
+    unsigned char* data;
+    size_t size;
+} ImageBuffer;
 OGRLayerH createMemoryLayer(const char* layerName, OGRwkbGeometryType geomType, OGRSpatialReferenceH srs);
 int check_isnan(double x);
 int check_isinf(double x);
@@ -67,7 +72,11 @@ GDALDatasetH reprojectToWebMercator(GDALDatasetH hSrcDS);
 int readTileData(GDALDatasetH hDS, double minX, double minY, double maxX, double maxY,
                  int tileSize, unsigned char* buffer);
 int getDatasetInfo(GDALDatasetH hDS, DatasetInfo* info);
-
+GDALDatasetH clipRasterByGeometry(GDALDatasetH srcDS, OGRGeometryH geom, double *bounds);
+int writeJPEG(GDALDatasetH ds, const char* filename, int quality);
+int writeImage(GDALDatasetH ds, const char* filename, const char* format, int quality);
+ImageBuffer* writeImageToMemory(GDALDatasetH ds, const char* format, int quality);
+void freeImageBuffer(ImageBuffer *buffer);
 #ifdef __cplusplus
 }
 #endif

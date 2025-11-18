@@ -54,7 +54,7 @@ type RasterTileResult struct {
 
 // NewMBTilesGenerator 创建MBTiles生成器
 func NewMBTilesGenerator(imagePath string, options *MBTilesOptions) (*MBTilesGenerator, error) {
-	dataset, err := OpenRasterDataset(imagePath)
+	dataset, err := OpenRasterDataset(imagePath, true)
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +587,7 @@ func (gen *MBTilesGenerator) generateTilesConcurrent(db *sql.DB, concurrency int
 
 // tileWorker 瓦片生成工作协程 (修改签名,添加earlyReturn参数)
 func (gen *MBTilesGenerator) tileWorker(workerID int, imagePath string, tasks <-chan TileTask, results chan<- RasterTileResult, cancelled *int32, earlyReturn *int32) {
-	dataset, err := OpenRasterDataset(imagePath)
+	dataset, err := OpenRasterDataset(imagePath, true)
 	if err != nil {
 		log.Printf("Worker %d failed to open dataset: %v", workerID, err)
 		return

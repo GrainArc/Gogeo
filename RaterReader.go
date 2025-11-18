@@ -19,12 +19,14 @@ import (
 
 // RasterDataset 栅格数据集
 type RasterDataset struct {
-	dataset   C.GDALDatasetH
-	warpedDS  C.GDALDatasetH
-	width     int
-	height    int
-	bandCount int
-	bounds    [4]float64 // minX, minY, maxX, maxY (Web Mercator)
+	dataset       C.GDALDatasetH
+	warpedDS      C.GDALDatasetH
+	width         int
+	height        int
+	bandCount     int
+	bounds        [4]float64 // minX, minY, maxX, maxY (Web Mercator)
+	projection    string
+	isReprojected bool // 标记是否已重投影
 }
 
 // DatasetInfo 数据集信息
@@ -36,33 +38,48 @@ type DatasetInfo struct {
 	Projection   string
 }
 
-// OpenRasterDataset 打开栅格数据集
-func OpenRasterDataset(imagePath string) (*RasterDataset, error) {
+// imagePath: 影像文件路径
+// reProj: 是否重投影到Web墨卡托坐标系（EPSG:3857）
+func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 	cPath := C.CString(imagePath)
 	defer C.free(unsafe.Pointer(cPath))
 	InitializeGDAL()
+
 	// 打开数据集
 	dataset := C.GDALOpen(cPath, C.GA_ReadOnly)
 	if dataset == nil {
 		return nil, fmt.Errorf("failed to open image: %s", imagePath)
 	}
 
-	// 重投影到Web墨卡托
-	warpedDS := C.reprojectToWebMercator(dataset)
-	if warpedDS == nil {
-		C.GDALClose(dataset)
-		return nil, fmt.Errorf("failed to reproject image to Web Mercator")
+	var warpedDS C.GDALDatasetH
+	var activeDS C.GDALDatasetH // 实际使用的数据集
+
+	// 根据参数决定是否重投影
+	if reProj {
+		// 重投影到Web墨卡托
+		warpedDS = C.reprojectToWebMercator(dataset)
+		if warpedDS == nil {
+			C.GDALClose(dataset)
+			return nil, fmt.Errorf("failed to reproject image to Web Mercator")
+		}
+		activeDS = warpedDS
+	} else {
+		// 不重投影，直接使用原始数据集
+		activeDS = dataset
+		warpedDS = nil
 	}
 
 	// 获取基本信息
-	width := int(C.GDALGetRasterXSize(warpedDS))
-	height := int(C.GDALGetRasterYSize(warpedDS))
-	bandCount := int(C.GDALGetRasterCount(warpedDS))
+	width := int(C.GDALGetRasterXSize(activeDS))
+	height := int(C.GDALGetRasterYSize(activeDS))
+	bandCount := int(C.GDALGetRasterCount(activeDS))
 
 	// 计算边界
 	var geoTransform [6]C.double
-	if C.GDALGetGeoTransform(warpedDS, &geoTransform[0]) != C.CE_None {
-		C.GDALClose(warpedDS)
+	if C.GDALGetGeoTransform(activeDS, &geoTransform[0]) != C.CE_None {
+		if warpedDS != nil {
+			C.GDALClose(warpedDS)
+		}
 		C.GDALClose(dataset)
 		return nil, fmt.Errorf("failed to get geotransform")
 	}
@@ -72,13 +89,18 @@ func OpenRasterDataset(imagePath string) (*RasterDataset, error) {
 	maxX := minX + float64(width)*float64(geoTransform[1])
 	minY := maxY + float64(height)*float64(geoTransform[5])
 
+	// 获取投影信息
+	projection := C.GoString(C.GDALGetProjectionRef(activeDS))
+
 	rd := &RasterDataset{
-		dataset:   dataset,
-		warpedDS:  warpedDS,
-		width:     width,
-		height:    height,
-		bandCount: bandCount,
-		bounds:    [4]float64{minX, minY, maxX, maxY},
+		dataset:       dataset,
+		warpedDS:      warpedDS,
+		width:         width,
+		height:        height,
+		bandCount:     bandCount,
+		bounds:        [4]float64{minX, minY, maxX, maxY},
+		projection:    projection,
+		isReprojected: reProj,
 	}
 
 	runtime.SetFinalizer(rd, (*RasterDataset).Close)

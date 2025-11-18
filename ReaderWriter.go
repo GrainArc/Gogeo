@@ -516,10 +516,17 @@ func determineFileType(filePath string) (string, error) {
 		return "shp", nil
 	case ".gdb":
 		return "gdb", nil
+	case ".geojson", ".json":
+		return "geojson", nil
+	case ".dxf":
+		return "dxf", nil
+	case ".kml":
+		return "kml", nil
+	case ".kmz":
+		return "kmz", nil
 	default:
-		// 检查是否为文件夹（可能是GDB）
+		// 检查是否为文件夹(可能是GDB)
 		if info, err := os.Stat(filePath); err == nil && info.IsDir() {
-			// 检查是否为GDB文件夹
 			if strings.HasSuffix(strings.ToLower(filePath), ".gdb") {
 				return "gdb", nil
 			}
@@ -649,6 +656,14 @@ func (r *FileGeoReader) ReadLayer(layerName ...string) (*GDALLayer, error) {
 		return r.ReadShapeFile(layerName...)
 	case "gdb":
 		return r.ReadGDBFile(layerName...)
+	case "geojson":
+		return r.ReadGeoJSONFile(layerName...)
+	case "dxf":
+		return r.ReadDXFFile(layerName...)
+	case "kml":
+		return r.ReadKMLFile(layerName...)
+	case "kmz":
+		return r.ReadKMZFile(layerName...)
 	default:
 		return nil, fmt.Errorf("不支持的文件类型: %s", r.FileType)
 	}
@@ -803,8 +818,15 @@ func determineFileTypeForWrite(filePath string) (string, error) {
 		return "shp", nil
 	case ".gdb":
 		return "gdb", nil
+	case ".geojson", ".json":
+		return "geojson", nil
+	case ".dxf":
+		return "dxf", nil
+	case ".kml":
+		return "kml", nil
+	case ".kmz":
+		return "kmz", nil
 	default:
-		// 检查是否以.gdb结尾的文件夹
 		if strings.HasSuffix(strings.ToLower(filePath), ".gdb") {
 			return "gdb", nil
 		}
@@ -951,6 +973,14 @@ func (w *FileGeoWriter) WriteLayer(sourceLayer *GDALLayer, layerName string) err
 		return w.WriteShapeFile(sourceLayer, layerName)
 	case "gdb":
 		return w.WriteGDBFile(sourceLayer, layerName)
+	case "geojson":
+		return w.WriteGeoJSONFile(sourceLayer, layerName)
+	case "dxf":
+		return w.WriteDXFFile(sourceLayer, layerName)
+	case "kml":
+		return w.WriteKMLFile(sourceLayer, layerName)
+	case "kmz":
+		return w.WriteKMZFile(sourceLayer, layerName)
 	default:
 		return fmt.Errorf("不支持的文件类型: %s", w.FileType)
 	}
@@ -1609,4 +1639,620 @@ func ConvertFile(sourceFilePath string, targetFilePath string, sourceLayerName s
 	}
 
 	return nil
+}
+
+// ReadGeoJSONFile 读取GeoJSON文件
+func (r *FileGeoReader) ReadGeoJSONFile(layerName ...string) (*GDALLayer, error) {
+	if r.FileType != "geojson" {
+		return nil, fmt.Errorf("文件类型不是GeoJSON: %s", r.FileType)
+	}
+
+	InitializeGDAL()
+
+	cFilePath := C.CString(r.FilePath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 获取GeoJSON驱动
+	driver := C.OGRGetDriverByName(C.CString("GeoJSON"))
+	if driver == nil {
+		return nil, fmt.Errorf("无法获取GeoJSON驱动")
+	}
+
+	// 打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(0), nil)
+	if dataset == nil {
+		return nil, fmt.Errorf("无法打开GeoJSON文件: %s", r.FilePath)
+	}
+
+	var layer C.OGRLayerH
+
+	if len(layerName) > 0 && layerName[0] != "" {
+		cLayerName := C.CString(layerName[0])
+		defer C.free(unsafe.Pointer(cLayerName))
+		layer = C.OGR_DS_GetLayerByName(dataset, cLayerName)
+	} else {
+		if C.OGR_DS_GetLayerCount(dataset) > 0 {
+			layer = C.OGR_DS_GetLayer(dataset, C.int(0))
+		}
+	}
+
+	if layer == nil {
+		C.OGR_DS_Destroy(dataset)
+		return nil, fmt.Errorf("无法获取图层")
+	}
+
+	gdalLayer := &GDALLayer{
+		layer:   layer,
+		dataset: dataset,
+		driver:  driver,
+	}
+
+	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
+	return gdalLayer, nil
+}
+
+// ========== DXF 读取 ==========
+
+// ReadDXFFile 读取DXF文件
+func (r *FileGeoReader) ReadDXFFile(layerName ...string) (*GDALLayer, error) {
+	if r.FileType != "dxf" {
+		return nil, fmt.Errorf("文件类型不是DXF: %s", r.FileType)
+	}
+
+	InitializeGDAL()
+
+	cFilePath := C.CString(r.FilePath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 获取DXF驱动
+	driver := C.OGRGetDriverByName(C.CString("DXF"))
+	if driver == nil {
+		return nil, fmt.Errorf("无法获取DXF驱动")
+	}
+
+	// 打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(0), nil)
+	if dataset == nil {
+		return nil, fmt.Errorf("无法打开DXF文件: %s", r.FilePath)
+	}
+
+	var layer C.OGRLayerH
+
+	if len(layerName) > 0 && layerName[0] != "" {
+		cLayerName := C.CString(layerName[0])
+		defer C.free(unsafe.Pointer(cLayerName))
+		layer = C.OGR_DS_GetLayerByName(dataset, cLayerName)
+	} else {
+		if C.OGR_DS_GetLayerCount(dataset) > 0 {
+			layer = C.OGR_DS_GetLayer(dataset, C.int(0))
+		}
+	}
+
+	if layer == nil {
+		C.OGR_DS_Destroy(dataset)
+		return nil, fmt.Errorf("无法获取图层")
+	}
+
+	gdalLayer := &GDALLayer{
+		layer:   layer,
+		dataset: dataset,
+		driver:  driver,
+	}
+
+	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
+	return gdalLayer, nil
+}
+
+// ========== KML 读取 ==========
+
+// ReadKMLFile 读取KML文件
+func (r *FileGeoReader) ReadKMLFile(layerName ...string) (*GDALLayer, error) {
+	if r.FileType != "kml" {
+		return nil, fmt.Errorf("文件类型不是KML: %s", r.FileType)
+	}
+
+	InitializeGDAL()
+
+	cFilePath := C.CString(r.FilePath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 获取KML驱动(LIBKML优先,否则使用KML)
+	driver := C.OGRGetDriverByName(C.CString("LIBKML"))
+	if driver == nil {
+		driver = C.OGRGetDriverByName(C.CString("KML"))
+		if driver == nil {
+			return nil, fmt.Errorf("无法获取KML驱动")
+		}
+	}
+
+	// 打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(0), nil)
+	if dataset == nil {
+		return nil, fmt.Errorf("无法打开KML文件: %s", r.FilePath)
+	}
+
+	var layer C.OGRLayerH
+
+	if len(layerName) > 0 && layerName[0] != "" {
+		cLayerName := C.CString(layerName[0])
+		defer C.free(unsafe.Pointer(cLayerName))
+		layer = C.OGR_DS_GetLayerByName(dataset, cLayerName)
+	} else {
+		if C.OGR_DS_GetLayerCount(dataset) > 0 {
+			layer = C.OGR_DS_GetLayer(dataset, C.int(0))
+		}
+	}
+
+	if layer == nil {
+		C.OGR_DS_Destroy(dataset)
+		return nil, fmt.Errorf("无法获取图层")
+	}
+
+	gdalLayer := &GDALLayer{
+		layer:   layer,
+		dataset: dataset,
+		driver:  driver,
+	}
+
+	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
+	return gdalLayer, nil
+}
+
+// ========== KMZ 读取 ==========
+
+// ReadKMZFile 读取KMZ文件(压缩的KML)
+func (r *FileGeoReader) ReadKMZFile(layerName ...string) (*GDALLayer, error) {
+	if r.FileType != "kmz" {
+		return nil, fmt.Errorf("文件类型不是KMZ: %s", r.FileType)
+	}
+
+	InitializeGDAL()
+
+	// KMZ文件需要使用/vsizip/前缀访问
+	kmzPath := fmt.Sprintf("/vsizip/%s", r.FilePath)
+	cFilePath := C.CString(kmzPath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 获取KML驱动
+	driver := C.OGRGetDriverByName(C.CString("LIBKML"))
+	if driver == nil {
+		driver = C.OGRGetDriverByName(C.CString("KML"))
+		if driver == nil {
+			return nil, fmt.Errorf("无法获取KML驱动")
+		}
+	}
+
+	// 打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(0), nil)
+	if dataset == nil {
+		return nil, fmt.Errorf("无法打开KMZ文件: %s", r.FilePath)
+	}
+
+	var layer C.OGRLayerH
+
+	if len(layerName) > 0 && layerName[0] != "" {
+		cLayerName := C.CString(layerName[0])
+		defer C.free(unsafe.Pointer(cLayerName))
+		layer = C.OGR_DS_GetLayerByName(dataset, cLayerName)
+	} else {
+		if C.OGR_DS_GetLayerCount(dataset) > 0 {
+			layer = C.OGR_DS_GetLayer(dataset, C.int(0))
+		}
+	}
+
+	if layer == nil {
+		C.OGR_DS_Destroy(dataset)
+		return nil, fmt.Errorf("无法获取图层")
+	}
+
+	gdalLayer := &GDALLayer{
+		layer:   layer,
+		dataset: dataset,
+		driver:  driver,
+	}
+
+	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
+	return gdalLayer, nil
+}
+
+// ========== GeoJSON 写入 ==========
+
+// WriteGeoJSONFile 写入GeoJSON文件
+func (w *FileGeoWriter) WriteGeoJSONFile(sourceLayer *GDALLayer, layerName string) error {
+	if w.FileType != "geojson" {
+		return fmt.Errorf("文件类型不是GeoJSON: %s", w.FileType)
+	}
+
+	InitializeGDAL()
+
+	// GeoJSON默认使用UTF-8编码
+	C.CPLSetConfigOption(C.CString("ENCODING"), C.CString("UTF-8"))
+	defer C.CPLSetConfigOption(C.CString("ENCODING"), nil)
+
+	if w.Overwrite {
+		if _, err := os.Stat(w.FilePath); err == nil {
+			os.Remove(w.FilePath)
+		}
+	}
+
+	// 获取GeoJSON驱动
+	driver := C.OGRGetDriverByName(C.CString("GeoJSON"))
+	if driver == nil {
+		return fmt.Errorf("无法获取GeoJSON驱动")
+	}
+
+	cFilePath := C.CString(w.FilePath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 创建数据源(带选项)
+	// RFC7946=YES 确保符合GeoJSON规范
+	options := []*C.char{
+		C.CString("RFC7946=YES"),
+		nil,
+	}
+	defer C.free(unsafe.Pointer(options[0]))
+
+	dataset := C.OGR_Dr_CreateDataSource(driver, cFilePath, &options[0])
+	if dataset == nil {
+		return fmt.Errorf("无法创建GeoJSON文件: %s", w.FilePath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	sourceDefn := sourceLayer.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(sourceDefn)
+	srs := sourceLayer.GetSpatialRef()
+
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	newLayer := C.OGR_DS_CreateLayer(dataset, cLayerName, srs, geomType, nil)
+	if newLayer == nil {
+		return fmt.Errorf("无法创建图层: %s", layerName)
+	}
+
+	if err := w.copyFieldDefinitions(sourceDefn, newLayer); err != nil {
+		return err
+	}
+
+	if err := w.copyFeatures(sourceLayer, newLayer); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ========== DXF 写入 ==========
+
+// WriteDXFFile 写入DXF文件
+func (w *FileGeoWriter) WriteDXFFile(sourceLayer *GDALLayer, layerName string) error {
+	if w.FileType != "dxf" {
+		return fmt.Errorf("文件类型不是DXF: %s", w.FileType)
+	}
+
+	InitializeGDAL()
+
+	if w.Overwrite {
+		if _, err := os.Stat(w.FilePath); err == nil {
+			os.Remove(w.FilePath)
+		}
+	}
+
+	// 获取DXF驱动
+	driver := C.OGRGetDriverByName(C.CString("DXF"))
+	if driver == nil {
+		return fmt.Errorf("无法获取DXF驱动")
+	}
+
+	cFilePath := C.CString(w.FilePath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	dataset := C.OGR_Dr_CreateDataSource(driver, cFilePath, nil)
+	if dataset == nil {
+		return fmt.Errorf("无法创建DXF文件: %s", w.FilePath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	sourceDefn := sourceLayer.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(sourceDefn)
+	srs := sourceLayer.GetSpatialRef()
+
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	newLayer := C.OGR_DS_CreateLayer(dataset, cLayerName, srs, geomType, nil)
+	if newLayer == nil {
+		return fmt.Errorf("无法创建图层: %s", layerName)
+	}
+
+	if err := w.copyFieldDefinitions(sourceDefn, newLayer); err != nil {
+		return err
+	}
+
+	if err := w.copyFeatures(sourceLayer, newLayer); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ========== KML 写入 ==========
+
+// WriteKMLFile 写入KML文件
+func (w *FileGeoWriter) WriteKMLFile(sourceLayer *GDALLayer, layerName string) error {
+	if w.FileType != "kml" {
+		return fmt.Errorf("文件类型不是KML: %s", w.FileType)
+	}
+
+	InitializeGDAL()
+
+	if w.Overwrite {
+		if _, err := os.Stat(w.FilePath); err == nil {
+			os.Remove(w.FilePath)
+		}
+	}
+
+	// 获取KML驱动(LIBKML优先)
+	driver := C.OGRGetDriverByName(C.CString("LIBKML"))
+	if driver == nil {
+		driver = C.OGRGetDriverByName(C.CString("KML"))
+		if driver == nil {
+			return fmt.Errorf("无法获取KML驱动")
+		}
+	}
+
+	cFilePath := C.CString(w.FilePath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	dataset := C.OGR_Dr_CreateDataSource(driver, cFilePath, nil)
+	if dataset == nil {
+		return fmt.Errorf("无法创建KML文件: %s", w.FilePath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	sourceDefn := sourceLayer.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(sourceDefn)
+
+	// KML总是使用WGS84坐标系
+	srs := C.OSRNewSpatialReference(nil)
+	defer C.OSRDestroySpatialReference(srs)
+	C.OSRImportFromEPSG(srs, 4326)
+
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	newLayer := C.OGR_DS_CreateLayer(dataset, cLayerName, srs, geomType, nil)
+	if newLayer == nil {
+		return fmt.Errorf("无法创建图层: %s", layerName)
+	}
+
+	if err := w.copyFieldDefinitions(sourceDefn, newLayer); err != nil {
+		return err
+	}
+
+	// 如果源坐标系不是WGS84,需要进行坐标转换
+	if err := w.copyFeaturesWithTransform(sourceLayer, newLayer, srs); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ========== KMZ 写入 ==========
+
+// WriteKMZFile 写入KMZ文件(压缩的KML)
+func (w *FileGeoWriter) WriteKMZFile(sourceLayer *GDALLayer, layerName string) error {
+	if w.FileType != "kmz" {
+		return fmt.Errorf("文件类型不是KMZ: %s", w.FileType)
+	}
+
+	InitializeGDAL()
+
+	if w.Overwrite {
+		if _, err := os.Stat(w.FilePath); err == nil {
+			os.Remove(w.FilePath)
+		}
+	}
+
+	// 获取LIBKML驱动(KMZ需要LIBKML支持)
+	driver := C.OGRGetDriverByName(C.CString("LIBKML"))
+	if driver == nil {
+		return fmt.Errorf("无法获取LIBKML驱动(KMZ需要LIBKML支持)")
+	}
+
+	cFilePath := C.CString(w.FilePath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	dataset := C.OGR_Dr_CreateDataSource(driver, cFilePath, nil)
+	if dataset == nil {
+		return fmt.Errorf("无法创建KMZ文件: %s", w.FilePath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	sourceDefn := sourceLayer.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(sourceDefn)
+
+	// KMZ总是使用WGS84坐标系
+	srs := C.OSRNewSpatialReference(nil)
+	defer C.OSRDestroySpatialReference(srs)
+	C.OSRImportFromEPSG(srs, 4326)
+
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	newLayer := C.OGR_DS_CreateLayer(dataset, cLayerName, srs, geomType, nil)
+	if newLayer == nil {
+		return fmt.Errorf("无法创建图层: %s", layerName)
+	}
+
+	if err := w.copyFieldDefinitions(sourceDefn, newLayer); err != nil {
+		return err
+	}
+
+	if err := w.copyFeaturesWithTransform(sourceLayer, newLayer, srs); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ========== 坐标转换辅助方法 ==========
+
+// copyFeaturesWithTransform 复制要素并进行坐标转换
+func (w *FileGeoWriter) copyFeaturesWithTransform(sourceLayer *GDALLayer, targetLayer C.OGRLayerH, targetSRS C.OGRSpatialReferenceH) error {
+	sourceLayer.ResetReading()
+	targetDefn := C.OGR_L_GetLayerDefn(targetLayer)
+	sourceSRS := sourceLayer.GetSpatialRef()
+
+	var transform C.OGRCoordinateTransformationH
+	needsTransform := false
+
+	// 检查是否需要坐标转换
+	if sourceSRS != nil && targetSRS != nil {
+		if C.OSRIsSame(sourceSRS, targetSRS) == 0 {
+			transform = C.OCTNewCoordinateTransformation(sourceSRS, targetSRS)
+			if transform != nil {
+				needsTransform = true
+				defer C.OCTDestroyCoordinateTransformation(transform)
+			}
+		}
+	}
+
+	var totalFeatures, successCount, errorCount int
+
+	for {
+		sourceFeature := sourceLayer.GetNextFeature()
+		if sourceFeature == nil {
+			break
+		}
+
+		totalFeatures++
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					errorCount++
+				}
+				C.OGR_F_Destroy(sourceFeature)
+			}()
+
+			newFeature := C.OGR_F_Create(targetDefn)
+			if newFeature == nil {
+				errorCount++
+				return
+			}
+			defer C.OGR_F_Destroy(newFeature)
+
+			// 复制几何并进行坐标转换
+			geometry := C.OGR_F_GetGeometryRef(sourceFeature)
+			if geometry != nil {
+				clonedGeom := C.OGR_G_Clone(geometry)
+				if clonedGeom != nil {
+					defer C.OGR_G_DestroyGeometry(clonedGeom)
+
+					// 执行坐标转换
+					if needsTransform {
+						result := C.OGR_G_Transform(clonedGeom, transform)
+						if result != C.OGRERR_NONE {
+							errorCount++
+							return
+						}
+					}
+
+					C.OGR_F_SetGeometry(newFeature, clonedGeom)
+				}
+			}
+
+			// 复制字段
+			if err := w.copyFieldsSafely(sourceFeature, newFeature); err != nil {
+				errorCount++
+				return
+			}
+
+			// 添加要素
+			result := C.OGR_L_CreateFeature(targetLayer, newFeature)
+			if result != C.OGRERR_NONE {
+				errorCount++
+				return
+			}
+
+			successCount++
+		}()
+	}
+
+	fmt.Printf("要素复制完成 - 总计: %d, 成功: %d, 失败: %d\n",
+		totalFeatures, successCount, errorCount)
+
+	return nil
+}
+
+// ReadGeoJSONLayer 直接读取GeoJSON图层
+func ReadGeoJSONLayer(filePath string, layerName ...string) (*GDALLayer, error) {
+	reader, err := NewFileGeoReader(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return reader.ReadGeoJSONFile(layerName...)
+}
+
+// ReadDXFLayer 直接读取DXF图层
+func ReadDXFLayer(filePath string, layerName ...string) (*GDALLayer, error) {
+	reader, err := NewFileGeoReader(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return reader.ReadDXFFile(layerName...)
+}
+
+// ReadKMLLayer 直接读取KML图层
+func ReadKMLLayer(filePath string, layerName ...string) (*GDALLayer, error) {
+	reader, err := NewFileGeoReader(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return reader.ReadKMLFile(layerName...)
+}
+
+// ReadKMZLayer 直接读取KMZ图层
+func ReadKMZLayer(filePath string, layerName ...string) (*GDALLayer, error) {
+	reader, err := NewFileGeoReader(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return reader.ReadKMZFile(layerName...)
+}
+
+// WriteGeoJSONLayer 直接写入GeoJSON图层
+func WriteGeoJSONLayer(sourceLayer *GDALLayer, filePath string, layerName string, overwrite bool) error {
+	writer, err := NewFileGeoWriter(filePath, overwrite)
+	if err != nil {
+		return err
+	}
+	return writer.WriteGeoJSONFile(sourceLayer, layerName)
+}
+
+// WriteDXFLayer 直接写入DXF图层
+func WriteDXFLayer(sourceLayer *GDALLayer, filePath string, layerName string, overwrite bool) error {
+	writer, err := NewFileGeoWriter(filePath, overwrite)
+	if err != nil {
+		return err
+	}
+	return writer.WriteDXFFile(sourceLayer, layerName)
+}
+
+// WriteKMLLayer 直接写入KML图层
+func WriteKMLLayer(sourceLayer *GDALLayer, filePath string, layerName string, overwrite bool) error {
+	writer, err := NewFileGeoWriter(filePath, overwrite)
+	if err != nil {
+		return err
+	}
+	return writer.WriteKMLFile(sourceLayer, layerName)
+}
+
+// WriteKMZLayer 直接写入KMZ图层
+func WriteKMZLayer(sourceLayer *GDALLayer, filePath string, layerName string, overwrite bool) error {
+	writer, err := NewFileGeoWriter(filePath, overwrite)
+	if err != nil {
+		return err
+	}
+	return writer.WriteKMZFile(sourceLayer, layerName)
 }

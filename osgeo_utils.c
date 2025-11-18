@@ -812,3 +812,333 @@ int getDatasetInfo(GDALDatasetH hDS, DatasetInfo* info) {
 
     return 1;
 }
+
+// 辅助函数:使用矢量图层裁剪栅格
+GDALDatasetH clipRasterByGeometry(GDALDatasetH srcDS, OGRGeometryH geom, double *bounds) {
+    if (srcDS == NULL || geom == NULL) return NULL;
+
+    // 获取几何体边界
+    OGREnvelope envelope;
+    OGR_G_GetEnvelope(geom, &envelope);
+
+    bounds[0] = envelope.MinX;
+    bounds[1] = envelope.MinY;
+    bounds[2] = envelope.MaxX;
+    bounds[3] = envelope.MaxY;
+
+    // 创建临时矢量文件用于裁剪
+    const char *pszCutlineFile = "/vsimem/cutline.geojson";
+    OGRSFDriverH hDriver = OGRGetDriverByName("GeoJSON");
+    if (hDriver == NULL) return NULL;
+
+    OGRDataSourceH hCutlineDS = OGR_Dr_CreateDataSource(hDriver, pszCutlineFile, NULL);
+    if (hCutlineDS == NULL) return NULL;
+
+    OGRSpatialReferenceH hSRS = GDALGetSpatialRef(srcDS);
+    OGRLayerH hLayer = OGR_DS_CreateLayer(hCutlineDS, "cutline", hSRS, wkbPolygon, NULL);
+    if (hLayer == NULL) {
+        OGR_DS_Destroy(hCutlineDS);
+        VSIUnlink(pszCutlineFile);
+        return NULL;
+    }
+
+    OGRFeatureDefnH hFDefn = OGR_L_GetLayerDefn(hLayer);
+    OGRFeatureH hFeature = OGR_F_Create(hFDefn);
+    OGR_F_SetGeometry(hFeature, geom);
+    OGR_L_CreateFeature(hLayer, hFeature);
+    OGR_F_Destroy(hFeature);
+    OGR_DS_Destroy(hCutlineDS);
+
+    // 构建 GDALWarp 选项
+    char **papszOptions = NULL;
+    papszOptions = CSLAddString(papszOptions, "-of");
+    papszOptions = CSLAddString(papszOptions, "MEM");
+    papszOptions = CSLAddString(papszOptions, "-cutline");
+    papszOptions = CSLAddString(papszOptions, pszCutlineFile);
+    papszOptions = CSLAddString(papszOptions, "-crop_to_cutline");
+    papszOptions = CSLAddString(papszOptions, "-dstalpha");
+
+    // 创建 GDALWarpAppOptions
+    GDALWarpAppOptions *psWarpOptions = GDALWarpAppOptionsNew(papszOptions, NULL);
+    CSLDestroy(papszOptions);
+
+    if (psWarpOptions == NULL) {
+        VSIUnlink(pszCutlineFile);
+        return NULL;
+    }
+
+    // 执行裁剪
+    GDALDatasetH ahSrcDS[1] = { srcDS };
+    int bUsageError = 0;
+    GDALDatasetH hDstDS = GDALWarp(
+        "",           // 输出到内存
+        NULL,         // 不使用已存在的目标数据集
+        1,            // 源数据集数量
+        ahSrcDS,      // 源数据集数组
+        psWarpOptions,
+        &bUsageError
+    );
+
+    // 清理
+    GDALWarpAppOptionsFree(psWarpOptions);
+    VSIUnlink(pszCutlineFile);
+
+    return hDstDS;
+}
+
+int writeImage(GDALDatasetH ds, const char* filename, const char* format, int quality) {
+    if (ds == NULL || filename == NULL || format == NULL) return 0;
+
+    GDALDriverH driver = GDALGetDriverByName(format);
+    if (driver == NULL) {
+        fprintf(stderr, "Driver '%s' not found\n", format);
+        return 0;
+    }
+
+    // 检查驱动是否支持 CreateCopy
+    char **metadata = GDALGetMetadata(driver, NULL);
+    int supportsCreate = CSLFetchBoolean(metadata, GDAL_DCAP_CREATECOPY, FALSE);
+    if (!supportsCreate) {
+        fprintf(stderr, "Driver '%s' does not support CreateCopy\n", format);
+        return 0;
+    }
+
+    char **options = NULL;
+
+    // 根据格式设置不同的选项
+    if (strcmp(format, "JPEG") == 0 || strcmp(format, "JPG") == 0) {
+        char qualityStr[32];
+        snprintf(qualityStr, sizeof(qualityStr), "QUALITY=%d", quality);
+        options = CSLAddString(options, qualityStr);
+    }
+    else if (strcmp(format, "PNG") == 0) {
+        // PNG 压缩级别 (1-9)
+        char compressionStr[32];
+        int compression = (quality > 0 && quality <= 100) ? (9 - quality * 9 / 100) : 6;
+        snprintf(compressionStr, sizeof(compressionStr), "ZLEVEL=%d", compression);
+        options = CSLAddString(options, compressionStr);
+    }
+    else if (strcmp(format, "TIF") == 0 || strcmp(format, "TIFF") == 0) {
+        options = CSLAddString(options, "COMPRESS=LZW");
+        options = CSLAddString(options, "TILED=YES");
+    }
+    else if (strcmp(format, "WEBP") == 0) {
+        char qualityStr[32];
+        snprintf(qualityStr, sizeof(qualityStr), "QUALITY=%d", quality);
+        options = CSLAddString(options, qualityStr);
+    }
+    else if (strcmp(format, "HFA") == 0) {
+        // ERDAS IMAGINE (.img) 格式
+        // HFA 支持压缩选项
+        options = CSLAddString(options, "COMPRESSED=YES");
+
+        // 可选：设置统计信息
+        options = CSLAddString(options, "STATISTICS=YES");
+
+        // 可选：设置金字塔
+        // options = CSLAddString(options, "USE_RRD=YES");
+    }
+
+    GDALDatasetH outDS = GDALCreateCopy(driver, filename, ds, FALSE, options, NULL, NULL);
+
+    CSLDestroy(options);
+
+    if (outDS != NULL) {
+        GDALClose(outDS);
+        return 1;
+    }
+    return 0;
+}
+
+// 保留原函数以兼容旧代码
+int writeJPEG(GDALDatasetH ds, const char* filename, int quality) {
+    // 检查输入参数有效性，防止空指针解引用
+    if (filename == NULL) {
+        return -1;  // 返回错误码表示文件名为空
+    }
+
+    // 从文件名中提取扩展名，查找最后一个'.'的位置
+    const char* ext = strrchr(filename, '.');
+    char format[16] = "JPEG";  // 默认格式，初始化为JPEG
+
+    // 检查是否找到了文件扩展名
+    if (ext != NULL) {
+        ext++;  // 跳过 '.' 字符，指向扩展名部分
+
+        // 根据扩展名确定格式，使用strcasecmp进行不区分大小写的比较
+        if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0) {
+            strncpy(format, "JPEG", sizeof(format) - 1);  // 安全复制JPEG格式字符串
+            format[sizeof(format) - 1] = '\0';  // 确保字符串null终止
+        } else if (strcasecmp(ext, "png") == 0) {
+            strncpy(format, "PNG", sizeof(format) - 1);   // 安全复制PNG格式字符串
+            format[sizeof(format) - 1] = '\0';   // 确保字符串null终止
+        } else if (strcasecmp(ext, "tif") == 0 || strcasecmp(ext, "tiff") == 0) {
+            strncpy(format, "GTiff", sizeof(format) - 1); // 安全复制GTiff格式字符串
+            format[sizeof(format) - 1] = '\0';  // 确保字符串null终止
+        } else if (strcasecmp(ext, "img") == 0) {
+            strncpy(format, "HFA", sizeof(format) - 1);   // 安全复制HFA格式字符串
+            format[sizeof(format) - 1] = '\0';   // 确保字符串null终止
+        } else if (strcasecmp(ext, "webp") == 0) {
+            strncpy(format, "WEBP", sizeof(format) - 1);  // 安全复制WEBP格式字符串，修复缩进
+            format[sizeof(format) - 1] = '\0';  // 确保字符串null终止
+        }
+        // 可以根据需要添加更多格式支持
+    }
+
+    // 调用writeImage函数执行实际的图像写入操作
+    return writeImage(ds, filename, format, quality);
+}
+
+// 将数据集写入内存缓冲区并返回二进制数据
+
+/**
+ * 将格式字符串标准化为GDAL驱动名称
+ * @param format 输入的格式字符串（如"jpg", "tif"等）
+ * @param standardFormat 输出的标准化格式字符串缓冲区
+ * @param bufferSize 输出缓冲区大小
+ */
+static void standardizeFormat(const char* format, char* standardFormat, size_t bufferSize) {
+    // 检查输入参数有效性
+    if (format == NULL || standardFormat == NULL || bufferSize == 0) {
+        return;
+    }
+
+    // 根据输入格式进行不区分大小写的匹配，转换为标准GDAL驱动名称
+    if (strcasecmp(format, "jpg") == 0 || strcasecmp(format, "jpeg") == 0 || strcasecmp(format, "JPEG") == 0) {
+        strncpy(standardFormat, "JPEG", bufferSize - 1);  // JPEG格式的标准驱动名
+    } else if (strcasecmp(format, "png") == 0 || strcasecmp(format, "PNG") == 0) {
+        strncpy(standardFormat, "PNG", bufferSize - 1);   // PNG格式的标准驱动名
+    } else if (strcasecmp(format, "tif") == 0 || strcasecmp(format, "tiff") == 0 || strcasecmp(format, "GTiff") == 0) {
+        strncpy(standardFormat, "GTiff", bufferSize - 1); // TIFF格式的标准驱动名
+    } else if (strcasecmp(format, "img") == 0 || strcasecmp(format, "HFA") == 0) {
+        strncpy(standardFormat, "HFA", bufferSize - 1);   // Erdas Imagine格式的标准驱动名
+    } else if (strcasecmp(format, "webp") == 0 || strcasecmp(format, "WEBP") == 0) {
+        strncpy(standardFormat, "WEBP", bufferSize - 1);  // WEBP格式的标准驱动名
+    } else if (strcasecmp(format, "bmp") == 0 || strcasecmp(format, "BMP") == 0) {
+        strncpy(standardFormat, "BMP", bufferSize - 1);   // BMP格式的标准驱动名
+    } else if (strcasecmp(format, "gif") == 0 || strcasecmp(format, "GIF") == 0) {
+        strncpy(standardFormat, "GIF", bufferSize - 1);   // GIF格式的标准驱动名
+    } else {
+        // 如果无法识别，直接复制原格式字符串
+        strncpy(standardFormat, format, bufferSize - 1);
+    }
+
+    standardFormat[bufferSize - 1] = '\0';  // 确保字符串null终止
+}
+
+ImageBuffer* writeImageToMemory(GDALDatasetH ds, const char* format, int quality) {
+    // 检查输入参数的有效性
+    if (ds == NULL || format == NULL) return NULL;
+
+    // 标准化格式名称，支持常见的文件扩展名识别
+    char standardFormat[32];
+    standardizeFormat(format, standardFormat, sizeof(standardFormat));
+
+    // 使用标准化后的格式名称获取GDAL驱动
+    GDALDriverH driver = GDALGetDriverByName(standardFormat);
+    if (driver == NULL) {
+        fprintf(stderr, "Driver '%s' not found\n", standardFormat);  // 输出标准化后的格式名
+        return NULL;
+    }
+
+    // 获取驱动的元数据信息
+    char **metadata = GDALGetMetadata(driver, NULL);
+    // 检查驱动是否支持CreateCopy操作
+    int supportsCreate = CSLFetchBoolean(metadata, GDAL_DCAP_CREATECOPY, FALSE);
+    if (!supportsCreate) {
+        fprintf(stderr, "Driver '%s' does not support CreateCopy\n", standardFormat);
+        return NULL;
+    }
+
+    // 生成唯一的内存文件路径，使用数据集指针和格式名确保唯一性
+    char memFilename[256];
+    snprintf(memFilename, sizeof(memFilename), "/vsimem/temp_image_%p.%s",
+             (void*)ds, standardFormat);
+
+    // 初始化驱动选项列表
+    char **options = NULL;
+
+    // 根据标准化后的格式设置不同的选项
+    if (strcmp(standardFormat, "JPEG") == 0) {
+        char qualityStr[32];
+        snprintf(qualityStr, sizeof(qualityStr), "QUALITY=%d", quality);  // 设置JPEG压缩质量
+        options = CSLAddString(options, qualityStr);
+    }
+    else if (strcmp(standardFormat, "PNG") == 0) {
+        char compressionStr[32];
+        // 将质量参数转换为PNG的压缩级别（0-9），质量越高压缩级别越低
+        int compression = (quality > 0 && quality <= 100) ? (9 - quality * 9 / 100) : 6;
+        snprintf(compressionStr, sizeof(compressionStr), "ZLEVEL=%d", compression);
+        options = CSLAddString(options, compressionStr);
+    }
+    else if (strcmp(standardFormat, "GTiff") == 0) {
+        options = CSLAddString(options, "COMPRESS=LZW");  // 使用LZW压缩
+        options = CSLAddString(options, "TILED=YES");     // 启用瓦片存储
+    }
+    else if (strcmp(standardFormat, "WEBP") == 0) {
+        char qualityStr[32];
+        snprintf(qualityStr, sizeof(qualityStr), "QUALITY=%d", quality);  // 设置WEBP压缩质量
+        options = CSLAddString(options, qualityStr);
+    }
+    else if (strcmp(standardFormat, "BMP") == 0) {
+        // BMP格式通常不需要特殊选项
+        // 可以根据需要添加选项
+    }
+
+    // 创建到内存文件的数据集副本
+    GDALDatasetH outDS = GDALCreateCopy(driver, memFilename, ds, FALSE, options, NULL, NULL);
+    CSLDestroy(options);  // 释放选项列表内存
+
+    // 检查数据集创建是否成功
+    if (outDS == NULL) {
+        return NULL;
+    }
+
+    // 关闭输出数据集，确保数据写入内存文件
+    GDALClose(outDS);
+
+    // 读取内存文件内容到缓冲区
+    vsi_l_offset nDataLength;
+    GByte *pabyData = VSIGetMemFileBuffer(memFilename, &nDataLength, FALSE);
+
+    // 检查内存文件读取是否成功
+    if (pabyData == NULL || nDataLength == 0) {
+        VSIUnlink(memFilename);  // 清理内存文件
+        return NULL;
+    }
+
+    // 分配返回结构体内存
+    ImageBuffer *buffer = (ImageBuffer*)malloc(sizeof(ImageBuffer));
+    if (buffer == NULL) {
+        VSIUnlink(memFilename);  // 内存分配失败时清理
+        return NULL;
+    }
+
+    // 复制数据（因为 VSI 内存在 Unlink 后会被释放）
+    buffer->data = (unsigned char*)malloc(nDataLength);
+    if (buffer->data == NULL) {
+        free(buffer);            // 释放已分配的结构体内存
+        VSIUnlink(memFilename);  // 清理内存文件
+        return NULL;
+    }
+
+    // 将内存文件数据复制到返回缓冲区
+    memcpy(buffer->data, pabyData, nDataLength);
+    buffer->size = nDataLength;  // 设置缓冲区大小
+
+    // 清理内存文件，释放VSI内存
+    VSIUnlink(memFilename);
+
+    return buffer;  // 返回包含图像数据的缓冲区
+}
+
+
+// 释放 ImageBuffer
+void freeImageBuffer(ImageBuffer *buffer) {
+    if (buffer != NULL) {
+        if (buffer->data != NULL) {
+            free(buffer->data);
+        }
+        free(buffer);
+    }
+}

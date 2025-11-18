@@ -1792,3 +1792,394 @@ func convertOGRFieldTypeToDBType(fieldType C.OGRFieldType) string {
 		return "TEXT"
 	}
 }
+
+func ConvertGeoJSONToGDALLayer(fc *geojson.FeatureCollection, layerName string) (*GDALLayer, error) {
+	if fc == nil {
+		return nil, fmt.Errorf("输入的 FeatureCollection 不能为空")
+	}
+
+	// 1. 获取内存驱动 (GDAL Memory Driver)
+	cDriverName := C.CString("Memory")
+	defer C.free(unsafe.Pointer(cDriverName))
+	hDriver := C.OGRGetDriverByName(cDriverName)
+	if hDriver == nil {
+		return nil, fmt.Errorf("无法获取内存驱动")
+	}
+
+	// 2. 创建内存数据源
+	hDataSource := C.OGR_Dr_CreateDataSource(hDriver, nil, nil) // 第二个参数为 nil，表示创建内存数据源
+	if hDataSource == nil {
+		return nil, fmt.Errorf("无法创建内存数据源")
+	}
+
+	// 3. 创建坐标系 (这里以 EPSG:4326 为例，可以根据需要修改)
+	hSRS := C.OSRNewSpatialReference(nil)
+	if hSRS == nil {
+		C.OGRReleaseDataSource(hDataSource)
+		return nil, fmt.Errorf("无法创建空间参考系统")
+	}
+	defer C.OSRDestroySpatialReference(hSRS)
+
+	if C.OSRImportFromEPSG(hSRS, 4326) != C.OGRERR_NONE { // 假设 GeoJSON 是 WGS84
+		C.OGRReleaseDataSource(hDataSource)
+		return nil, fmt.Errorf("无法创建 EPSG:4326 坐标系")
+	}
+
+	// 4. 确定图层几何类型 (这里简化处理，取第一个要素的类型，或默认为 Unknown)
+	var ogrGeomType C.OGRwkbGeometryType = C.wkbUnknown
+	if len(fc.Features) > 0 && fc.Features[0].Geometry != nil {
+		geomType := fc.Features[0].Geometry.GeoJSONType() // 使用库提供的方法
+		ogrGeomType = getOGRGeometryTypeFromOrb(geomType)
+		if ogrGeomType == C.wkbUnknown {
+			log.Printf("警告: 无法识别第一个要素的几何类型 '%s'，图层将使用 wkbUnknown 类型", geomType)
+		}
+	}
+
+	// 5. 创建图层
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+	hLayer := C.OGR_DS_CreateLayer(hDataSource, cLayerName, hSRS, ogrGeomType, nil)
+	if hLayer == nil {
+		C.OGRReleaseDataSource(hDataSource)
+		return nil, fmt.Errorf("无法创建图层: %s", layerName)
+	}
+
+	// 6. (可选) 根据第一个要素的属性创建字段 (这里可以更智能地分析所有要素来确定字段)
+	if len(fc.Features) > 0 && len(fc.Features[0].Properties) > 0 {
+		err := createFieldsFromProperties(hLayer, fc.Features[0].Properties)
+		if err != nil {
+			C.OGRReleaseDataSource(hDataSource)
+			return nil, fmt.Errorf("创建字段失败: %v", err)
+		}
+	}
+
+	// 7. 遍历 GeoJSON 特征，创建 GDAL 要素并添加到图层
+	for _, feature := range fc.Features {
+		err := addGeoJSONFeatureToGDALLayer(hLayer, feature)
+		if err != nil {
+			log.Printf("添加要素失败: %v", err)
+			// 可以选择继续处理其他要素或返回错误
+			// 这里选择继续
+		}
+	}
+
+	// 8. 创建并返回 GDALLayer 结构体
+	return &GDALLayer{
+		layer:   hLayer,
+		dataset: hDataSource,
+		driver:  hDriver,
+	}, nil
+}
+
+// getOGRGeometryTypeFromOrb 根据 orb.Geometry GeoJSONType 获取对应的 OGRwkbGeometryType
+func getOGRGeometryTypeFromOrb(orbType string) C.OGRwkbGeometryType {
+	switch orbType {
+	case "Point":
+		return C.wkbPoint
+	case "LineString":
+		return C.wkbLineString
+	case "Polygon":
+		return C.wkbPolygon
+	case "MultiPoint":
+		return C.wkbMultiPoint
+	case "MultiLineString":
+		return C.wkbMultiLineString
+	case "MultiPolygon":
+		return C.wkbMultiPolygon
+	case "GeometryCollection":
+		return C.wkbGeometryCollection
+	default:
+		return C.wkbUnknown
+	}
+}
+
+// createFieldsFromProperties 根据 GeoJSON 属性创建 GDAL 字段
+// 注意：这里进行了简单的类型推断，可能需要更复杂的逻辑
+func createFieldsFromProperties(hLayer C.OGRLayerH, properties geojson.Properties) error {
+	hLayerDefn := C.OGR_L_GetLayerDefn(hLayer)
+	if hLayerDefn == nil {
+		return fmt.Errorf("无法获取图层定义")
+	}
+
+	for key, value := range properties {
+		var ogrFieldType C.OGRFieldType
+
+		// 简单类型推断
+		switch v := value.(type) {
+		case string:
+			ogrFieldType = C.OFTString
+		case float64: // JSON number
+			// 检查是否为整数
+			if v == float64(int64(v)) {
+				ogrFieldType = C.OFTInteger64 // 使用 Integer64 以防数值过大
+			} else {
+				ogrFieldType = C.OFTReal
+			}
+		case bool: // JSON boolean
+			// GDAL 没有原生布尔类型，通常用整数表示 (0/1)
+			ogrFieldType = C.OFTInteger
+		case nil: // JSON null
+			ogrFieldType = C.OFTString // 默认用字符串，后续赋值为 NULL
+		default:
+			// 其他类型（如 map, array）通常转为字符串或 JSON 字符串
+			ogrFieldType = C.OFTString
+		}
+
+		cFieldName := C.CString(key)
+		hFieldDefn := C.OGR_Fld_Create(cFieldName, ogrFieldType)
+		C.free(unsafe.Pointer(cFieldName))
+
+		if hFieldDefn == nil {
+			log.Printf("无法创建字段定义: %s", key)
+			continue // 尝试创建下一个字段
+		}
+
+		// 设置字段长度 (对于字符串类型)
+		if ogrFieldType == C.OFTString {
+			// 可以根据属性值的最大长度设置，或者使用默认值
+			C.OGR_Fld_SetWidth(hFieldDefn, 254) // 设置默认长度
+		}
+
+		// 添加字段到图层
+		if C.OGR_L_CreateField(hLayer, hFieldDefn, 1) != C.OGRERR_NONE {
+			C.OGR_Fld_Destroy(hFieldDefn)
+			log.Printf("无法创建字段: %s", key)
+			continue // 尝试创建下一个字段
+		}
+		C.OGR_Fld_Destroy(hFieldDefn) // 创建后销毁字段定义
+	}
+	return nil
+}
+
+// addGeoJSONFeatureToGDALLayer 将单个 geojson.Feature 添加到 GDAL Layer
+func addGeoJSONFeatureToGDALLayer(hLayer C.OGRLayerH, feature *geojson.Feature) error {
+	hLayerDefn := C.OGR_L_GetLayerDefn(hLayer)
+	if hLayerDefn == nil {
+		return fmt.Errorf("无法获取图层定义")
+	}
+
+	// 1. 创建 GDAL 要素
+	hFeature := C.OGR_F_Create(hLayerDefn)
+	if hFeature == nil {
+		return fmt.Errorf("无法创建 GDAL 要素")
+	}
+	defer C.OGR_F_Destroy(hFeature) // 确保在函数结束时销毁
+
+	// 2. 设置几何
+	if feature.Geometry != nil {
+		hGeometry, err := orbGeometryToOGR(feature.Geometry)
+		if err != nil {
+			return fmt.Errorf("转换几何失败: %v", err)
+		}
+		if hGeometry != nil {
+			C.OGR_F_SetGeometry(hFeature, hGeometry)
+			C.OGR_G_DestroyGeometry(hGeometry) // SetGeometry 会增加引用计数，这里销毁原始指针
+		}
+	}
+
+	// 3. 设置属性
+	for key, value := range feature.Properties {
+		cFieldName := C.CString(key)
+		fieldIndex := C.OGR_F_GetFieldIndex(hFeature, cFieldName)
+		C.free(unsafe.Pointer(cFieldName))
+
+		if fieldIndex < 0 {
+			log.Printf("警告: 图层中不存在字段 '%s'，跳过该属性", key)
+			continue
+		}
+
+		err := setGDALFieldValue(hFeature, int(fieldIndex), value)
+		if err != nil {
+			log.Printf("设置字段 '%s' 值失败: %v", key, err)
+			// 继续处理其他字段
+		}
+	}
+
+	// 4. 将要素添加到图层
+	if C.OGR_L_CreateFeature(hLayer, hFeature) != C.OGRERR_NONE {
+		return fmt.Errorf("无法将要素添加到图层")
+	}
+
+	return nil
+}
+
+// orbGeometryToOGR 将 orb.Geometry 转换为 OGRGeometryH
+func orbGeometryToOGR(geom orb.Geometry) (C.OGRGeometryH, error) {
+	if geom == nil {
+		return nil, nil // 允许空几何
+	}
+
+	var hGeom C.OGRGeometryH
+	switch g := geom.(type) {
+	case orb.Point:
+		hGeom = C.OGR_G_CreateGeometry(C.wkbPoint)
+		if hGeom != nil {
+			C.OGR_G_SetPoint_2D(hGeom, 0, C.double(g[0]), C.double(g[1]))
+		}
+	case orb.LineString:
+		hGeom = C.OGR_G_CreateGeometry(C.wkbLineString)
+		if hGeom != nil {
+			for _, p := range g {
+				C.OGR_G_AddPoint_2D(hGeom, C.double(p[0]), C.double(p[1]))
+			}
+		}
+	case orb.Polygon:
+		hGeom = C.OGR_G_CreateGeometry(C.wkbPolygon)
+		if hGeom != nil {
+			for _, ring := range g {
+				hRing := C.OGR_G_CreateGeometry(C.wkbLinearRing)
+				if hRing != nil {
+					for _, p := range ring {
+						C.OGR_G_AddPoint_2D(hRing, C.double(p[0]), C.double(p[1]))
+					}
+					// 确保环闭合
+					if len(ring) > 0 {
+						C.OGR_G_AddPoint_2D(hRing, C.double(ring[0][0]), C.double(ring[0][1]))
+					}
+					// 添加环到多边形
+					if C.OGR_G_AddGeometryDirectly(hGeom, hRing) != C.OGRERR_NONE {
+						C.OGR_G_DestroyGeometry(hRing) // 如果添加失败，销毁环
+					}
+				}
+			}
+		}
+	case orb.MultiPoint:
+		hGeom = C.OGR_G_CreateGeometry(C.wkbMultiPoint)
+		if hGeom != nil {
+			for _, p := range g {
+				hPoint := C.OGR_G_CreateGeometry(C.wkbPoint)
+				if hPoint != nil {
+					C.OGR_G_SetPoint_2D(hPoint, 0, C.double(p[0]), C.double(p[1]))
+					if C.OGR_G_AddGeometryDirectly(hGeom, hPoint) != C.OGRERR_NONE {
+						C.OGR_G_DestroyGeometry(hPoint)
+					}
+				}
+			}
+		}
+	case orb.MultiLineString:
+		hGeom = C.OGR_G_CreateGeometry(C.wkbMultiLineString)
+		if hGeom != nil {
+			for _, ls := range g {
+				hLine := C.OGR_G_CreateGeometry(C.wkbLineString)
+				if hLine != nil {
+					for _, p := range ls {
+						C.OGR_G_AddPoint_2D(hLine, C.double(p[0]), C.double(p[1]))
+					}
+					if C.OGR_G_AddGeometryDirectly(hGeom, hLine) != C.OGRERR_NONE {
+						C.OGR_G_DestroyGeometry(hLine)
+					}
+				}
+			}
+		}
+	case orb.MultiPolygon:
+		hGeom = C.OGR_G_CreateGeometry(C.wkbMultiPolygon)
+		if hGeom != nil {
+			for _, poly := range g {
+				hPoly := C.OGR_G_CreateGeometry(C.wkbPolygon)
+				if hPoly != nil {
+					for _, ring := range poly {
+						hRing := C.OGR_G_CreateGeometry(C.wkbLinearRing)
+						if hRing != nil {
+							for _, p := range ring {
+								C.OGR_G_AddPoint_2D(hRing, C.double(p[0]), C.double(p[1]))
+							}
+							// 确保环闭合
+							if len(ring) > 0 {
+								C.OGR_G_AddPoint_2D(hRing, C.double(ring[0][0]), C.double(ring[0][1]))
+							}
+							if C.OGR_G_AddGeometryDirectly(hPoly, hRing) != C.OGRERR_NONE {
+								C.OGR_G_DestroyGeometry(hRing)
+							}
+						}
+					}
+					if C.OGR_G_AddGeometryDirectly(hGeom, hPoly) != C.OGRERR_NONE {
+						C.OGR_G_DestroyGeometry(hPoly)
+					}
+				}
+			}
+		}
+	case orb.Collection: // Handle GeometryCollection
+		hGeom = C.OGR_G_CreateGeometry(C.wkbGeometryCollection)
+		if hGeom != nil {
+			for _, subGeom := range g {
+				hSubGeom, err := orbGeometryToOGR(subGeom)
+				if err != nil {
+					log.Printf("转换 GeometryCollection 中的子几何失败: %v", err)
+					continue
+				}
+				if hSubGeom != nil {
+					if C.OGR_G_AddGeometryDirectly(hGeom, hSubGeom) != C.OGRERR_NONE {
+						C.OGR_G_DestroyGeometry(hSubGeom)
+					}
+				}
+			}
+		}
+	default:
+		return nil, fmt.Errorf("不支持的几何类型: %T", g)
+	}
+
+	if hGeom == nil {
+		return nil, fmt.Errorf("创建 OGR 几何对象失败")
+	}
+
+	return hGeom, nil
+}
+
+// setGDALFieldValue 设置 GDAL 要素的字段值
+func setGDALFieldValue(hFeature C.OGRFeatureH, fieldIndex int, value interface{}) error {
+	cFieldIndex := C.int(fieldIndex)
+
+	// 获取字段类型以进行类型安全的设置
+	hFieldDefn := C.OGR_F_GetFieldDefnRef(hFeature, cFieldIndex)
+	if hFieldDefn == nil {
+		return fmt.Errorf("无法获取字段定义")
+	}
+	ogrFieldType := C.OGR_Fld_GetType(hFieldDefn)
+
+	switch v := value.(type) {
+	case string:
+		if ogrFieldType == C.OFTString {
+			cValue := C.CString(v)
+			defer C.free(unsafe.Pointer(cValue))
+			C.OGR_F_SetFieldString(hFeature, cFieldIndex, cValue)
+		} else {
+			// 如果类型不匹配，可以尝试转换或设置为字符串
+			cValue := C.CString(v)
+			defer C.free(unsafe.Pointer(cValue))
+			C.OGR_F_SetFieldString(hFeature, cFieldIndex, cValue)
+		}
+	case float64: // JSON number
+		if v == float64(int64(v)) && ogrFieldType == C.OFTInteger64 {
+			C.OGR_F_SetFieldInteger64(hFeature, cFieldIndex, C.longlong(v))
+		} else if ogrFieldType == C.OFTReal {
+			C.OGR_F_SetFieldDouble(hFeature, cFieldIndex, C.double(v))
+		} else if ogrFieldType == C.OFTInteger {
+			C.OGR_F_SetFieldInteger(hFeature, cFieldIndex, C.int(v))
+		} else {
+			// 类型不匹配，转为字符串
+			cValue := C.CString(fmt.Sprintf("%v", v))
+			defer C.free(unsafe.Pointer(cValue))
+			C.OGR_F_SetFieldString(hFeature, cFieldIndex, cValue)
+		}
+	case bool: // JSON boolean
+		if ogrFieldType == C.OFTInteger { // 使用整数 0/1 表示布尔值
+			if v {
+				C.OGR_F_SetFieldInteger(hFeature, cFieldIndex, 1)
+			} else {
+				C.OGR_F_SetFieldInteger(hFeature, cFieldIndex, 0)
+			}
+		} else {
+			// 类型不匹配，转为字符串
+			cValue := C.CString(fmt.Sprintf("%v", v))
+			defer C.free(unsafe.Pointer(cValue))
+			C.OGR_F_SetFieldString(hFeature, cFieldIndex, cValue)
+		}
+	case nil: // JSON null
+		C.OGR_F_SetFieldNull(hFeature, cFieldIndex)
+	default: // 其他类型
+		cValue := C.CString(fmt.Sprintf("%v", v))
+		defer C.free(unsafe.Pointer(cValue))
+		C.OGR_F_SetFieldString(hFeature, cFieldIndex, cValue)
+	}
+	return nil
+}
