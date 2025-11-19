@@ -70,7 +70,7 @@ func GDBToGeoJSON(gdbPath string) ([]GeoJsonLayers, error) {
 		geoTypeStr := getGeometryTypeName(geomType)
 
 		// 转换图层为GeoJSON（包含坐标系转换）
-		featureCollection, err := layerToGeoJSONWithTransform(hLayer, hTargetSRS)
+		featureCollection, err := LayerToGeoJSONWithTransform(hLayer, hTargetSRS)
 		if err != nil {
 			log.Printf("转换图层 %s 失败: %v", layerNameStr, err)
 			continue
@@ -86,8 +86,7 @@ func GDBToGeoJSON(gdbPath string) ([]GeoJsonLayers, error) {
 	return layers, nil
 }
 
-// layerToGeoJSONWithTransform 将单个图层转换为GeoJSON FeatureCollection（包含坐标系转换）
-func layerToGeoJSONWithTransform(hLayer C.OGRLayerH, hTargetSRS C.OGRSpatialReferenceH) (*geojson.FeatureCollection, error) {
+func LayerToGeoJSONWithTransform(hLayer C.OGRLayerH, hTargetSRS C.OGRSpatialReferenceH) (*geojson.FeatureCollection, error) {
 	// 重置读取位置
 	C.OGR_L_ResetReading(hLayer)
 

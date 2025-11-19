@@ -112,6 +112,7 @@ func BufferLayer(sourceLayer *GDALLayer, distance float64, quadSegs int) (*GDALL
 }
 
 // BufferLayerAuto 根据图形的面积和周长自动计算缓冲距离并创建缓冲区
+// 对于带环岛的面要素，只缓冲外环
 func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) (*GDALLayer, error) {
 	if sourceLayer == nil || sourceLayer.layer == nil {
 		return nil, fmt.Errorf("源图层为空")
@@ -181,11 +182,18 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 
 		geometry := C.OGR_F_GetGeometryRef(feature)
 		if geometry != nil {
-			// 计算面积和周长
-			area := float64(C.OGR_G_Area(geometry))
+			// 提取外环几何（忽略内环/环岛）
+			exteriorGeom := extractExteriorRing(geometry)
+			if exteriorGeom == nil {
+				C.OGR_F_Destroy(feature)
+				continue
+			}
+
+			// 计算面积和周长（基于外环）
+			area := float64(C.OGR_G_Area(exteriorGeom))
 
 			// 计算周长(对于多边形使用边界长度)
-			boundary := C.OGR_G_GetBoundary(geometry)
+			boundary := C.OGR_G_GetBoundary(exteriorGeom)
 			perimeter := 0.0
 			if boundary != nil {
 				perimeter = float64(C.OGR_G_Length(boundary))
@@ -197,7 +205,7 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 
 			// 创建缓冲区
 			if bufferDistance > 0 {
-				bufferedGeom := C.OGR_G_Buffer(geometry, C.double(bufferDistance), C.int(quadSegs))
+				bufferedGeom := C.OGR_G_Buffer(exteriorGeom, C.double(bufferDistance), C.int(quadSegs))
 				if bufferedGeom != nil {
 					// 创建新要素
 					newFeature := C.OGR_F_Create(resultDefn)
@@ -221,6 +229,9 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 					C.OGR_G_DestroyGeometry(bufferedGeom)
 				}
 			}
+
+			// 清理外环几何
+			C.OGR_G_DestroyGeometry(exteriorGeom)
 		}
 
 		C.OGR_F_Destroy(feature)
@@ -234,6 +245,72 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 
 	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
 	return gdalLayer, nil
+}
+
+// extractExteriorRing 提取几何对象的外环，返回只包含外环的多边形
+func extractExteriorRing(geometry C.OGRGeometryH) C.OGRGeometryH {
+	if geometry == nil {
+		return nil
+	}
+
+	geomType := C.OGR_G_GetGeometryType(geometry)
+
+	switch geomType {
+	case C.wkbPolygon, C.wkbPolygon25D:
+		// 获取外环
+		exteriorRing := C.OGR_G_GetGeometryRef(geometry, 0)
+		if exteriorRing == nil {
+			return nil
+		}
+
+		// 克隆外环
+		clonedRing := C.OGR_G_Clone(exteriorRing)
+		if clonedRing == nil {
+			return nil
+		}
+
+		// 创建新的多边形，只包含外环
+		newPolygon := C.OGR_G_CreateGeometry(C.wkbPolygon)
+		if newPolygon == nil {
+			C.OGR_G_DestroyGeometry(clonedRing)
+			return nil
+		}
+
+		// 将外环添加到新多边形
+		err := C.OGR_G_AddGeometryDirectly(newPolygon, clonedRing)
+		if err != 0 {
+			C.OGR_G_DestroyGeometry(clonedRing)
+			C.OGR_G_DestroyGeometry(newPolygon)
+			return nil
+		}
+
+		return newPolygon
+
+	case C.wkbMultiPolygon, C.wkbMultiPolygon25D:
+		// 创建新的MultiPolygon
+		newMultiPolygon := C.OGR_G_CreateGeometry(C.wkbMultiPolygon)
+		if newMultiPolygon == nil {
+			return nil
+		}
+
+		// 遍历每个多边形，提取外环
+		geomCount := int(C.OGR_G_GetGeometryCount(geometry))
+		for i := 0; i < geomCount; i++ {
+			subGeom := C.OGR_G_GetGeometryRef(geometry, C.int(i))
+			if subGeom != nil {
+				exteriorPoly := extractExteriorRing(subGeom)
+				if exteriorPoly != nil {
+					C.OGR_G_AddGeometryDirectly(newMultiPolygon, exteriorPoly)
+				}
+			}
+		}
+
+		return newMultiPolygon
+
+	default:
+		// 对于其他类型，直接克隆
+		return C.OGR_G_Clone(geometry)
+	}
 }
 
 // calculateOptimizedBufferDistance 根据面积和周长计算优化的缓冲距离
@@ -2284,7 +2361,7 @@ func GetLayerExtent(layer *GDALLayer) (minX, minY, maxX, maxY float64, err error
 
 // DonutBuilder 将面图层中的重叠面构建成环岛结构
 // 该函数会识别包含关系，将内部多边形作为外部多边形的洞
-// 返回处理后的新图层，消除100%重叠面
+
 func DonutBuilder(sourceLayer *GDALLayer) (*GDALLayer, error) {
 	if sourceLayer == nil || sourceLayer.layer == nil {
 		return nil, fmt.Errorf("源图层为空")
@@ -2571,6 +2648,7 @@ func createDonutPolygons(rootNodes []*containmentNode,
 }
 
 // processNode 处理单个节点及其子树
+// processNode 处理单个节点及其子树
 func processNode(node *containmentNode,
 	resultLayer C.OGRLayerH,
 	resultDefn, sourceDefn C.OGRFeatureDefnH) int {
@@ -2585,8 +2663,10 @@ func processNode(node *containmentNode,
 	if node.level%2 == 0 {
 		// 偶数层：实体多边形（可能带洞）
 		count += createPolygonWithHoles(node, resultLayer, resultDefn, sourceDefn)
+	} else {
+		// 奇数层：洞，但也输出为独立要素（保留原始面）
+		count += createSimplePolygon(node, resultLayer, resultDefn, sourceDefn)
 	}
-	// 奇数层：洞，已经在父节点处理时添加为洞，这里跳过
 
 	// 递归处理子节点
 	for _, child := range node.children {
@@ -2596,7 +2676,50 @@ func processNode(node *containmentNode,
 	return count
 }
 
+// createSimplePolygon 创建简单多边形（用于输出原始洞要素）
+func createSimplePolygon(node *containmentNode,
+	resultLayer C.OGRLayerH,
+	resultDefn, sourceDefn C.OGRFeatureDefnH) int {
+
+	if node.polygon.isProcessed {
+		return 0
+	}
+
+	// 克隆原始几何
+	clonedGeom := C.OGR_G_Clone(node.polygon.geometry)
+	if clonedGeom == nil {
+		return 0
+	}
+
+	// 创建新要素
+	newFeature := C.OGR_F_Create(resultDefn)
+	if newFeature == nil {
+		C.OGR_G_DestroyGeometry(clonedGeom)
+		return 0
+	}
+
+	// 设置几何
+	C.OGR_F_SetGeometry(newFeature, clonedGeom)
+
+	// 复制属性
+	copyFeatureAttributes(node.polygon.feature, newFeature, sourceDefn, resultDefn)
+
+	// 添加到图层
+	result := C.OGR_L_CreateFeature(resultLayer, newFeature)
+
+	C.OGR_F_Destroy(newFeature)
+	C.OGR_G_DestroyGeometry(clonedGeom)
+
+	node.polygon.isProcessed = true
+
+	if result == C.OGRERR_NONE {
+		return 1
+	}
+	return 0
+}
+
 // createPolygonWithHoles 创建带洞的多边形
+
 func createPolygonWithHoles(node *containmentNode,
 	resultLayer C.OGRLayerH,
 	resultDefn, sourceDefn C.OGRFeatureDefnH) int {
@@ -2627,7 +2750,7 @@ func createPolygonWithHoles(node *containmentNode,
 			innerRing := extractOuterRing(child.polygon.geometry)
 			if innerRing != nil {
 				C.OGR_G_AddGeometryDirectly(newPolygon, innerRing)
-				child.polygon.isProcessed = true
+				// 移除这行：child.polygon.isProcessed = true
 				holesAdded++
 			}
 		}
