@@ -112,7 +112,7 @@ func BufferLayer(sourceLayer *GDALLayer, distance float64, quadSegs int) (*GDALL
 }
 
 // BufferLayerAuto 根据图形的面积和周长自动计算缓冲距离并创建缓冲区
-// 对于带环岛的面要素，只缓冲外环
+// 对于带环岛的面要素，只缓冲外环，内环保持不变
 func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) (*GDALLayer, error) {
 	if sourceLayer == nil || sourceLayer.layer == nil {
 		return nil, fmt.Errorf("源图层为空")
@@ -182,7 +182,7 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 
 		geometry := C.OGR_F_GetGeometryRef(feature)
 		if geometry != nil {
-			// 提取外环几何（忽略内环/环岛）
+			// 提取外环用于计算缓冲距离
 			exteriorGeom := extractExteriorRing(geometry)
 			if exteriorGeom == nil {
 				C.OGR_F_Destroy(feature)
@@ -205,28 +205,35 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 
 			// 创建缓冲区
 			if bufferDistance > 0 {
-				bufferedGeom := C.OGR_G_Buffer(exteriorGeom, C.double(bufferDistance), C.int(quadSegs))
-				if bufferedGeom != nil {
-					// 创建新要素
-					newFeature := C.OGR_F_Create(resultDefn)
-					if newFeature != nil {
-						// 设置几何
-						C.OGR_F_SetGeometry(newFeature, bufferedGeom)
+				// 只对外环进行缓冲
+				bufferedExterior := C.OGR_G_Buffer(exteriorGeom, C.double(bufferDistance), C.int(quadSegs))
+				if bufferedExterior != nil {
+					// 将缓冲后的外环与原始内环组合
+					finalGeom := combineBufferedExteriorWithInteriorRings(bufferedExterior, geometry)
 
-						// 复制属性
-						copyFeatureAttributes(feature, newFeature, sourceDefn, resultDefn)
+					if finalGeom != nil {
+						// 创建新要素
+						newFeature := C.OGR_F_Create(resultDefn)
+						if newFeature != nil {
+							// 设置几何
+							C.OGR_F_SetGeometry(newFeature, finalGeom)
 
-						// 设置缓冲距离字段值
-						bufferDistFieldIndex := C.OGR_F_GetFieldIndex(newFeature, cFieldName)
-						if bufferDistFieldIndex >= 0 {
-							C.OGR_F_SetFieldDouble(newFeature, bufferDistFieldIndex, C.double(bufferDistance))
+							// 复制属性
+							copyFeatureAttributes(feature, newFeature, sourceDefn, resultDefn)
+
+							// 设置缓冲距离字段值
+							bufferDistFieldIndex := C.OGR_F_GetFieldIndex(newFeature, cFieldName)
+							if bufferDistFieldIndex >= 0 {
+								C.OGR_F_SetFieldDouble(newFeature, bufferDistFieldIndex, C.double(bufferDistance))
+							}
+
+							// 添加要素
+							C.OGR_L_CreateFeature(resultLayer, newFeature)
+							C.OGR_F_Destroy(newFeature)
 						}
-
-						// 添加要素
-						C.OGR_L_CreateFeature(resultLayer, newFeature)
-						C.OGR_F_Destroy(newFeature)
+						C.OGR_G_DestroyGeometry(finalGeom)
 					}
-					C.OGR_G_DestroyGeometry(bufferedGeom)
+					C.OGR_G_DestroyGeometry(bufferedExterior)
 				}
 			}
 
@@ -310,6 +317,84 @@ func extractExteriorRing(geometry C.OGRGeometryH) C.OGRGeometryH {
 	default:
 		// 对于其他类型，直接克隆
 		return C.OGR_G_Clone(geometry)
+	}
+}
+
+// combineBufferedExteriorWithInteriorRings 将缓冲后的外环与原始内环组合
+func combineBufferedExteriorWithInteriorRings(bufferedExterior, originalGeometry C.OGRGeometryH) C.OGRGeometryH {
+	if bufferedExterior == nil || originalGeometry == nil {
+		return nil
+	}
+
+	geomType := C.OGR_G_GetGeometryType(originalGeometry)
+
+	switch geomType {
+	case C.wkbPolygon, C.wkbPolygon25D:
+		// 获取原始多边形的环数量
+		ringCount := int(C.OGR_G_GetGeometryCount(originalGeometry))
+
+		// 如果只有外环，直接克隆缓冲后的几何
+		if ringCount <= 1 {
+			return C.OGR_G_Clone(bufferedExterior)
+		}
+
+		// 创建新的多边形
+		newPolygon := C.OGR_G_CreateGeometry(C.wkbPolygon)
+		if newPolygon == nil {
+			return nil
+		}
+
+		// 获取缓冲后的外环（缓冲结果应该是多边形）
+		bufferedRing := C.OGR_G_GetGeometryRef(bufferedExterior, 0)
+		if bufferedRing != nil {
+			clonedBufferedRing := C.OGR_G_Clone(bufferedRing)
+			if clonedBufferedRing != nil {
+				C.OGR_G_AddGeometryDirectly(newPolygon, clonedBufferedRing)
+			}
+		}
+
+		// 添加原始内环（从索引1开始，跳过外环）
+		for i := 1; i < ringCount; i++ {
+			interiorRing := C.OGR_G_GetGeometryRef(originalGeometry, C.int(i))
+			if interiorRing != nil {
+				clonedInteriorRing := C.OGR_G_Clone(interiorRing)
+				if clonedInteriorRing != nil {
+					C.OGR_G_AddGeometryDirectly(newPolygon, clonedInteriorRing)
+				}
+			}
+		}
+
+		return newPolygon
+
+	case C.wkbMultiPolygon, C.wkbMultiPolygon25D:
+		// 创建新的MultiPolygon
+		newMultiPolygon := C.OGR_G_CreateGeometry(C.wkbMultiPolygon)
+		if newMultiPolygon == nil {
+			return nil
+		}
+
+		// 获取缓冲后的几何数量
+		bufferedGeomCount := int(C.OGR_G_GetGeometryCount(bufferedExterior))
+		originalGeomCount := int(C.OGR_G_GetGeometryCount(originalGeometry))
+
+		// 遍历每个多边形
+		for i := 0; i < bufferedGeomCount && i < originalGeomCount; i++ {
+			bufferedSubGeom := C.OGR_G_GetGeometryRef(bufferedExterior, C.int(i))
+			originalSubGeom := C.OGR_G_GetGeometryRef(originalGeometry, C.int(i))
+
+			if bufferedSubGeom != nil && originalSubGeom != nil {
+				combinedPoly := combineBufferedExteriorWithInteriorRings(bufferedSubGeom, originalSubGeom)
+				if combinedPoly != nil {
+					C.OGR_G_AddGeometryDirectly(newMultiPolygon, combinedPoly)
+				}
+			}
+		}
+
+		return newMultiPolygon
+
+	default:
+		// 对于其他类型，直接克隆缓冲后的几何
+		return C.OGR_G_Clone(bufferedExterior)
 	}
 }
 
