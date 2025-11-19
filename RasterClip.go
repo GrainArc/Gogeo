@@ -411,3 +411,157 @@ func (rd *RasterDataset) clipByFeatureToByte(
 
 	return result
 }
+
+// ClipPixelRasterByLayerByte 使用矢量图层裁剪像素坐标系栅格数据并返回二进制数据
+// 此方法不使用gdalwarp,而是将矢量栅格化为掩膜后进行裁剪
+func (rd *RasterDataset) ClipPixelRasterByLayerByte(layer *GDALLayer, options *ClipOptions) ([]ClipResultByte, error) {
+	if layer == nil || layer.layer == nil {
+		return nil, fmt.Errorf("invalid layer")
+	}
+
+	// 检查是否为像素坐标系
+	if rd.hasGeoInfo {
+		return nil, fmt.Errorf("this method is only for pixel coordinate images, use ClipRasterByLayerByte for geo-referenced images")
+	}
+
+	// 设置默认选项
+	if options == nil {
+		options = &ClipOptions{}
+	}
+	if options.NameField == "" {
+		options.NameField = "NAME"
+	}
+	if options.JPEGQuality <= 0 || options.JPEGQuality > 100 {
+		options.JPEGQuality = 85
+	}
+	if options.ImageFormat == "" {
+		options.ImageFormat = "JPEG"
+	}
+
+	// 获取数据集
+	activeDS := rd.GetActiveDataset()
+
+	// 重置图层读取
+	C.OGR_L_ResetReading(layer.layer)
+
+	// 获取要素数量
+	featureCount := int(C.OGR_L_GetFeatureCount(layer.layer, 1))
+	results := make([]ClipResultByte, 0, featureCount)
+
+	// 获取名称字段索引
+	cFieldName := C.CString(options.NameField)
+	defer C.free(unsafe.Pointer(cFieldName))
+
+	// 遍历所有要素
+	for {
+		feature := C.OGR_L_GetNextFeature(layer.layer)
+		if feature == nil {
+			break
+		}
+
+		result := rd.clipPixelByFeatureToByte(feature, activeDS, options, cFieldName)
+		results = append(results, result)
+
+		C.OGR_F_Destroy(feature)
+	}
+
+	return results, nil
+}
+
+// clipPixelByFeatureToByte 使用掩膜方式裁剪像素坐标系的单个要素
+func (rd *RasterDataset) clipPixelByFeatureToByte(
+	feature C.OGRFeatureH,
+	srcDS C.GDALDatasetH,
+	options *ClipOptions,
+	cFieldName *C.char,
+) ClipResultByte {
+	result := ClipResultByte{}
+
+	// 获取名称字段
+	fieldIndex := C.OGR_F_GetFieldIndex(feature, cFieldName)
+	if fieldIndex < 0 {
+		result.Error = fmt.Errorf("field '%s' not found", options.NameField)
+		return result
+	}
+
+	namePtr := C.OGR_F_GetFieldAsString(feature, fieldIndex)
+	if namePtr == nil {
+		result.Error = fmt.Errorf("failed to get field value")
+		return result
+	}
+	result.Name = C.GoString(namePtr)
+
+	// 清理文件名
+	result.Name = sanitizeFilename(result.Name)
+	if result.Name == "" {
+		result.Name = fmt.Sprintf("feature_%d", C.OGR_F_GetFID(feature))
+	}
+
+	// 获取几何体
+	geom := C.OGR_F_GetGeometryRef(feature)
+	if geom == nil {
+		result.Error = fmt.Errorf("feature has no geometry")
+		return result
+	}
+
+	// 应用缓冲区（如果需要）- 注意:像素坐标系下缓冲距离就是像素数
+	if options.BufferDist > 0 {
+		geom = C.OGR_G_Buffer(geom, C.double(options.BufferDist), 30)
+		defer C.OGR_G_DestroyGeometry(geom)
+	}
+
+	// 使用掩膜方式裁剪像素坐标系图像
+	var bounds [4]C.double
+	clippedDS := C.clipPixelRasterByMask(srcDS, geom, &bounds[0])
+	if clippedDS == nil {
+		result.Error = fmt.Errorf("failed to clip raster by mask")
+		return result
+	}
+	defer C.GDALClose(clippedDS)
+
+	// 保存边界信息
+	result.Bounds = [4]float64{
+		float64(bounds[0]),
+		float64(bounds[1]),
+		float64(bounds[2]),
+		float64(bounds[3]),
+	}
+
+	// 获取裁剪后的尺寸
+	result.Width = int(C.GDALGetRasterXSize(clippedDS))
+	result.Height = int(C.GDALGetRasterYSize(clippedDS))
+
+	// 如果需要调整大小
+	var outputDS C.GDALDatasetH = clippedDS
+	if options.TileSize > 0 {
+		outputDS = rd.resizeDataset(clippedDS, options.TileSize)
+		if outputDS == nil {
+			result.Error = fmt.Errorf("failed to resize dataset")
+			return result
+		}
+		defer C.GDALClose(outputDS)
+		result.Width = options.TileSize
+		result.Height = options.TileSize
+	}
+
+	// 写入到内存缓冲区
+	cFormat := C.CString(options.ImageFormat)
+	defer C.free(unsafe.Pointer(cFormat))
+
+	imageBuffer := C.writeImageToMemory(outputDS, cFormat, C.int(options.JPEGQuality))
+	if imageBuffer == nil {
+		result.Error = fmt.Errorf("failed to write image to memory")
+		return result
+	}
+	defer C.freeImageBuffer(imageBuffer)
+
+	// 将 C 数据转换为 Go []byte
+	if imageBuffer.size > 0 && imageBuffer.data != nil {
+		result.ImageData = C.GoBytes(unsafe.Pointer(imageBuffer.data), C.int(imageBuffer.size))
+	} else {
+		result.Error = fmt.Errorf("empty image data")
+		return result
+	}
+
+	return result
+}

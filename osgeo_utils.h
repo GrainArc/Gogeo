@@ -76,6 +76,7 @@ GDALDatasetH clipRasterByGeometry(GDALDatasetH srcDS, OGRGeometryH geom, double 
 int writeJPEG(GDALDatasetH ds, const char* filename, int quality);
 int writeImage(GDALDatasetH ds, const char* filename, const char* format, int quality);
 ImageBuffer* writeImageToMemory(GDALDatasetH ds, const char* format, int quality);
+GDALDatasetH clipPixelRasterByMask(GDALDatasetH srcDS, OGRGeometryH geom, double *bounds);
 void freeImageBuffer(ImageBuffer *buffer);
 #ifdef __cplusplus
 }

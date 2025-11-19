@@ -1142,3 +1142,269 @@ void freeImageBuffer(ImageBuffer *buffer) {
         free(buffer);
     }
 }
+
+// 使用掩膜方式裁剪像素坐标系栅格
+GDALDatasetH clipPixelRasterByMask(GDALDatasetH srcDS, OGRGeometryH geom, double *bounds) {
+    if (srcDS == NULL || geom == NULL) return NULL;
+
+    // 获取源数据集信息
+    int width = GDALGetRasterXSize(srcDS);
+    int height = GDALGetRasterYSize(srcDS);
+    int bandCount = GDALGetRasterCount(srcDS);
+
+    if (bandCount == 0) {
+
+        return NULL;
+    }
+
+    // 获取几何体边界(像素坐标)
+    OGREnvelope envelope;
+    OGR_G_GetEnvelope(geom, &envelope);
+
+
+    // 计算裁剪区域(确保在图像范围内)
+    int minX = (int)floor(envelope.MinX);
+    int minY = (int)floor(envelope.MinY);
+    int maxX = (int)ceil(envelope.MaxX);
+    int maxY = (int)ceil(envelope.MaxY);
+
+    // 边界检查
+    if (minX < 0) minX = 0;
+    if (minY < 0) minY = 0;
+    if (maxX > width) maxX = width;
+    if (maxY > height) maxY = height;
+
+    int clipWidth = maxX - minX;
+    int clipHeight = maxY - minY;
+
+
+    if (clipWidth <= 0 || clipHeight <= 0) {
+        fprintf(stderr, "Invalid clip dimensions: %dx%d\n", clipWidth, clipHeight);
+        return NULL;
+    }
+
+    // 保存边界信息
+    bounds[0] = minX;
+    bounds[1] = minY;
+    bounds[2] = maxX;
+    bounds[3] = maxY;
+
+    // 创建内存数据集用于掩膜
+    GDALDriverH memDriver = GDALGetDriverByName("MEM");
+    if (memDriver == NULL) {
+        fprintf(stderr, "MEM driver not available\n");
+        return NULL;
+    }
+
+    // 创建掩膜数据集(单波段,字节类型)
+    GDALDatasetH maskDS = GDALCreate(memDriver, "", clipWidth, clipHeight, 1, GDT_Byte, NULL);
+    if (maskDS == NULL) {
+        fprintf(stderr, "Failed to create mask dataset\n");
+        return NULL;
+    }
+
+    // 设置掩膜的地理变换(像素坐标系)
+    // 关键修改：使用正确的Y轴方向
+    double maskGeoTransform[6] = {
+        (double)minX,  // 左上角X
+        1.0,           // X方向像素大小
+        0.0,           // 旋转
+        (double)minY,  // 左上角Y
+        0.0,           // 旋转
+        1.0            // Y方向像素大小 (正值，因为几何体坐标也是像素坐标)
+    };
+    GDALSetGeoTransform(maskDS, maskGeoTransform);
+
+    // 获取掩膜波段
+    GDALRasterBandH maskBand = GDALGetRasterBand(maskDS, 1);
+    if (maskBand == NULL) {
+        GDALClose(maskDS);
+        fprintf(stderr, "Failed to get mask band\n");
+        return NULL;
+    }
+
+    // 初始化掩膜为0
+    unsigned char *zeroBuffer = (unsigned char*)calloc(clipWidth * clipHeight, sizeof(unsigned char));
+    if (zeroBuffer == NULL) {
+        GDALClose(maskDS);
+
+        return NULL;
+    }
+    CPLErr err = GDALRasterIO(maskBand, GF_Write, 0, 0, clipWidth, clipHeight,
+                              zeroBuffer, clipWidth, clipHeight, GDT_Byte, 0, 0);
+    free(zeroBuffer);
+
+    if (err != CE_None) {
+        GDALClose(maskDS);
+        fprintf(stderr, "Failed to initialize mask\n");
+        return NULL;
+    }
+
+    // 创建临时矢量图层用于栅格化
+    const char *pszTempVector = "/vsimem/temp_vector.geojson";
+    OGRSFDriverH vecDriver = OGRGetDriverByName("Memory");  // 使用 Memory 驱动更快
+    if (vecDriver == NULL) {
+        vecDriver = OGRGetDriverByName("GeoJSON");  // 备用
+        if (vecDriver == NULL) {
+            GDALClose(maskDS);
+            fprintf(stderr, "No vector driver available\n");
+            return NULL;
+        }
+    }
+
+    OGRDataSourceH vecDS = OGR_Dr_CreateDataSource(vecDriver, pszTempVector, NULL);
+    if (vecDS == NULL) {
+        GDALClose(maskDS);
+        fprintf(stderr, "Failed to create temporary vector\n");
+        return NULL;
+    }
+
+    // 创建图层(不设置空间参考,因为是像素坐标)
+    OGRLayerH vecLayer = OGR_DS_CreateLayer(vecDS, "mask", NULL, wkbPolygon, NULL);
+    if (vecLayer == NULL) {
+        OGR_DS_Destroy(vecDS);
+        GDALClose(maskDS);
+        VSIUnlink(pszTempVector);
+        fprintf(stderr, "Failed to create vector layer\n");
+        return NULL;
+    }
+
+    // 创建要素并添加几何体
+    OGRFeatureDefnH featureDefn = OGR_L_GetLayerDefn(vecLayer);
+    OGRFeatureH vecFeature = OGR_F_Create(featureDefn);
+    if (vecFeature == NULL) {
+        OGR_DS_Destroy(vecDS);
+        GDALClose(maskDS);
+        VSIUnlink(pszTempVector);
+        fprintf(stderr, "Failed to create feature\n");
+        return NULL;
+    }
+
+    // 克隆几何体以避免修改原始几何体
+    OGRGeometryH clonedGeom = OGR_G_Clone(geom);
+    OGR_F_SetGeometry(vecFeature, clonedGeom);
+
+    if (OGR_L_CreateFeature(vecLayer, vecFeature) != OGRERR_NONE) {
+        OGR_G_DestroyGeometry(clonedGeom);
+        OGR_F_Destroy(vecFeature);
+        OGR_DS_Destroy(vecDS);
+        GDALClose(maskDS);
+        VSIUnlink(pszTempVector);
+        fprintf(stderr, "Failed to add feature to layer\n");
+        return NULL;
+    }
+    OGR_G_DestroyGeometry(clonedGeom);
+    OGR_F_Destroy(vecFeature);
+
+    // 栅格化矢量到掩膜(值为255)
+    int bandList[1] = {1};
+    double burnValue[1] = {255.0};
+    char **rasterizeOptions = NULL;
+    rasterizeOptions = CSLSetNameValue(rasterizeOptions, "ALL_TOUCHED", "TRUE");
+
+
+    CPLErr rasterizeErr = GDALRasterizeLayers(maskDS, 1, bandList, 1, &vecLayer,
+                                               NULL, NULL, burnValue, rasterizeOptions, NULL, NULL);
+    CSLDestroy(rasterizeOptions);
+    OGR_DS_Destroy(vecDS);
+    VSIUnlink(pszTempVector);
+
+    if (rasterizeErr != CE_None) {
+        GDALClose(maskDS);
+        fprintf(stderr, "Failed to rasterize geometry\n");
+        return NULL;
+    }
+
+    // 验证掩膜是否有效（检查是否有非零像素）
+    unsigned char *maskData = (unsigned char*)malloc(clipWidth * clipHeight * sizeof(unsigned char));
+    if (maskData == NULL) {
+        GDALClose(maskDS);
+        fprintf(stderr, "Failed to allocate mask data buffer\n");
+        return NULL;
+    }
+
+    err = GDALRasterIO(maskBand, GF_Read, 0, 0, clipWidth, clipHeight,
+                       maskData, clipWidth, clipHeight, GDT_Byte, 0, 0);
+    if (err != CE_None) {
+        free(maskData);
+        GDALClose(maskDS);
+        fprintf(stderr, "Failed to read mask data\n");
+        return NULL;
+    }
+
+    // 统计掩膜中的有效像素
+    int validPixels = 0;
+    for (int i = 0; i < clipWidth * clipHeight; i++) {
+        if (maskData[i] > 0) {
+            validPixels++;
+        }
+    }
+
+
+    if (validPixels == 0) {
+        free(maskData);
+        GDALClose(maskDS);
+        fprintf(stderr, "WARNING: Mask has no valid pixels!\n");
+        return NULL;
+    }
+
+    // 创建输出数据集
+    GDALDatasetH outputDS = GDALCreate(memDriver, "", clipWidth, clipHeight, bandCount, GDT_Byte, NULL);
+    if (outputDS == NULL) {
+        free(maskData);
+        GDALClose(maskDS);
+        fprintf(stderr, "Failed to create output dataset\n");
+        return NULL;
+    }
+
+    // 设置输出数据集的地理变换
+    GDALSetGeoTransform(outputDS, maskGeoTransform);
+
+    // 对每个波段应用掩膜
+    for (int b = 1; b <= bandCount; b++) {
+        GDALRasterBandH srcBand = GDALGetRasterBand(srcDS, b);
+        GDALRasterBandH dstBand = GDALGetRasterBand(outputDS, b);
+
+        if (srcBand == NULL || dstBand == NULL) {
+            fprintf(stderr, "Failed to get band %d\n", b);
+            continue;
+        }
+
+        // 读取源数据
+        unsigned char *srcData = (unsigned char*)malloc(clipWidth * clipHeight * sizeof(unsigned char));
+        if (srcData == NULL) {
+            fprintf(stderr, "Failed to allocate source data buffer for band %d\n", b);
+            continue;
+        }
+
+        err = GDALRasterIO(srcBand, GF_Read, minX, minY, clipWidth, clipHeight,
+                           srcData, clipWidth, clipHeight, GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            free(srcData);
+            fprintf(stderr, "Failed to read source data for band %d\n", b);
+            continue;
+        }
+
+        // 应用掩膜(掩膜为0的地方设为0,掩膜>0的地方保留原值)
+        for (int i = 0; i < clipWidth * clipHeight; i++) {
+            if (maskData[i] == 0) {
+                srcData[i] = 0;
+            }
+        }
+
+        // 写入输出数据
+        err = GDALRasterIO(dstBand, GF_Write, 0, 0, clipWidth, clipHeight,
+                           srcData, clipWidth, clipHeight, GDT_Byte, 0, 0);
+        free(srcData);
+
+        if (err != CE_None) {
+            fprintf(stderr, "Failed to write output data for band %d\n", b);
+        }
+    }
+
+    free(maskData);
+    GDALClose(maskDS);
+
+
+    return outputDS;
+}
