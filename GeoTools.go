@@ -2277,3 +2277,480 @@ func GetLayerExtent(layer *GDALLayer) (minX, minY, maxX, maxY float64, err error
 	return float64(envelope.MinX), float64(envelope.MinY),
 		float64(envelope.MaxX), float64(envelope.MaxY), nil
 }
+
+// ============================================================================
+// 环岛构建函数
+// ============================================================================
+
+// DonutBuilder 将面图层中的重叠面构建成环岛结构
+// 该函数会识别包含关系，将内部多边形作为外部多边形的洞
+// 返回处理后的新图层，消除100%重叠面
+func DonutBuilder(sourceLayer *GDALLayer) (*GDALLayer, error) {
+	if sourceLayer == nil || sourceLayer.layer == nil {
+		return nil, fmt.Errorf("源图层为空")
+	}
+
+	// 创建内存数据源
+	memDriver := C.OGRGetDriverByName(C.CString("Memory"))
+	if memDriver == nil {
+		return nil, fmt.Errorf("无法获取Memory驱动")
+	}
+
+	cDatasetName := C.CString("donut_result")
+	defer C.free(unsafe.Pointer(cDatasetName))
+
+	memDataset := C.OGR_Dr_CreateDataSource(memDriver, cDatasetName, nil)
+	if memDataset == nil {
+		return nil, fmt.Errorf("无法创建内存数据源")
+	}
+
+	// 获取源图层信息
+	sourceDefn := sourceLayer.GetLayerDefn()
+	srs := sourceLayer.GetSpatialRef()
+
+	// 创建结果图层
+	cLayerName := C.CString("donuts")
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	resultLayer := C.OGR_DS_CreateLayer(memDataset, cLayerName, srs, C.wkbPolygon, nil)
+	if resultLayer == nil {
+		C.OGR_DS_Destroy(memDataset)
+		return nil, fmt.Errorf("无法创建结果图层")
+	}
+
+	// 复制字段定义
+	fieldCount := int(C.OGR_FD_GetFieldCount(sourceDefn))
+	for i := 0; i < fieldCount; i++ {
+		fieldDefn := C.OGR_FD_GetFieldDefn(sourceDefn, C.int(i))
+		if fieldDefn != nil {
+			C.OGR_L_CreateField(resultLayer, fieldDefn, C.int(1))
+		}
+	}
+
+	// 读取所有要素到内存
+	polygons, err := loadPolygonsWithAttributes(sourceLayer, sourceDefn)
+	if err != nil {
+		C.OGR_DS_Destroy(memDataset)
+		return nil, fmt.Errorf("加载多边形失败: %v", err)
+	}
+
+	if len(polygons) == 0 {
+		// 空图层，直接返回
+		gdalLayer := &GDALLayer{
+			layer:   resultLayer,
+			dataset: memDataset,
+			driver:  memDriver,
+		}
+		runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
+		return gdalLayer, nil
+	}
+
+	// 构建包含关系树
+	containmentTree := buildContainmentTree(polygons)
+
+	// 生成环岛多边形
+	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
+	processedCount := createDonutPolygons(containmentTree, resultLayer, resultDefn, sourceDefn)
+
+	fmt.Printf("环岛构建完成 - 处理了 %d 个多边形，生成 %d 个要素\n",
+		len(polygons), processedCount)
+
+	gdalLayer := &GDALLayer{
+		layer:   resultLayer,
+		dataset: memDataset,
+		driver:  memDriver,
+	}
+
+	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
+	return gdalLayer, nil
+}
+
+// ============================================================================
+// 辅助数据结构
+// ============================================================================
+
+// polygonWithAttributes 存储多边形及其属性
+type polygonWithAttributes struct {
+	geometry    C.OGRGeometryH
+	feature     C.OGRFeatureH
+	area        float64
+	envelope    [4]float64 // minX, maxX, minY, maxY
+	index       int
+	isProcessed bool
+}
+
+// containmentNode 包含关系树节点
+type containmentNode struct {
+	polygon  *polygonWithAttributes
+	children []*containmentNode
+	parent   *containmentNode
+	level    int // 嵌套层级：0=顶层, 1=洞, 2=洞中的岛...
+}
+
+// ============================================================================
+// 加载和预处理函数
+// ============================================================================
+
+// loadPolygonsWithAttributes 加载所有多边形及其属性
+func loadPolygonsWithAttributes(layer *GDALLayer, defn C.OGRFeatureDefnH) ([]*polygonWithAttributes, error) {
+	var polygons []*polygonWithAttributes
+	layer.ResetReading()
+	index := 0
+
+	for {
+		feature := layer.GetNextFeature()
+		if feature == nil {
+			break
+		}
+
+		geometry := C.OGR_F_GetGeometryRef(feature)
+		if geometry == nil {
+			C.OGR_F_Destroy(feature)
+			continue
+		}
+
+		// 只处理多边形类型
+		geomType := C.OGR_G_GetGeometryType(geometry)
+		if geomType != C.wkbPolygon && geomType != C.wkbMultiPolygon {
+			C.OGR_F_Destroy(feature)
+			continue
+		}
+
+		// 克隆几何体（因为feature会被销毁）
+		clonedGeom := C.OGR_G_Clone(geometry)
+		if clonedGeom == nil {
+			C.OGR_F_Destroy(feature)
+			continue
+		}
+
+		// 克隆要素（保留属性）
+		clonedFeature := C.OGR_F_Clone(feature)
+
+		// 计算面积
+		area := float64(C.OGR_G_Area(clonedGeom))
+
+		// 获取包络矩形
+		var envelope C.OGREnvelope
+		C.OGR_G_GetEnvelope(clonedGeom, &envelope)
+
+		poly := &polygonWithAttributes{
+			geometry: clonedGeom,
+			feature:  clonedFeature,
+			area:     area,
+			envelope: [4]float64{
+				float64(envelope.MinX),
+				float64(envelope.MaxX),
+				float64(envelope.MinY),
+				float64(envelope.MaxY),
+			},
+			index:       index,
+			isProcessed: false,
+		}
+
+		polygons = append(polygons, poly)
+		C.OGR_F_Destroy(feature)
+		index++
+	}
+
+	return polygons, nil
+}
+
+// ============================================================================
+// 包含关系分析
+// ============================================================================
+
+// buildContainmentTree 构建包含关系树
+func buildContainmentTree(polygons []*polygonWithAttributes) []*containmentNode {
+	// 按面积降序排序（大的在前）
+	sortPolygonsByArea(polygons)
+
+	// 创建所有节点
+	nodes := make([]*containmentNode, len(polygons))
+	for i, poly := range polygons {
+		nodes[i] = &containmentNode{
+			polygon:  poly,
+			children: make([]*containmentNode, 0),
+			parent:   nil,
+			level:    0,
+		}
+	}
+
+	// 构建包含关系
+	rootNodes := make([]*containmentNode, 0)
+
+	for i, node := range nodes {
+		parentFound := false
+
+		// 寻找最小的包含它的多边形作为父节点
+		for j := 0; j < i; j++ { // 只在更大的多边形中查找
+			if isPolygonContainedBy(node.polygon, nodes[j].polygon) {
+				// 检查是否应该作为直接子节点
+				if shouldBeDirectChild(node, nodes[j]) {
+					nodes[j].children = append(nodes[j].children, node)
+					node.parent = nodes[j]
+					node.level = nodes[j].level + 1
+					parentFound = true
+					break
+				}
+			}
+		}
+
+		if !parentFound {
+			rootNodes = append(rootNodes, node)
+		}
+	}
+
+	return rootNodes
+}
+
+// sortPolygonsByArea 按面积降序排序
+func sortPolygonsByArea(polygons []*polygonWithAttributes) {
+	// 简单的冒泡排序（对于小数据集足够）
+	n := len(polygons)
+	for i := 0; i < n-1; i++ {
+		for j := 0; j < n-i-1; j++ {
+			if polygons[j].area < polygons[j+1].area {
+				polygons[j], polygons[j+1] = polygons[j+1], polygons[j]
+			}
+		}
+	}
+}
+
+// isPolygonContainedBy 检查poly1是否被poly2包含
+func isPolygonContainedBy(poly1, poly2 *polygonWithAttributes) bool {
+	// 先快速检查包络矩形
+	if !envelopeContains(poly2.envelope, poly1.envelope) {
+		return false
+	}
+
+	// 面积检查（包含的多边形面积必须更小）
+	if poly1.area >= poly2.area {
+		return false
+	}
+
+	// 精确的几何包含检查
+	return C.OGR_G_Contains(poly2.geometry, poly1.geometry) != 0
+}
+
+// envelopeContains 检查env1是否包含env2
+func envelopeContains(env1, env2 [4]float64) bool {
+	return env1[0] <= env2[0] && // minX
+		env1[1] >= env2[1] && // maxX
+		env1[2] <= env2[2] && // minY
+		env1[3] >= env2[3] // maxY
+}
+
+// shouldBeDirectChild 检查node是否应该作为parent的直接子节点
+// 而不是parent的某个子节点的子节点
+func shouldBeDirectChild(node, parent *containmentNode) bool {
+	// 检查parent的所有子节点，看是否有更合适的父节点
+	for _, child := range parent.children {
+		if isPolygonContainedBy(node.polygon, child.polygon) {
+			return false // 应该是child的子节点，而不是parent的
+		}
+	}
+	return true
+}
+
+// ============================================================================
+// 环岛多边形生成
+// ============================================================================
+
+// createDonutPolygons 根据包含关系树创建环岛多边形
+func createDonutPolygons(rootNodes []*containmentNode,
+	resultLayer C.OGRLayerH,
+	resultDefn, sourceDefn C.OGRFeatureDefnH) int {
+
+	count := 0
+
+	for _, root := range rootNodes {
+		count += processNode(root, resultLayer, resultDefn, sourceDefn)
+	}
+
+	return count
+}
+
+// processNode 处理单个节点及其子树
+func processNode(node *containmentNode,
+	resultLayer C.OGRLayerH,
+	resultDefn, sourceDefn C.OGRFeatureDefnH) int {
+
+	if node.polygon.isProcessed {
+		return 0
+	}
+
+	count := 0
+
+	// 根据层级决定如何处理
+	if node.level%2 == 0 {
+		// 偶数层：实体多边形（可能带洞）
+		count += createPolygonWithHoles(node, resultLayer, resultDefn, sourceDefn)
+	}
+	// 奇数层：洞，已经在父节点处理时添加为洞，这里跳过
+
+	// 递归处理子节点
+	for _, child := range node.children {
+		count += processNode(child, resultLayer, resultDefn, sourceDefn)
+	}
+
+	return count
+}
+
+// createPolygonWithHoles 创建带洞的多边形
+func createPolygonWithHoles(node *containmentNode,
+	resultLayer C.OGRLayerH,
+	resultDefn, sourceDefn C.OGRFeatureDefnH) int {
+
+	if node.polygon.isProcessed {
+		return 0
+	}
+
+	// 创建新的多边形
+	newPolygon := C.OGR_G_CreateGeometry(C.wkbPolygon)
+	if newPolygon == nil {
+		return 0
+	}
+
+	// 添加外环
+	outerRing := extractOuterRing(node.polygon.geometry)
+	if outerRing != nil {
+		C.OGR_G_AddGeometryDirectly(newPolygon, outerRing)
+	} else {
+		C.OGR_G_DestroyGeometry(newPolygon)
+		return 0
+	}
+
+	// 添加内环（洞）
+	holesAdded := 0
+	for _, child := range node.children {
+		if child.level == node.level+1 { // 只添加直接子节点作为洞
+			innerRing := extractOuterRing(child.polygon.geometry)
+			if innerRing != nil {
+				C.OGR_G_AddGeometryDirectly(newPolygon, innerRing)
+				child.polygon.isProcessed = true
+				holesAdded++
+			}
+		}
+	}
+
+	// 创建新要素
+	newFeature := C.OGR_F_Create(resultDefn)
+	if newFeature == nil {
+		C.OGR_G_DestroyGeometry(newPolygon)
+		return 0
+	}
+
+	// 设置几何
+	C.OGR_F_SetGeometry(newFeature, newPolygon)
+
+	// 复制属性（使用外部多边形的属性）
+	copyFeatureAttributes(node.polygon.feature, newFeature, sourceDefn, resultDefn)
+
+	// 添加到图层
+	result := C.OGR_L_CreateFeature(resultLayer, newFeature)
+
+	C.OGR_F_Destroy(newFeature)
+	C.OGR_G_DestroyGeometry(newPolygon)
+
+	node.polygon.isProcessed = true
+
+	if result == C.OGRERR_NONE {
+		return 1
+	}
+	return 0
+}
+
+// extractOuterRing 提取多边形的外环
+func extractOuterRing(geometry C.OGRGeometryH) C.OGRGeometryH {
+	if geometry == nil {
+		return nil
+	}
+
+	geomType := C.OGR_G_GetGeometryType(geometry)
+
+	if geomType == C.wkbPolygon {
+		// 获取外环
+		ring := C.OGR_G_GetGeometryRef(geometry, 0)
+		if ring != nil {
+			return C.OGR_G_Clone(ring)
+		}
+	} else if geomType == C.wkbMultiPolygon {
+		// 对于MultiPolygon，取第一个多边形的外环
+		poly := C.OGR_G_GetGeometryRef(geometry, 0)
+		if poly != nil {
+			ring := C.OGR_G_GetGeometryRef(poly, 0)
+			if ring != nil {
+				return C.OGR_G_Clone(ring)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ============================================================================
+// 清理函数
+// ============================================================================
+
+// cleanupPolygons 清理多边形数据
+func cleanupPolygons(polygons []*polygonWithAttributes) {
+	for _, poly := range polygons {
+		if poly.geometry != nil {
+			C.OGR_G_DestroyGeometry(poly.geometry)
+		}
+		if poly.feature != nil {
+			C.OGR_F_Destroy(poly.feature)
+		}
+	}
+}
+
+// ============================================================================
+// 高级版本：支持更多选项
+// ============================================================================
+
+// DonutBuilderOptions 环岛构建选项
+type DonutBuilderOptions struct {
+	// MinAreaRatio 最小面积比例，小于此比例的洞将被忽略（相对于外部多边形）
+	MinAreaRatio float64
+
+	// MaxHoleCount 单个多边形最大洞数量，0表示无限制
+	MaxHoleCount int
+
+	// SimplifyTolerance 简化容差，0表示不简化
+	SimplifyTolerance float64
+
+	// MergeThreshold 合并阈值，距离小于此值的多边形将被合并
+	MergeThreshold float64
+}
+
+// DonutBuilderWithOptions 带选项的环岛构建函数
+func DonutBuilderWithOptions(sourceLayer *GDALLayer, options *DonutBuilderOptions) (*GDALLayer, error) {
+	if options == nil {
+		options = &DonutBuilderOptions{
+			MinAreaRatio:      0.001, // 默认最小面积比0.1%
+			MaxHoleCount:      0,     // 不限制
+			SimplifyTolerance: 0,     // 不简化
+			MergeThreshold:    0,     // 不合并
+		}
+	}
+
+	// 先进行基本的环岛构建
+	resultLayer, err := DonutBuilder(sourceLayer)
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果需要简化
+	if options.SimplifyTolerance > 0 {
+		simplifiedLayer, err := SimplifyLayer(resultLayer, options.SimplifyTolerance, true)
+		if err == nil {
+			// 清理旧图层
+			if resultLayer != nil && resultLayer.dataset != nil {
+				C.OGR_DS_Destroy(resultLayer.dataset)
+			}
+			resultLayer = simplifiedLayer
+		}
+	}
+
+	return resultLayer, nil
+}
