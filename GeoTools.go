@@ -2,7 +2,7 @@ package Gogeo
 
 /*
 #include "osgeo_utils.h"
-#include <stdlib.h>
+
 */
 import "C"
 
