@@ -995,7 +995,6 @@ func (w *FileGeoWriter) copyFieldDefinitions(sourceDefn C.OGRFeatureDefnH, targe
 		"shape":        true,
 		"shape_area":   true,
 		"shape_length": true,
-		"fid":          true,
 		"oid":          true,
 	}
 
@@ -1300,7 +1299,6 @@ func (w *FileGeoWriter) copyFieldsSafely(sourceFeature, newFeature C.OGRFeatureH
 		"shape":        true,
 		"shape_area":   true,
 		"shape_length": true,
-		"fid":          true,
 		"oid":          true,
 	}
 
