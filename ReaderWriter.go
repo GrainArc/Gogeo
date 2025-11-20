@@ -992,7 +992,6 @@ func (w *FileGeoWriter) copyFieldDefinitions(sourceDefn C.OGRFeatureDefnH, targe
 
 	// GDB保留字段名列表
 	reservedFields := map[string]bool{
-		"objectid":     true,
 		"shape":        true,
 		"shape_area":   true,
 		"shape_length": true,
@@ -1298,7 +1297,6 @@ func (w *FileGeoWriter) copyFieldsSafely(sourceFeature, newFeature C.OGRFeatureH
 
 	// GDB保留字段名列表（需要跳过的字段）
 	reservedFields := map[string]bool{
-		"objectid":     true,
 		"shape":        true,
 		"shape_area":   true,
 		"shape_length": true,
