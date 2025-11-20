@@ -513,3 +513,160 @@ func PackShapefile(shpPath string) error {
 	fmt.Printf("Shapefile压缩完成: %s\n", shpPath)
 	return nil
 }
+
+// EnsureObjectIDField 确保shp文件包含objectid字段（不区分大小写）
+// 如果不存在，则创建该字段并填充唯一值
+// shpPath: Shapefile文件路径
+// 返回: 是否创建了新字段, error
+func EnsureObjectIDField(shpPath string) (bool, error) {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cFilePath := C.CString(shpPath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 以可写模式打开Shapefile
+	dataset := C.OGROpen(cFilePath, C.int(1), nil) // 1表示可写
+	if dataset == nil {
+		return false, fmt.Errorf("无法以可写模式打开Shapefile: %s", shpPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 获取第一个图层（Shapefile通常只有一个图层）
+	layer := C.OGR_DS_GetLayer(dataset, 0)
+	if layer == nil {
+		return false, fmt.Errorf("无法获取Shapefile图层")
+	}
+
+	// 获取图层定义
+	layerDefn := C.OGR_L_GetLayerDefn(layer)
+	if layerDefn == nil {
+		return false, fmt.Errorf("无法获取图层定义")
+	}
+
+	// 检查是否已存在objectid字段（不区分大小写）
+	fieldCount := int(C.OGR_FD_GetFieldCount(layerDefn))
+	objectIDFieldIndex := -1
+
+	for i := 0; i < fieldCount; i++ {
+		fieldDefn := C.OGR_FD_GetFieldDefn(layerDefn, C.int(i))
+		if fieldDefn == nil {
+			continue
+		}
+
+		fieldName := C.GoString(C.OGR_Fld_GetNameRef(fieldDefn))
+		// 不区分大小写比较
+		if len(fieldName) == 8 &&
+			(fieldName == "objectid" || fieldName == "OBJECTID" ||
+				fieldName == "ObjectID" || fieldName == "ObjectId" ||
+				fieldName == "objectId" || fieldName == "Objectid") {
+			objectIDFieldIndex = i
+			fmt.Printf("找到已存在的ObjectID字段: %s (索引: %d)\n", fieldName, i)
+			break
+		}
+	}
+
+	// 如果字段已存在，不需要创建
+	if objectIDFieldIndex >= 0 {
+		fmt.Println("ObjectID字段已存在，无需创建")
+		return false, nil
+	}
+
+	// 检查图层是否支持字段创建
+	if C.OGR_L_TestCapability(layer, C.CString("CreateField")) == 0 {
+		return false, fmt.Errorf("图层不支持创建字段操作")
+	}
+
+	// 创建新的objectid字段定义
+	cFieldName := C.CString("objectid")
+	defer C.free(unsafe.Pointer(cFieldName))
+
+	fieldDefn := C.OGR_Fld_Create(cFieldName, C.OFTInteger)
+	if fieldDefn == nil {
+		return false, fmt.Errorf("无法创建字段定义")
+	}
+	defer C.OGR_Fld_Destroy(fieldDefn)
+
+	// 设置字段宽度（可选）
+	C.OGR_Fld_SetWidth(fieldDefn, 10)
+
+	// 添加字段到图层
+	result := C.OGR_L_CreateField(layer, fieldDefn, C.int(1)) // 1表示强制创建
+	if result != C.OGRERR_NONE {
+		return false, fmt.Errorf("创建objectid字段失败，错误代码: %d", int(result))
+	}
+
+	fmt.Println("成功创建objectid字段")
+
+	// 开始事务（如果支持）
+	useTransaction := C.OGR_L_TestCapability(layer, C.CString("Transactions")) != 0
+	if useTransaction {
+		transResult := C.OGR_L_StartTransaction(layer)
+		if transResult != C.OGRERR_NONE {
+			useTransaction = false
+			fmt.Println("警告: 无法开始事务，将直接更新")
+		}
+	}
+
+	// 重新获取图层定义（因为添加了新字段）
+	layerDefn = C.OGR_L_GetLayerDefn(layer)
+
+	// 获取新创建字段的索引
+	newFieldIndex := C.OGR_FD_GetFieldIndex(layerDefn, cFieldName)
+	if newFieldIndex < 0 {
+		return false, fmt.Errorf("无法找到新创建的objectid字段")
+	}
+
+	// 遍历所有要素，填充唯一的objectid值
+	C.OGR_L_ResetReading(layer)
+
+	objectIDValue := 1
+	updatedCount := 0
+	failedCount := 0
+
+	for {
+		feature := C.OGR_L_GetNextFeature(layer)
+		if feature == nil {
+			break
+		}
+
+		// 设置objectid字段值
+		C.OGR_F_SetFieldInteger(feature, newFieldIndex, C.int(objectIDValue))
+
+		// 更新要素
+		updateResult := C.OGR_L_SetFeature(layer, feature)
+		if updateResult == C.OGRERR_NONE {
+			updatedCount++
+			objectIDValue++
+		} else {
+			failedCount++
+			fmt.Printf("警告: 更新要素失败，FID=%d, 错误代码: %d\n",
+				int64(C.OGR_F_GetFID(feature)), int(updateResult))
+		}
+
+		C.OGR_F_Destroy(feature)
+	}
+
+	// 提交事务
+	if useTransaction {
+		commitResult := C.OGR_L_CommitTransaction(layer)
+		if commitResult != C.OGRERR_NONE {
+			C.OGR_L_RollbackTransaction(layer)
+			return false, fmt.Errorf("提交事务失败")
+		}
+	}
+
+	// 同步到磁盘
+	syncResult := C.OGR_L_SyncToDisk(layer)
+	if syncResult != C.OGRERR_NONE {
+		return false, fmt.Errorf("同步到磁盘失败，错误代码: %d", int(syncResult))
+	}
+
+	fmt.Printf("ObjectID字段填充完成: 成功 %d 个，失败 %d 个\n", updatedCount, failedCount)
+
+	if failedCount > 0 {
+		return true, fmt.Errorf("部分要素更新失败: %d/%d", failedCount, updatedCount+failedCount)
+	}
+
+	return true, nil
+}
