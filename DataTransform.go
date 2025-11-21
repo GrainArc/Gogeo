@@ -547,7 +547,14 @@ func processLayerDirect(hLayer C.OGRLayerH, hTargetSRS C.OGRSpatialReferenceH) (
 
 func getFieldInfos(hLayerDefn C.OGRFeatureDefnH) []FieldInfo {
 	fieldCount := int(C.OGR_FD_GetFieldCount(hLayerDefn))
-	fieldInfos := make([]FieldInfo, 0, fieldCount)
+	fieldInfos := make([]FieldInfo, 0, fieldCount+1) // +1 for FID
+
+	// 先添加 FID 字段定义
+	fieldInfos = append(fieldInfos, FieldInfo{
+		Name:   "fid",
+		Type:   "Integer64",
+		DBType: "BIGINT",
+	})
 
 	for i := 0; i < fieldCount; i++ {
 		hFieldDefn := C.OGR_FD_GetFieldDefn(hLayerDefn, C.int(i))
@@ -561,7 +568,7 @@ func getFieldInfos(hLayerDefn C.OGRFeatureDefnH) []FieldInfo {
 		fieldInfo := FieldInfo{
 			Name:   fieldName,
 			Type:   getFieldTypeName(fieldType),
-			DBType: mapFieldTypeToPostGIS(hFieldDefn), // 传入字段定义而不是类型
+			DBType: mapFieldTypeToPostGIS(hFieldDefn),
 		}
 
 		fieldInfos = append(fieldInfos, fieldInfo)
@@ -600,16 +607,24 @@ func processFeatureDirect(hFeature C.OGRFeatureH, hLayerDefn C.OGRFeatureDefnH,
 		feature.WKBHex = wkbHex
 	}
 
-	// 处理属性数据
-	for i, fieldInfo := range fieldInfos {
-		if C.OGR_F_IsFieldSet(hFeature, C.int(i)) == 0 {
+	// **关键修改**: 先添加 FID
+	fid := int64(C.OGR_F_GetFID(hFeature))
+	feature.Properties["fid"] = fid
+
+	// **关键修改**: 处理属性数据时跳过 fieldInfos[0] (FID字段定义)
+	// 从 fieldInfos[1] 开始才是真正的属性字段
+	for i := 1; i < len(fieldInfos); i++ {
+		fieldInfo := fieldInfos[i]
+		fieldIndex := i - 1 // 实际的字段索引要减1
+
+		if C.OGR_F_IsFieldSet(hFeature, C.int(fieldIndex)) == 0 {
 			feature.Properties[fieldInfo.Name] = nil
 			continue
 		}
 
-		hFieldDefn := C.OGR_FD_GetFieldDefn(hLayerDefn, C.int(i))
+		hFieldDefn := C.OGR_FD_GetFieldDefn(hLayerDefn, C.int(fieldIndex))
 		fieldType := C.OGR_Fld_GetType(hFieldDefn)
-		value := getFieldValue(hFeature, C.int(i), fieldType)
+		value := getFieldValue(hFeature, C.int(fieldIndex), fieldType)
 		feature.Properties[fieldInfo.Name] = value
 	}
 
