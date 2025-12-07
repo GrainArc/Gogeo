@@ -2962,3 +2962,179 @@ func DonutBuilderWithOptions(sourceLayer *GDALLayer, options *DonutBuilderOption
 
 	return resultLayer, nil
 }
+
+// RemoveLinePolygonBoundaryOverlapAndReturnLongest 移除线要素与面要素边界的重叠部分，返回最长的线段
+// lineFeature: 输入的线要素
+// polygonFeature: 输入的面要素
+// 返回：处理后最长的线几何体
+func RemoveLinePolygonBoundaryOverlapAndReturnLongest(lineFeature C.OGRFeatureH, polygonFeature C.OGRFeatureH, tolerance float64) C.OGRGeometryH {
+	if lineFeature == nil || polygonFeature == nil {
+		return nil
+	}
+
+	lineGeom := C.OGR_F_GetGeometryRef(lineFeature)
+	polygonGeom := C.OGR_F_GetGeometryRef(polygonFeature)
+
+	if lineGeom == nil || polygonGeom == nil {
+		return nil
+	}
+
+	return RemoveLinePolygonBoundaryOverlapGeometryAndReturnLongest(lineGeom, polygonGeom, tolerance)
+}
+
+// RemoveLinePolygonBoundaryOverlapGeometryAndReturnLongest 移除线几何体与面几何体边界的重叠部分，返回最长的线段
+// lineGeom: 输入的线几何体
+// polygonGeom: 输入的面几何体
+// 返回：处理后最长的线几何体
+func RemoveLinePolygonBoundaryOverlapGeometryAndReturnLongest(lineGeom C.OGRGeometryH, polygonGeom C.OGRGeometryH, tolerance float64) C.OGRGeometryH {
+	if lineGeom == nil || polygonGeom == nil {
+		return nil
+	}
+	flags := 0
+
+	// 追踪哪些几何体需要清理
+	var processedLineGeom, processedPolygonGeom C.OGRGeometryH
+	lineNeedsCleanup := false
+	polygonNeedsCleanup := false
+
+	// 处理精度设置
+	if tolerance > 0 {
+		processedLineGeom = C.setPrecisionIfNeeded(lineGeom, C.double(tolerance), C.int(flags))
+		if processedLineGeom != lineGeom {
+			lineNeedsCleanup = true
+		}
+
+		processedPolygonGeom = C.setPrecisionIfNeeded(polygonGeom, C.double(tolerance), C.int(flags))
+		if processedPolygonGeom != polygonGeom {
+			polygonNeedsCleanup = true
+		}
+	} else {
+		processedLineGeom = lineGeom
+		processedPolygonGeom = polygonGeom
+	}
+
+	// 获取面的边界
+	polygonBoundary := C.OGR_G_GetBoundary(processedPolygonGeom)
+	if polygonBoundary == nil {
+		// 清理已分配的精度设置几何体
+		if lineNeedsCleanup {
+			C.OGR_G_DestroyGeometry(processedLineGeom)
+		}
+		if polygonNeedsCleanup {
+			C.OGR_G_DestroyGeometry(processedPolygonGeom)
+		}
+		return nil
+	}
+	defer func() {
+		C.OGR_G_DestroyGeometry(polygonBoundary)
+		if lineNeedsCleanup {
+			C.OGR_G_DestroyGeometry(processedLineGeom)
+		}
+		if polygonNeedsCleanup {
+			C.OGR_G_DestroyGeometry(processedPolygonGeom)
+		}
+	}()
+
+	// 对边界进行精度设置（如果需要）
+
+	if tolerance > 0 {
+		precisePolygonBoundary := C.setPrecisionIfNeeded(polygonBoundary, C.double(tolerance), C.int(flags))
+		if precisePolygonBoundary != polygonBoundary {
+			C.OGR_G_DestroyGeometry(polygonBoundary)
+			polygonBoundary = precisePolygonBoundary
+
+		}
+	}
+
+	// 获取线与面边界的差集（去掉重叠部分）
+	differenceGeom := C.OGR_G_Difference(processedLineGeom, polygonBoundary)
+	if differenceGeom == nil {
+		return nil // defer 会处理清理
+	}
+	defer C.OGR_G_DestroyGeometry(differenceGeom)
+
+	// 从差集结果中提取最长的线段
+	longestGeom := extractLongestLineFromGeometry(differenceGeom)
+	if longestGeom == nil {
+		return nil
+	}
+
+	// 对结果进行精度设置（确保一致性）
+	if tolerance > 0 {
+		preciseResult := C.setPrecisionIfNeeded(longestGeom, C.double(tolerance), C.int(flags))
+		if preciseResult != longestGeom {
+			C.OGR_G_DestroyGeometry(longestGeom)
+			longestGeom = preciseResult
+		}
+	}
+
+	return longestGeom
+}
+
+// extractLongestLineFromGeometry 从几何体中提取最长的线段
+// 处理MultiLineString、LineString等多种几何类型
+func extractLongestLineFromGeometry(geometry C.OGRGeometryH) C.OGRGeometryH {
+	if geometry == nil {
+		return nil
+	}
+
+	geomType := C.OGR_G_GetGeometryType(geometry)
+	var longestGeom C.OGRGeometryH
+	var maxLength float64
+
+	switch geomType {
+	case C.wkbLineString, C.wkbLineString25D:
+		// 单条线，直接克隆返回
+		return C.OGR_G_Clone(geometry)
+
+	case C.wkbMultiLineString, C.wkbMultiLineString25D:
+		// 多条线，遍历找出最长的
+		geomCount := int(C.OGR_G_GetGeometryCount(geometry))
+		maxLength = -1.0
+
+		for i := 0; i < geomCount; i++ {
+			subGeom := C.OGR_G_GetGeometryRef(geometry, C.int(i))
+			if subGeom != nil {
+				length := float64(C.OGR_G_Length(subGeom))
+				if length > maxLength {
+					maxLength = length
+					if longestGeom != nil {
+						C.OGR_G_DestroyGeometry(longestGeom)
+					}
+					longestGeom = C.OGR_G_Clone(subGeom)
+				}
+			}
+		}
+		return longestGeom
+
+	case C.wkbGeometryCollection:
+		// 几何集合，递归处理
+		geomCount := int(C.OGR_G_GetGeometryCount(geometry))
+		maxLength = -1.0
+
+		for i := 0; i < geomCount; i++ {
+			subGeom := C.OGR_G_GetGeometryRef(geometry, C.int(i))
+			if subGeom != nil {
+				subGeomType := C.OGR_G_GetGeometryType(subGeom)
+				// 只处理线类型
+				if subGeomType == C.wkbLineString || subGeomType == C.wkbLineString25D ||
+					subGeomType == C.wkbMultiLineString || subGeomType == C.wkbMultiLineString25D {
+
+					length := float64(C.OGR_G_Length(subGeom))
+					if length > maxLength {
+						maxLength = length
+						if longestGeom != nil {
+							C.OGR_G_DestroyGeometry(longestGeom)
+						}
+						longestGeom = C.OGR_G_Clone(subGeom)
+					}
+				}
+			}
+		}
+		return longestGeom
+
+	default:
+		// 其他类型，尝试克隆
+		return C.OGR_G_Clone(geometry)
+	}
+}
