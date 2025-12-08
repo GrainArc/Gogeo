@@ -142,6 +142,75 @@ func LayerToGeoJSONWithTransform(hLayer C.OGRLayerH, hTargetSRS C.OGRSpatialRefe
 
 	return fc, nil
 }
+func LayerToGeoJSON(gdal *GDALLayer) (*geojson.FeatureCollection, error) {
+	if gdal == nil {
+		return nil, fmt.Errorf("GDALLayer 为空")
+	}
+
+	if gdal.layer == nil {
+		return nil, fmt.Errorf("图层句柄为空")
+	}
+
+	// 创建目标坐标系 EPSG:4490
+	hTargetSRS := C.OSRNewSpatialReference(nil)
+	defer C.OSRDestroySpatialReference(hTargetSRS)
+
+	if C.OSRImportFromEPSG(hTargetSRS, 4490) != C.OGRERR_NONE {
+		return nil, fmt.Errorf("无法创建EPSG:4490坐标系")
+	}
+
+	// 重置读取位置
+	C.OGR_L_ResetReading(gdal.layer)
+
+	// 获取图层定义
+	hLayerDefn := C.OGR_L_GetLayerDefn(gdal.layer)
+	if hLayerDefn == nil {
+		return nil, fmt.Errorf("无法获取图层定义")
+	}
+
+	// 获取源坐标系和创建转换
+	hSourceSRS := C.OGR_L_GetSpatialRef(gdal.layer)
+	var hTransform C.OGRCoordinateTransformationH
+
+	if hSourceSRS != nil {
+		if C.OSRIsSame(hSourceSRS, hTargetSRS) == 0 {
+			hTransform = C.OCTNewCoordinateTransformation(hSourceSRS, hTargetSRS)
+			if hTransform != nil {
+				defer C.OCTDestroyCoordinateTransformation(hTransform)
+				fmt.Printf("创建坐标转换: 从源坐标系到EPSG:4490\n")
+			} else {
+				log.Printf("警告: 无法创建坐标转换，将使用原始坐标\n")
+			}
+		} else {
+			fmt.Printf("图层已经是EPSG:4490坐标系，无需转换\n")
+		}
+	} else {
+		log.Printf("警告: 图层没有坐标系信息，假设为EPSG:4490\n")
+	}
+
+	// 创建FeatureCollection
+	fc := geojson.NewFeatureCollection()
+
+	// 遍历所有要素
+	for {
+		hFeature := C.OGR_L_GetNextFeature(gdal.layer)
+		if hFeature == nil {
+			break
+		}
+
+		feature, err := featureToGeoJSONWithTransform(hFeature, hLayerDefn, hTransform)
+		if err != nil {
+			log.Printf("转换要素失败: %v", err)
+			C.OGR_F_Destroy(hFeature)
+			continue
+		}
+
+		fc.Append(feature)
+		C.OGR_F_Destroy(hFeature)
+	}
+
+	return fc, nil
+}
 
 // featureToGeoJSONWithTransform 将单个要素转换为GeoJSON Feature（包含坐标转换）
 func featureToGeoJSONWithTransform(hFeature C.OGRFeatureH, hLayerDefn C.OGRFeatureDefnH, hTransform C.OGRCoordinateTransformationH) (*geojson.Feature, error) {
