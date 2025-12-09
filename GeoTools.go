@@ -8,6 +8,7 @@ import "C"
 
 import (
 	"fmt"
+	"github.com/paulmach/orb"
 	"math"
 	"runtime"
 	"unsafe"
@@ -3327,4 +3328,30 @@ func AreaOnAreaAnalysis(layer *GDALLayer, tolerance float64) (*GDALLayer, error)
 
 	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
 	return gdalLayer, nil
+}
+
+func BoundingBoxLayerGeometry(sourceLayer *GDALLayer) (orb.Geometry, error) {
+	if sourceLayer == nil || sourceLayer.layer == nil {
+		return nil, fmt.Errorf("源图层为空")
+	}
+
+	var env C.OGREnvelope
+	result := C.OGR_L_GetExtent(sourceLayer.layer, &env, C.int(1))
+
+	if result != C.OGRERR_NONE {
+		return nil, fmt.Errorf("无法获取图层范围")
+	}
+
+	// 创建边界框的四个角点，形成Polygon
+	ring := orb.Ring{
+		orb.Point{float64(env.MinX), float64(env.MinY)},
+		orb.Point{float64(env.MaxX), float64(env.MinY)},
+		orb.Point{float64(env.MaxX), float64(env.MaxY)},
+		orb.Point{float64(env.MinX), float64(env.MaxY)},
+		orb.Point{float64(env.MinX), float64(env.MinY)}, // 闭合
+	}
+
+	polygon := orb.Polygon{ring}
+
+	return polygon, nil
 }
