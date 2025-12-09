@@ -3138,3 +3138,193 @@ func extractLongestLineFromGeometry(geometry C.OGRGeometryH) C.OGRGeometryH {
 		return C.OGR_G_Clone(geometry)
 	}
 }
+func AreaOnAreaAnalysis(layer *GDALLayer, tolerance float64) (*GDALLayer, error) {
+	if layer == nil || layer.layer == nil {
+		return nil, fmt.Errorf("源图层为空")
+	}
+
+	memDriver := C.OGRGetDriverByName(C.CString("Memory"))
+	if memDriver == nil {
+		return nil, fmt.Errorf("无法获取Memory驱动")
+	}
+
+	cDatasetName := C.CString("area_analysis_result")
+	defer C.free(unsafe.Pointer(cDatasetName))
+
+	memDataset := C.OGR_Dr_CreateDataSource(memDriver, cDatasetName, nil)
+	if memDataset == nil {
+		return nil, fmt.Errorf("无法创建内存数据源")
+	}
+
+	srs := layer.GetSpatialRef()
+	sourceDefn := layer.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(sourceDefn)
+
+	cLayerName := C.CString("deduplicated")
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	resultLayer := C.OGR_DS_CreateLayer(memDataset, cLayerName, srs, geomType, nil)
+	if resultLayer == nil {
+		C.OGR_DS_Destroy(memDataset)
+		return nil, fmt.Errorf("无法创建结果图层")
+	}
+
+	// 复制字段定义
+	fieldCount := int(C.OGR_FD_GetFieldCount(sourceDefn))
+	for i := 0; i < fieldCount; i++ {
+		fieldDefn := C.OGR_FD_GetFieldDefn(sourceDefn, C.int(i))
+		if fieldDefn != nil {
+			C.OGR_L_CreateField(resultLayer, fieldDefn, C.int(1))
+		}
+	}
+
+	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
+
+	// 读取所有要素到内存
+	layer.ResetReading()
+	var features []C.OGRFeatureH
+	var geometries []C.OGRGeometryH
+	var processedGeometries []C.OGRGeometryH
+
+	flags := 0
+
+	for {
+		feature := layer.GetNextFeature()
+		if feature == nil {
+			break
+		}
+
+		geom := C.OGR_F_GetGeometryRef(feature)
+		if geom != nil {
+			clonedGeom := C.OGR_G_Clone(geom)
+			geometries = append(geometries, clonedGeom)
+
+			var processedGeom C.OGRGeometryH
+			if tolerance > 0 {
+				processedGeom = C.setPrecisionIfNeeded(clonedGeom, C.double(tolerance), C.int(flags))
+			} else {
+				processedGeom = clonedGeom
+			}
+			processedGeometries = append(processedGeometries, processedGeom)
+
+			features = append(features, feature)
+		} else {
+			C.OGR_F_Destroy(feature)
+		}
+	}
+
+	// 第一步：收集所有唯一的交集
+	type IntersectionInfo struct {
+		geom     C.OGRGeometryH
+		wkt      string
+		firstIdx int
+	}
+
+	intersectionMap := make(map[string]*IntersectionInfo)
+
+	for i := 0; i < len(processedGeometries); i++ {
+		for j := i + 1; j < len(processedGeometries); j++ {
+			if C.OGR_G_Intersects(processedGeometries[i], processedGeometries[j]) != 0 {
+				intersection := C.OGR_G_Intersection(processedGeometries[i], processedGeometries[j])
+				if intersection != nil && C.OGR_G_IsEmpty(intersection) == 0 {
+					// 获取WKT作为唯一标识
+					wktPtr := (*C.char)(nil)
+					C.OGR_G_ExportToWkt(intersection, &wktPtr)
+					wktStr := C.GoString(wktPtr)
+					C.CPLFree(unsafe.Pointer(wktPtr))
+
+					// 如果这个交集还没有被记录，就记录它
+					if _, exists := intersectionMap[wktStr]; !exists {
+						intersectionMap[wktStr] = &IntersectionInfo{
+							geom:     C.OGR_G_Clone(intersection),
+							wkt:      wktStr,
+							firstIdx: i,
+						}
+					}
+					C.OGR_G_DestroyGeometry(intersection)
+				}
+			}
+		}
+	}
+
+	// 第二步：计算每个要素的差异部分（减去所有交集）
+	for i := 0; i < len(processedGeometries); i++ {
+		resultGeom := C.OGR_G_Clone(processedGeometries[i])
+		if resultGeom == nil {
+			continue
+		}
+
+		// 从该要素中减去所有交集
+		for _, intersectionInfo := range intersectionMap {
+			if resultGeom != nil && C.OGR_G_Intersects(resultGeom, intersectionInfo.geom) != 0 {
+				diff := C.OGR_G_Difference(resultGeom, intersectionInfo.geom)
+				if diff != nil {
+					C.OGR_G_DestroyGeometry(resultGeom)
+					resultGeom = diff
+				}
+			}
+		}
+
+		// 对结果进行精度设置
+		if tolerance > 0 && resultGeom != nil {
+			preciseResult := C.setPrecisionIfNeeded(resultGeom, C.double(tolerance), C.int(flags))
+			if preciseResult != resultGeom {
+				C.OGR_G_DestroyGeometry(resultGeom)
+				resultGeom = preciseResult
+			}
+		}
+
+		// 写入差异部分（仅当不为空时）
+		if resultGeom != nil && C.OGR_G_IsEmpty(resultGeom) == 0 {
+			newFeature := C.OGR_F_Create(resultDefn)
+			if newFeature != nil {
+				C.OGR_F_SetGeometry(newFeature, resultGeom)
+				copyFeatureAttributes(features[i], newFeature, sourceDefn, resultDefn)
+				C.OGR_L_CreateFeature(resultLayer, newFeature)
+				C.OGR_F_Destroy(newFeature)
+			}
+		}
+
+		if resultGeom != nil {
+			C.OGR_G_DestroyGeometry(resultGeom)
+		}
+	}
+
+	// 第三步：写入所有唯一的交集
+	for _, intersectionInfo := range intersectionMap {
+		if intersectionInfo.geom != nil && C.OGR_G_IsEmpty(intersectionInfo.geom) == 0 {
+			newFeature := C.OGR_F_Create(resultDefn)
+			if newFeature != nil {
+				C.OGR_F_SetGeometry(newFeature, intersectionInfo.geom)
+				copyFeatureAttributes(features[intersectionInfo.firstIdx], newFeature, sourceDefn, resultDefn)
+				C.OGR_L_CreateFeature(resultLayer, newFeature)
+				C.OGR_F_Destroy(newFeature)
+			}
+		}
+	}
+
+	// 清理
+	for _, feature := range features {
+		C.OGR_F_Destroy(feature)
+	}
+	for i, geom := range geometries {
+		C.OGR_G_DestroyGeometry(geom)
+		if processedGeometries[i] != geom {
+			C.OGR_G_DestroyGeometry(processedGeometries[i])
+		}
+	}
+	for _, intersectionInfo := range intersectionMap {
+		if intersectionInfo.geom != nil {
+			C.OGR_G_DestroyGeometry(intersectionInfo.geom)
+		}
+	}
+
+	gdalLayer := &GDALLayer{
+		layer:   resultLayer,
+		dataset: memDataset,
+		driver:  memDriver,
+	}
+
+	runtime.SetFinalizer(gdalLayer, (*GDALLayer).cleanup)
+	return gdalLayer, nil
+}
