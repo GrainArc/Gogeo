@@ -124,6 +124,96 @@ func (gl *GDALLayer) GetLayerDefn() C.OGRFeatureDefnH {
 	return C.OGR_L_GetLayerDefn(gl.layer)
 }
 
+// GetFieldDefn 获取字段定义
+func (l *GDALLayer) GetFieldDefn(index int) C.OGRFieldDefnH {
+	if l.layer == nil {
+		return nil
+	}
+	defn := C.OGR_L_GetLayerDefn(l.layer)
+	return C.OGR_FD_GetFieldDefn(defn, C.int(index))
+}
+
+// CreateField 创建字段
+func (l *GDALLayer) CreateField(fieldDefn C.OGRFieldDefnH) error {
+	if l.layer == nil {
+		return fmt.Errorf("图层为空")
+	}
+	result := C.OGR_L_CreateField(l.layer, fieldDefn, C.int(1))
+	if result != C.OGRERR_NONE {
+		return fmt.Errorf("创建字段失败")
+	}
+	return nil
+}
+
+// CreateEmptyFeature 创建空要素
+func (l *GDALLayer) CreateEmptyFeature() *GDALFeature {
+	if l.layer == nil {
+		return nil
+	}
+	defn := C.OGR_L_GetLayerDefn(l.layer)
+	feature := C.OGR_F_Create(defn)
+	if feature == nil {
+		return nil
+	}
+	return &GDALFeature{feature: feature}
+}
+
+// CreateFeature 将要素添加到图层
+func (l *GDALLayer) CreateFeature(f *GDALFeature) error {
+	if l.layer == nil || f == nil {
+		return fmt.Errorf("图层或要素为空")
+	}
+	result := C.OGR_L_CreateFeature(l.layer, f.feature)
+	if result != C.OGRERR_NONE {
+		return fmt.Errorf("创建要素失败")
+	}
+	return nil
+}
+
+// GDALFeature 要素结构
+type GDALFeature struct {
+	feature C.OGRFeatureH
+}
+
+// GetGeometry 获取几何
+func (f *GDALFeature) GetGeometry() C.OGRGeometryH {
+	if f.feature == nil {
+		return nil
+	}
+	return C.OGR_F_GetGeometryRef(f.feature)
+}
+
+// SetGeometry 设置几何
+func (f *GDALFeature) SetGeometry(geom C.OGRGeometryH) {
+	if f.feature != nil && geom != nil {
+		C.OGR_F_SetGeometry(f.feature, geom)
+	}
+}
+
+// SetFieldString 设置字符串字段值
+func (f *GDALFeature) SetFieldString(fieldName, value string) {
+	if f.feature == nil {
+		return
+	}
+	cFieldName := C.CString(fieldName)
+	defer C.free(unsafe.Pointer(cFieldName))
+	cValue := C.CString(value)
+	defer C.free(unsafe.Pointer(cValue))
+
+	index := C.OGR_F_GetFieldIndex(f.feature, cFieldName)
+	if index >= 0 {
+		C.OGR_F_SetFieldString(f.feature, index, cValue)
+	}
+}
+
+// Destroy 销毁要素
+func (f *GDALFeature) Destroy() {
+	if f.feature != nil {
+		C.OGR_F_Destroy(f.feature)
+		f.feature = nil
+	}
+}
+
 // GetFieldCount 获取字段数量
 func (gl *GDALLayer) GetFieldCount() int {
 	defn := gl.GetLayerDefn()
