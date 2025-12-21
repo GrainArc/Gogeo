@@ -740,7 +740,7 @@ func (w *FileGeoWriter) copyFeatures(sourceLayer *GDALLayer, targetLayer C.OGRLa
 	var totalFeatures, successCount, errorCount int
 
 	for {
-		sourceFeature := sourceLayer.GetNextFeature().Feature
+		sourceFeature := sourceLayer.GetNextFeatureRow()
 		if sourceFeature == nil {
 			break
 		}
@@ -1759,7 +1759,7 @@ func (w *FileGeoWriter) copyFeaturesWithTransform(sourceLayer *GDALLayer, target
 	var totalFeatures, successCount, errorCount int
 
 	for {
-		sourceFeature := sourceLayer.GetNextFeature().Feature
+		sourceFeature := sourceLayer.GetNextFeatureRow()
 		if sourceFeature == nil {
 			break
 		}

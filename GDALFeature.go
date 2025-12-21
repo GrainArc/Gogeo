@@ -34,18 +34,6 @@ type GDALFeature struct {
 	Feature C.OGRFeatureH
 }
 
-// GetNextFeature 获取下一个要素（返回Go包装类型）
-func (gl *GDALLayer) GetNextFeature() *GDALFeature {
-	if gl.layer == nil {
-		return nil
-	}
-	Feature := C.OGR_L_GetNextFeature(gl.layer)
-	if Feature == nil {
-		return nil
-	}
-	return &GDALFeature{Feature: Feature}
-}
-
 // WrapFeature 将C类型要素包装为Go类型
 func WrapFeature(Feature C.OGRFeatureH) *GDALFeature {
 	if Feature == nil {

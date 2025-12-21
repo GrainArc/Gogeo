@@ -35,7 +35,10 @@ type GDALLayer struct {
 
 // GetFeatureCount 获取要素数量
 func (gl *GDALLayer) GetFeatureCount() int {
-	return int(C.OGR_L_GetFeatureCount(gl.layer, C.int(1))) // 1表示强制计算
+	if gl.layer == nil {
+		return 0
+	}
+	return int(C.OGR_L_GetFeatureCount(gl.layer, C.int(1)))
 }
 
 // GetLayerDefn 获取图层定义
@@ -108,12 +111,26 @@ func (gl *GDALLayer) GetSpatialRef() C.OGRSpatialReferenceH {
 
 // ResetReading 重置读取位置
 func (gl *GDALLayer) ResetReading() {
-	C.OGR_L_ResetReading(gl.layer)
+	if gl.layer != nil {
+		C.OGR_L_ResetReading(gl.layer)
+	}
 }
 
 // GetNextFeature 获取下一个要素
 func (gl *GDALLayer) GetNextFeatureRow() C.OGRFeatureH {
 	return C.OGR_L_GetNextFeature(gl.layer)
+}
+
+// GetNextFeature 获取下一个要素（返回Go包装类型）
+func (gl *GDALLayer) GetNextFeature() *GDALFeature {
+	if gl.layer == nil {
+		return nil
+	}
+	Feature := C.OGR_L_GetNextFeature(gl.layer)
+	if Feature == nil {
+		return nil
+	}
+	return &GDALFeature{Feature: Feature}
 }
 
 // PrintLayerInfo 打印图层信息（增强版）
@@ -207,7 +224,7 @@ func (gl *GDALLayer) printFirst10Features() {
 
 	// 遍历前10个要素
 	for featureIndex := 0; featureIndex < 10; featureIndex++ {
-		feature := gl.GetNextFeature().Feature
+		feature := gl.GetNextFeatureRow()
 		if feature == nil {
 			break
 		}
@@ -382,7 +399,7 @@ func (gl *GDALLayer) IterateFeatures(callback func(feature C.OGRFeatureH)) {
 	gl.ResetReading()
 
 	for {
-		feature := gl.GetNextFeature().Feature
+		feature := gl.GetNextFeatureRow()
 		if feature == nil {
 			break
 		}
