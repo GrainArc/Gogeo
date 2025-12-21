@@ -72,7 +72,7 @@ func BufferLayer(sourceLayer *GDALLayer, distance float64, quadSegs int) (*GDALL
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -176,7 +176,7 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -508,7 +508,7 @@ func SimplifyLayer(sourceLayer *GDALLayer, tolerance float64, preserveTopology b
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -633,7 +633,7 @@ func MakeValidLayer(sourceLayer *GDALLayer) (*GDALLayer, error) {
 	var validCount, invalidCount int
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -851,7 +851,7 @@ func ConvexHullLayer(sourceLayer *GDALLayer) (*GDALLayer, error) {
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -936,7 +936,7 @@ func CentroidLayer(sourceLayer *GDALLayer) (*GDALLayer, error) {
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -1037,7 +1037,7 @@ func BoundaryLayer(sourceLayer *GDALLayer) (*GDALLayer, error) {
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -1113,7 +1113,7 @@ func UnionAllLayer(sourceLayer *GDALLayer) (*GDALLayer, error) {
 	var unionGeom C.OGRGeometryH
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -1207,7 +1207,7 @@ func IntersectionLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature1 := layer1.GetNextFeature()
+		feature1 := layer1.GetNextFeature().Feature
 		if feature1 == nil {
 			break
 		}
@@ -1217,7 +1217,7 @@ func IntersectionLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
 			layer2.ResetReading()
 
 			for {
-				feature2 := layer2.GetNextFeature()
+				feature2 := layer2.GetNextFeature().Feature
 				if feature2 == nil {
 					break
 				}
@@ -1310,7 +1310,7 @@ func DifferenceLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature1 := layer1.GetNextFeature()
+		feature1 := layer1.GetNextFeature().Feature
 		if feature1 == nil {
 			break
 		}
@@ -1321,7 +1321,7 @@ func DifferenceLayer(layer1, layer2 *GDALLayer) (*GDALLayer, error) {
 
 			layer2.ResetReading()
 			for {
-				feature2 := layer2.GetNextFeature()
+				feature2 := layer2.GetNextFeature().Feature
 				if feature2 == nil {
 					break
 				}
@@ -1434,7 +1434,7 @@ func FilterByExtent(sourceLayer *GDALLayer, minX, minY, maxX, maxY float64) (*GD
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -1518,7 +1518,7 @@ func FilterByGeometry(sourceLayer *GDALLayer, filterGeom C.OGRGeometryH) (*GDALL
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -1862,7 +1862,7 @@ func TransformLayer(sourceLayer *GDALLayer, targetSRS C.OGRSpatialReferenceH) (*
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -2096,7 +2096,7 @@ func BatchBuffer(sourceLayer *GDALLayer, distanceField string, quadSegs int) (*G
 	resultDefn := C.OGR_L_GetLayerDefn(resultLayer)
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -2192,7 +2192,7 @@ func DissolveLayer(sourceLayer *GDALLayer, dissolveField string) (*GDALLayer, er
 	sourceLayer.ResetReading()
 
 	for {
-		feature := sourceLayer.GetNextFeature()
+		feature := sourceLayer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -2403,7 +2403,7 @@ func CountValidGeometries(layer *GDALLayer) (valid, invalid int) {
 	layer.ResetReading()
 
 	for {
-		feature := layer.GetNextFeature()
+		feature := layer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -2561,7 +2561,7 @@ func loadPolygonsWithAttributes(layer *GDALLayer, defn C.OGRFeatureDefnH) ([]*po
 	index := 0
 
 	for {
-		feature := layer.GetNextFeature()
+		feature := layer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
@@ -3190,7 +3190,7 @@ func AreaOnAreaAnalysis(layer *GDALLayer, tolerance float64) (*GDALLayer, error)
 	flags := 0
 
 	for {
-		feature := layer.GetNextFeature()
+		feature := layer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}

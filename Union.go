@@ -218,7 +218,7 @@ func (up *UnionProcessor) groupFeatures(layer *GDALLayer) (map[string]*FeatureGr
 	layer.ResetReading()
 
 	for {
-		feature := layer.GetNextFeature()
+		feature := layer.GetNextFeature().Feature
 		if feature == nil {
 			break
 		}
