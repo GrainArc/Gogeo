@@ -1408,3 +1408,63 @@ GDALDatasetH clipPixelRasterByMask(GDALDatasetH srcDS, OGRGeometryH geom, double
 
     return outputDS;
 }
+
+int readTileDataFloat32(GDALDatasetH dataset,
+                        double minX, double minY, double maxX, double maxY,
+                        int tileSize, float* buffer) {
+    if (dataset == NULL || buffer == NULL) {
+        return 0;
+    }
+
+    double geoTransform[6];
+    if (GDALGetGeoTransform(dataset, geoTransform) != CE_None) {
+        return 0;
+    }
+
+    int rasterWidth = GDALGetRasterXSize(dataset);
+    int rasterHeight = GDALGetRasterYSize(dataset);
+
+    // 计算像素坐标
+    double invGeoTransform[6];
+    if (!GDALInvGeoTransform(geoTransform, invGeoTransform)) {
+        return 0;
+    }
+
+    double srcMinX = invGeoTransform[0] + invGeoTransform[1] * minX + invGeoTransform[2] * maxY;
+    double srcMinY = invGeoTransform[3] + invGeoTransform[4] * minX + invGeoTransform[5] * maxY;
+    double srcMaxX = invGeoTransform[0] + invGeoTransform[1] * maxX + invGeoTransform[2] * minY;
+    double srcMaxY = invGeoTransform[3] + invGeoTransform[4] * maxX + invGeoTransform[5] * minY;
+
+    int xOff = (int)floor(srcMinX);
+    int yOff = (int)floor(srcMinY);
+    int xSize = (int)ceil(srcMaxX) - xOff;
+    int ySize = (int)ceil(srcMaxY) - yOff;
+
+    // 边界检查
+    if (xOff < 0) { xSize += xOff; xOff = 0; }
+    if (yOff < 0) { ySize += yOff; yOff = 0; }
+    if (xOff + xSize > rasterWidth) { xSize = rasterWidth - xOff; }
+    if (yOff + ySize > rasterHeight) { ySize = rasterHeight - yOff; }
+
+    if (xSize <= 0 || ySize <= 0) {
+        // 填充NoData值
+        for (int i = 0; i < tileSize * tileSize; i++) {
+            buffer[i] = -9999.0f;
+        }
+        return 1;
+    }
+
+    // 读取第一个波段（高程数据通常是单波段）
+    GDALRasterBandH band = GDALGetRasterBand(dataset, 1);
+    if (band == NULL) {
+        return 0;
+    }
+
+    // 直接读取为float32
+    CPLErr err = GDALRasterIO(band, GF_Read,
+                              xOff, yOff, xSize, ySize,
+                              buffer, tileSize, tileSize,
+                              GDT_Float32, 0, 0);
+
+    return (err == CE_None) ? 1 : 0;
+}

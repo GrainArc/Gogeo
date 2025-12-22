@@ -377,3 +377,72 @@ func TileToWebMercatorBounds(x, y, zoom int) (minX, minY, maxX, maxY float64) {
 
 	return
 }
+
+// ReadTileRaw 读取瓦片原始高程数据（返回float32数组，用于地形处理）
+func (rd *RasterDataset) ReadTileRaw(zoom, x, y, tileSize int) ([]float32, error) {
+	var minX, minY, maxX, maxY C.double
+
+	C.getTileBounds(C.int(x), C.int(y), C.int(zoom), &minX, &minY, &maxX, &maxY)
+
+	// 分配float32缓冲区（单波段高程数据）
+	bufferSize := tileSize * tileSize
+	buffer := make([]float32, bufferSize)
+
+	// 调用C函数读取float32数据
+	result := C.readTileDataFloat32(
+		rd.warpedDS,
+		minX, minY, maxX, maxY,
+		C.int(tileSize),
+		(*C.float)(unsafe.Pointer(&buffer[0])),
+	)
+
+	if result == 0 {
+		return nil, fmt.Errorf("failed to read tile raw data")
+	}
+
+	return buffer, nil
+}
+
+// ReadTileRawWithNoData 读取瓦片原始高程数据，同时返回NoData值
+func (rd *RasterDataset) ReadTileRawWithNoData(zoom, x, y, tileSize int) ([]float32, float32, error) {
+	var minX, minY, maxX, maxY C.double
+
+	C.getTileBounds(C.int(x), C.int(y), C.int(zoom), &minX, &minY, &maxX, &maxY)
+
+	// 分配float32缓冲区
+	bufferSize := tileSize * tileSize
+	buffer := make([]float32, bufferSize)
+
+	// 获取NoData值
+	var noDataValue C.double
+	var hasNoData C.int
+	band := C.GDALGetRasterBand(rd.getActiveDataset(), 1)
+	noDataValue = C.GDALGetRasterNoDataValue(band, &hasNoData)
+
+	noData := float32(-9999) // 默认NoData值
+	if hasNoData != 0 {
+		noData = float32(noDataValue)
+	}
+
+	// 读取数据
+	result := C.readTileDataFloat32(
+		rd.getActiveDataset(),
+		minX, minY, maxX, maxY,
+		C.int(tileSize),
+		(*C.float)(unsafe.Pointer(&buffer[0])),
+	)
+
+	if result == 0 {
+		return nil, noData, fmt.Errorf("failed to read tile raw data")
+	}
+
+	return buffer, noData, nil
+}
+
+// getActiveDataset 获取当前活动的数据集
+func (rd *RasterDataset) getActiveDataset() C.GDALDatasetH {
+	if rd.warpedDS != nil {
+		return rd.warpedDS
+	}
+	return rd.dataset
+}
