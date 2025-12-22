@@ -989,10 +989,20 @@ func (gen *MBTilesGenerator) elevationToTerrainRGB(elevationData []float32, noDa
 
 		var r, g, b, a uint8
 
-		// 检查NoData值
+		// 检查NoData值 - 将NoData区域的高程设为0
 		if height == noDataValue || math.IsNaN(float64(height)) || math.IsInf(float64(height), 0) {
-			// NoData区域设为透明或特定值
-			r, g, b, a = 0, 0, 0, 0
+			// NoData区域编码为高程0
+			if encoding == "terrarium" {
+				// Terrarium: height = 0 -> value = 0 + 32768 = 32768
+				// R = 32768 / 256 = 128, G = 32768 % 256 = 0, B = 0
+				r, g, b, a = 128, 0, 0, 255
+			} else {
+				// Mapbox: height = 0 -> value = (0 + 10000) / 0.1 = 100000
+				// R = 100000 / 65536 = 1
+				// G = (100000 % 65536) / 256 = 134
+				// B = 100000 % 256 = 160
+				r, g, b, a = 1, 134, 160, 255
+			}
 		} else {
 			a = 255
 
