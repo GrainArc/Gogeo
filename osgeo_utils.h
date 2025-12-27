@@ -101,7 +101,12 @@ int cropAndExport(GDALDatasetH srcDS,
                   int cropX, int cropY, int cropWidth, int cropHeight,
                   const char* format,
                   unsigned char** outData, int* outLen);
-
+// 裁剪、缩放并导出
+int cropScaleAndExport(GDALDatasetH hSrcDS,
+                       int cropX, int cropY, int cropWidth, int cropHeight,
+                       int outputWidth, int outputHeight,
+                       const char* format,
+                       unsigned char** outData, int* outLen);
 // 关闭数据集
 void closeDataset(GDALDatasetH hDS);
 

@@ -1810,6 +1810,132 @@ int cropAndExport(GDALDatasetH srcDS,
 
     return 0;
 }
+// osgeo_utils.c (添加新函数实现)
+
+int cropScaleAndExport(GDALDatasetH hSrcDS,
+                       int cropX, int cropY, int cropWidth, int cropHeight,
+                       int outputWidth, int outputHeight,
+                       const char* format,
+                       unsigned char** outData, int* outLen) {
+    if (hSrcDS == NULL || outData == NULL || outLen == NULL) {
+        return -1;
+    }
+
+    *outData = NULL;
+    *outLen = 0;
+
+    int srcWidth = GDALGetRasterXSize(hSrcDS);
+    int srcHeight = GDALGetRasterYSize(hSrcDS);
+    int bands = GDALGetRasterCount(hSrcDS);
+
+    // 边界检查
+    if (cropX < 0) cropX = 0;
+    if (cropY < 0) cropY = 0;
+    if (cropX + cropWidth > srcWidth) cropWidth = srcWidth - cropX;
+    if (cropY + cropHeight > srcHeight) cropHeight = srcHeight - cropY;
+
+    if (cropWidth <= 0 || cropHeight <= 0) {
+        return -2;
+    }
+
+    // 创建输出内存数据集
+    GDALDriverH hMemDriver = GDALGetDriverByName("MEM");
+    if (hMemDriver == NULL) {
+        return -3;
+    }
+
+    GDALDatasetH hOutDS = GDALCreate(hMemDriver, "", outputWidth, outputHeight, bands, GDT_Byte, NULL);
+    if (hOutDS == NULL) {
+        return -4;
+    }
+
+    // 分配缓冲区
+    unsigned char* buffer = (unsigned char*)CPLMalloc(cropWidth * cropHeight);
+    if (buffer == NULL) {
+        GDALClose(hOutDS);
+        return -5;
+    }
+
+    // 逐波段读取、缩放、写入
+    for (int b = 1; b <= bands; b++) {
+        GDALRasterBandH hSrcBand = GDALGetRasterBand(hSrcDS, b);
+        GDALRasterBandH hDstBand = GDALGetRasterBand(hOutDS, b);
+
+        // 读取源区域
+        CPLErr err = GDALRasterIO(hSrcBand, GF_Read,
+                                  cropX, cropY, cropWidth, cropHeight,
+                                  buffer, outputWidth, outputHeight,
+                                  GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            CPLFree(buffer);
+            GDALClose(hOutDS);
+            return -6;
+        }
+
+        // 写入目标（GDAL会自动处理缩放）
+        err = GDALRasterIO(hDstBand, GF_Write,
+                          0, 0, outputWidth, outputHeight,
+                          buffer, outputWidth, outputHeight,
+                          GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            CPLFree(buffer);
+            GDALClose(hOutDS);
+            return -7;
+        }
+    }
+
+    CPLFree(buffer);
+
+    // 导出到内存
+    char vsimemPath[256];
+    snprintf(vsimemPath, sizeof(vsimemPath), "/vsimem/output_%p.%s", hOutDS,
+             strcmp(format, "JPEG") == 0 ? "jpg" : "png");
+
+    GDALDriverH hOutDriver = GDALGetDriverByName(format);
+    if (hOutDriver == NULL) {
+        GDALClose(hOutDS);
+        return -8;
+    }
+
+    char** options = NULL;
+    if (strcmp(format, "JPEG") == 0) {
+        options = CSLSetNameValue(options, "QUALITY", "85");
+    } else if (strcmp(format, "PNG") == 0) {
+        options = CSLSetNameValue(options, "ZLEVEL", "6");
+    }
+
+    GDALDatasetH hFileDS = GDALCreateCopy(hOutDriver, vsimemPath, hOutDS, FALSE, options, NULL, NULL);
+    CSLDestroy(options);
+    GDALClose(hOutDS);
+
+    if (hFileDS == NULL) {
+        return -9;
+    }
+    GDALClose(hFileDS);
+
+    // 读取vsimem文件
+    vsi_l_offset fileSize = 0;
+    GByte* fileData = VSIGetMemFileBuffer(vsimemPath, &fileSize, FALSE);
+
+    if (fileData == NULL || fileSize == 0) {
+        VSIUnlink(vsimemPath);
+        return -10;
+    }
+
+    // 复制数据
+    *outData = (unsigned char*)CPLMalloc(fileSize);
+    if (*outData == NULL) {
+        VSIUnlink(vsimemPath);
+        return -11;
+    }
+
+    memcpy(*outData, fileData, fileSize);
+    *outLen = (int)fileSize;
+
+    VSIUnlink(vsimemPath);
+
+    return 0;
+}
 
 // 关闭数据集
 void closeDataset(GDALDatasetH hDS) {

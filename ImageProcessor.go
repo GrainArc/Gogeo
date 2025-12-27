@@ -236,6 +236,48 @@ func (p *ImageProcessor) GetDimensions() (width, height, bands int) {
 	return p.width, p.height, p.bands
 }
 
+// CropScaleAndExport 裁剪、缩放并导出
+func (p *ImageProcessor) CropScaleAndExport(
+	cropX, cropY, cropWidth, cropHeight int,
+	outputWidth, outputHeight int,
+	format string,
+) ([]byte, error) {
+	if p.canvasDS == nil {
+		return nil, errors.New("canvas dataset is nil")
+	}
+
+	// 参数验证
+	if cropWidth <= 0 || cropHeight <= 0 || outputWidth <= 0 || outputHeight <= 0 {
+		return nil, errors.New("invalid dimensions")
+	}
+
+	var outData *C.uchar
+	var outLen C.int
+
+	cFormat := C.CString(format)
+	defer C.free(unsafe.Pointer(cFormat))
+
+	// 调用带缩放的裁剪导出函数
+	result := C.cropScaleAndExport(p.canvasDS,
+		C.int(cropX), C.int(cropY), C.int(cropWidth), C.int(cropHeight),
+		C.int(outputWidth), C.int(outputHeight),
+		cFormat, &outData, &outLen)
+
+	if result != 0 {
+		return nil, fmt.Errorf("failed to crop, scale and export: error code %d", result)
+	}
+
+	if outData == nil || outLen <= 0 {
+		return nil, errors.New("export returned empty data")
+	}
+
+	// 复制数据到Go切片
+	data := C.GoBytes(unsafe.Pointer(outData), outLen)
+	C.free(unsafe.Pointer(outData))
+
+	return data, nil
+}
+
 // Clear 清空画布（填充透明）
 func (p *ImageProcessor) Clear() error {
 	if p.canvasDS == nil {
