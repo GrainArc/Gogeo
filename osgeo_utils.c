@@ -1468,3 +1468,359 @@ int readTileDataFloat32(GDALDatasetH dataset,
 
     return (err == CE_None) ? 1 : 0;
 }
+
+// osgeo_utils.c 中添加以下实现
+
+// 创建空白内存数据集（RGBA 4通道）
+GDALDatasetH createBlankMemDataset(int width, int height, int bands) {
+    GDALDriverH memDriver = GDALGetDriverByName("MEM");
+    if (memDriver == NULL) {
+        fprintf(stderr, "MEM driver not available\n");
+        return NULL;
+    }
+
+    // 创建内存数据集
+    GDALDatasetH hDS = GDALCreate(memDriver, "", width, height, bands, GDT_Byte, NULL);
+    if (hDS == NULL) {
+        fprintf(stderr, "Failed to create blank memory dataset\n");
+        return NULL;
+    }
+
+    // 初始化所有波段为0（透明）
+    unsigned char* zeroBuffer = (unsigned char*)calloc(width * height, sizeof(unsigned char));
+    if (zeroBuffer == NULL) {
+        GDALClose(hDS);
+        return NULL;
+    }
+
+    for (int b = 1; b <= bands; b++) {
+        GDALRasterBandH hBand = GDALGetRasterBand(hDS, b);
+        if (hBand != NULL) {
+            GDALRasterIO(hBand, GF_Write, 0, 0, width, height,
+                        zeroBuffer, width, height, GDT_Byte, 0, 0);
+        }
+    }
+
+    free(zeroBuffer);
+    return hDS;
+}
+
+// 从内存缓冲区创建数据集
+GDALDatasetH createMemDatasetFromBuffer(const char* data, int dataLen, const char* format) {
+    if (data == NULL || dataLen <= 0) {
+        fprintf(stderr, "Invalid buffer data\n");
+        return NULL;
+    }
+
+    // 生成唯一的vsimem路径
+    char vsimemPath[256];
+    snprintf(vsimemPath, sizeof(vsimemPath), "/vsimem/tile_%p_%d.%s",
+             (void*)data, dataLen, format);
+
+    // 将数据写入vsimem
+    VSILFILE* fp = VSIFileFromMemBuffer(vsimemPath, (GByte*)data, dataLen, FALSE);
+    if (fp == NULL) {
+        fprintf(stderr, "Failed to create vsimem file\n");
+        return NULL;
+    }
+    VSIFCloseL(fp);
+
+    // 打开数据集
+    GDALDatasetH hDS = GDALOpen(vsimemPath, GA_ReadOnly);
+    if (hDS == NULL) {
+        fprintf(stderr, "Failed to open dataset from buffer, format: %s\n", format);
+        VSIUnlink(vsimemPath);
+        return NULL;
+    }
+
+    return hDS;
+}
+
+// 获取数据集基本信息
+void getDatasetInfoSimple(GDALDatasetH hDS, int* width, int* height, int* bands) {
+    if (hDS == NULL) {
+        if (width) *width = 0;
+        if (height) *height = 0;
+        if (bands) *bands = 0;
+        return;
+    }
+
+    if (width) *width = GDALGetRasterXSize(hDS);
+    if (height) *height = GDALGetRasterYSize(hDS);
+    if (bands) *bands = GDALGetRasterCount(hDS);
+}
+
+// 复制瓦片到画布
+int copyTileToCanvas(GDALDatasetH srcDS, GDALDatasetH dstDS,
+                     int srcX, int srcY, int srcWidth, int srcHeight,
+                     int dstX, int dstY) {
+    if (srcDS == NULL || dstDS == NULL) {
+        return -1;
+    }
+
+    int srcBands = GDALGetRasterCount(srcDS);
+    int dstBands = GDALGetRasterCount(dstDS);
+    int dstWidth = GDALGetRasterXSize(dstDS);
+    int dstHeight = GDALGetRasterYSize(dstDS);
+
+    // 边界检查
+    if (dstX < 0 || dstY < 0 || dstX >= dstWidth || dstY >= dstHeight) {
+        return -2;
+    }
+
+    // 计算实际复制区域
+    int copyWidth = srcWidth;
+    int copyHeight = srcHeight;
+
+    if (dstX + copyWidth > dstWidth) {
+        copyWidth = dstWidth - dstX;
+    }
+    if (dstY + copyHeight > dstHeight) {
+        copyHeight = dstHeight - dstY;
+    }
+
+    if (copyWidth <= 0 || copyHeight <= 0) {
+        return -3;
+    }
+
+    // 分配缓冲区
+    unsigned char* buffer = (unsigned char*)malloc(copyWidth * copyHeight);
+    if (buffer == NULL) {
+        return -4;
+    }
+
+    // 复制每个波段
+    int bandsToProcess = (srcBands < dstBands) ? srcBands : dstBands;
+
+    for (int b = 1; b <= bandsToProcess; b++) {
+        GDALRasterBandH srcBand = GDALGetRasterBand(srcDS, b);
+        GDALRasterBandH dstBand = GDALGetRasterBand(dstDS, b);
+
+        if (srcBand == NULL || dstBand == NULL) {
+            continue;
+        }
+
+        // 读取源数据
+        CPLErr err = GDALRasterIO(srcBand, GF_Read,
+                                  srcX, srcY, copyWidth, copyHeight,
+                                  buffer, copyWidth, copyHeight,
+                                  GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            free(buffer);
+            return -5;
+        }
+
+        // 写入目标数据
+        err = GDALRasterIO(dstBand, GF_Write,
+                          dstX, dstY, copyWidth, copyHeight,
+                          buffer, copyWidth, copyHeight,
+                          GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            free(buffer);
+            return -6;
+        }
+    }
+
+    // 如果源图像是RGB（3波段），目标是RGBA（4波段），设置Alpha通道为255
+    if (srcBands == 3 && dstBands == 4) {
+        GDALRasterBandH alphaBand = GDALGetRasterBand(dstDS, 4);
+        if (alphaBand != NULL) {
+            memset(buffer, 255, copyWidth * copyHeight);
+            GDALRasterIO(alphaBand, GF_Write,
+                        dstX, dstY, copyWidth, copyHeight,
+                        buffer, copyWidth, copyHeight,
+                        GDT_Byte, 0, 0);
+        }
+    }
+
+    // 如果源图像是灰度（1波段），复制到RGB通道
+    if (srcBands == 1 && dstBands >= 3) {
+        GDALRasterBandH srcBand = GDALGetRasterBand(srcDS, 1);
+
+        // 读取灰度数据
+        GDALRasterIO(srcBand, GF_Read,
+                    srcX, srcY, copyWidth, copyHeight,
+                    buffer, copyWidth, copyHeight,
+                    GDT_Byte, 0, 0);
+
+        // 写入到G和B通道
+        for (int b = 2; b <= 3 && b <= dstBands; b++) {
+            GDALRasterBandH dstBand = GDALGetRasterBand(dstDS, b);
+            if (dstBand != NULL) {
+                GDALRasterIO(dstBand, GF_Write,
+                            dstX, dstY, copyWidth, copyHeight,
+                            buffer, copyWidth, copyHeight,
+                            GDT_Byte, 0, 0);
+            }
+        }
+
+        // 设置Alpha通道
+        if (dstBands == 4) {
+            GDALRasterBandH alphaBand = GDALGetRasterBand(dstDS, 4);
+            if (alphaBand != NULL) {
+                memset(buffer, 255, copyWidth * copyHeight);
+                GDALRasterIO(alphaBand, GF_Write,
+                            dstX, dstY, copyWidth, copyHeight,
+                            buffer, copyWidth, copyHeight,
+                            GDT_Byte, 0, 0);
+            }
+        }
+    }
+
+    free(buffer);
+    return 0;
+}
+
+// 裁剪并导出到内存
+int cropAndExport(GDALDatasetH srcDS,
+                  int cropX, int cropY, int cropWidth, int cropHeight,
+                  const char* format,
+                  unsigned char** outData, int* outLen) {
+    if (srcDS == NULL || outData == NULL || outLen == NULL) {
+        return -1;
+    }
+
+    *outData = NULL;
+    *outLen = 0;
+
+    int srcWidth = GDALGetRasterXSize(srcDS);
+    int srcHeight = GDALGetRasterYSize(srcDS);
+    int srcBands = GDALGetRasterCount(srcDS);
+
+    // 边界检查
+    if (cropX < 0) cropX = 0;
+    if (cropY < 0) cropY = 0;
+    if (cropX + cropWidth > srcWidth) cropWidth = srcWidth - cropX;
+    if (cropY + cropHeight > srcHeight) cropHeight = srcHeight - cropY;
+
+    if (cropWidth <= 0 || cropHeight <= 0) {
+        return -2;
+    }
+
+    // 创建裁剪后的内存数据集
+    GDALDriverH memDriver = GDALGetDriverByName("MEM");
+    if (memDriver == NULL) {
+        return -3;
+    }
+
+    GDALDatasetH cropDS = GDALCreate(memDriver, "", cropWidth, cropHeight, srcBands, GDT_Byte, NULL);
+    if (cropDS == NULL) {
+        return -4;
+    }
+
+    // 分配缓冲区
+    unsigned char* buffer = (unsigned char*)malloc(cropWidth * cropHeight);
+    if (buffer == NULL) {
+        GDALClose(cropDS);
+        return -5;
+    }
+
+    // 复制裁剪区域的数据
+    for (int b = 1; b <= srcBands; b++) {
+        GDALRasterBandH srcBand = GDALGetRasterBand(srcDS, b);
+        GDALRasterBandH dstBand = GDALGetRasterBand(cropDS, b);
+
+        if (srcBand == NULL || dstBand == NULL) {
+            continue;
+        }
+
+        // 读取源数据
+        CPLErr err = GDALRasterIO(srcBand, GF_Read,
+                                  cropX, cropY, cropWidth, cropHeight,
+                                  buffer, cropWidth, cropHeight,
+                                  GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            free(buffer);
+            GDALClose(cropDS);
+            return -6;
+        }
+
+        // 写入目标数据
+        err = GDALRasterIO(dstBand, GF_Write,
+                          0, 0, cropWidth, cropHeight,
+                          buffer, cropWidth, cropHeight,
+                          GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            free(buffer);
+            GDALClose(cropDS);
+            return -7;
+        }
+    }
+
+    free(buffer);
+
+    // 标准化格式名称
+    char standardFormat[32];
+    standardizeFormat(format, standardFormat, sizeof(standardFormat));
+
+    // 获取输出驱动
+    GDALDriverH outDriver = GDALGetDriverByName(standardFormat);
+    if (outDriver == NULL) {
+        GDALClose(cropDS);
+        return -8;
+    }
+
+    // 生成唯一的vsimem输出路径
+    char outputPath[256];
+    snprintf(outputPath, sizeof(outputPath), "/vsimem/output_%p.%s",
+             (void*)srcDS, format);
+
+    // 设置输出选项
+    char** options = NULL;
+    if (strcmp(standardFormat, "JPEG") == 0) {
+        options = CSLAddString(options, "QUALITY=90");
+    } else if (strcmp(standardFormat, "PNG") == 0) {
+        options = CSLAddString(options, "ZLEVEL=6");
+    } else if (strcmp(standardFormat, "WEBP") == 0) {
+        options = CSLAddString(options, "QUALITY=90");
+    }
+
+    // 创建输出文件
+    GDALDatasetH outDS = GDALCreateCopy(outDriver, outputPath, cropDS, FALSE, options, NULL, NULL);
+    CSLDestroy(options);
+    GDALClose(cropDS);
+
+    if (outDS == NULL) {
+        return -9;
+    }
+
+    GDALClose(outDS);
+
+    // 读取输出文件到内存
+    vsi_l_offset nDataLength;
+    GByte* pabyData = VSIGetMemFileBuffer(outputPath, &nDataLength, FALSE);
+
+    if (pabyData == NULL || nDataLength == 0) {
+        VSIUnlink(outputPath);
+        return -10;
+    }
+
+    // 复制数据
+    *outData = (unsigned char*)malloc(nDataLength);
+    if (*outData == NULL) {
+        VSIUnlink(outputPath);
+        return -11;
+    }
+
+    memcpy(*outData, pabyData, nDataLength);
+    *outLen = (int)nDataLength;
+
+    // 清理
+    VSIUnlink(outputPath);
+
+    return 0;
+}
+
+// 关闭数据集
+void closeDataset(GDALDatasetH hDS) {
+    if (hDS != NULL) {
+        GDALClose(hDS);
+    }
+}
+
+// 清理vsimem文件
+void cleanupVsimem(const char* path) {
+    if (path != NULL) {
+        VSIUnlink(path);
+    }
+}

@@ -81,6 +81,34 @@ int readTileDataFloat32(GDALDatasetH dataset,
                         double minX, double minY, double maxX, double maxY,
                         int tileSize, float* buffer);
 void freeImageBuffer(ImageBuffer *buffer);
+
+// 创建空白内存数据集
+GDALDatasetH createBlankMemDataset(int width, int height, int bands);
+
+// 从内存缓冲区创建数据集
+GDALDatasetH createMemDatasetFromBuffer(const char* data, int dataLen, const char* format);
+
+// 获取数据集信息
+void getDatasetInfoSimple(GDALDatasetH hDS, int* width, int* height, int* bands);
+
+// 复制瓦片到画布
+int copyTileToCanvas(GDALDatasetH srcDS, GDALDatasetH dstDS,
+                     int srcX, int srcY, int srcWidth, int srcHeight,
+                     int dstX, int dstY);
+
+// 裁剪并导出
+int cropAndExport(GDALDatasetH srcDS,
+                  int cropX, int cropY, int cropWidth, int cropHeight,
+                  const char* format,
+                  unsigned char** outData, int* outLen);
+
+// 关闭数据集
+void closeDataset(GDALDatasetH hDS);
+
+// 清理vsimem文件
+void cleanupVsimem(const char* path);
+
+
 #ifdef __cplusplus
 }
 #endif
