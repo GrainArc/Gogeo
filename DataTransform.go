@@ -509,7 +509,8 @@ type FeatureData struct {
 }
 
 // GDBToPostGIS 直接将GDB转换为PostGIS可用的数据结构
-func GDBToPostGIS(gdbPath string) ([]GDBLayerInfo, error) {
+// targetLayers: 指定要导入的图层名称列表，如果为空或nil则导入所有图层
+func GDBToPostGIS(gdbPath string, targetLayers []string) ([]GDBLayerInfo, error) {
 	InitializeGDAL()
 
 	var layers []GDBLayerInfo
@@ -532,6 +533,15 @@ func GDBToPostGIS(gdbPath string) ([]GDBLayerInfo, error) {
 		return layers, fmt.Errorf("无法创建EPSG:4490坐标系")
 	}
 
+	// 构建目标图层名称集合，用于快速查找
+	targetLayerSet := make(map[string]bool)
+	for _, name := range targetLayers {
+		targetLayerSet[name] = true
+	}
+
+	// 判断是否导入所有图层
+	importAll := len(targetLayers) == 0
+
 	// 获取图层数量
 	layerCount := C.OGR_DS_GetLayerCount(hDataSource)
 
@@ -539,6 +549,14 @@ func GDBToPostGIS(gdbPath string) ([]GDBLayerInfo, error) {
 	for i := 0; i < int(layerCount); i++ {
 		hLayer := C.OGR_DS_GetLayer(hDataSource, C.int(i))
 		if hLayer == nil {
+			continue
+		}
+
+		// 获取图层名称
+		layerName := C.GoString(C.OGR_L_GetName(hLayer))
+
+		// 如果指定了图层列表，检查当前图层是否在列表中
+		if !importAll && !targetLayerSet[layerName] {
 			continue
 		}
 
@@ -552,10 +570,27 @@ func GDBToPostGIS(gdbPath string) ([]GDBLayerInfo, error) {
 		layers = append(layers, layerInfo)
 	}
 
+	// 检查是否有指定的图层未找到
+	if !importAll && len(layers) < len(targetLayers) {
+		foundLayers := make(map[string]bool)
+		for _, layer := range layers {
+			foundLayers[layer.LayerName] = true
+		}
+		var notFound []string
+		for _, name := range targetLayers {
+			if !foundLayers[name] {
+				notFound = append(notFound, name)
+			}
+		}
+		if len(notFound) > 0 {
+			log.Printf("警告: 以下图层未找到: %v", notFound)
+		}
+	}
+
 	return layers, nil
 }
 
-// processLayerDirect 直接处理图层，不经过GeoJSON
+// processLayerDirect 直接处理图层
 func processLayerDirect(hLayer C.OGRLayerH, hTargetSRS C.OGRSpatialReferenceH) (GDBLayerInfo, error) {
 	// 获取图层名称
 	layerName := C.OGR_L_GetName(hLayer)
