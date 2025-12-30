@@ -69,6 +69,7 @@ type GDBLayerMetadataWrite struct {
 	// 基本信息
 	Name        string // 图层名称
 	AliasName   string // 图层别名
+	LayerPath   string // 图层路径（用于GDB_Items的Path字段，不包含图层名）
 	CatalogPath string // 目录路径DSID        int    // 数据集ID
 	FeatureType string
 	DSID        int
@@ -165,12 +166,25 @@ const (
 	GDBCLSIDFeatureClass = "{52353152-891A-11D0-BEC6-00805F7C4268}"
 )
 
+func (m *GDBLayerMetadataWrite) WithLayerPath(path string) *GDBLayerMetadataWrite {
+	// 统一使用反斜杠
+	m.LayerPath = strings.ReplaceAll(path, "/", "\\")
+	// 确保LayerPath以反斜杠开头
+	if m.LayerPath != "" && !strings.HasPrefix(m.LayerPath, "\\") {
+		m.LayerPath = "\\" + m.LayerPath
+	}
+	// 自动更新CatalogPath
+	m.CatalogPath = m.LayerPath + "\\" + m.Name
+	return m
+}
+
 // NewGDBLayerMetadataWrite 创建新的图层元数据写入对象
 func NewGDBLayerMetadataWrite(layerName string) *GDBLayerMetadataWrite {
 	return &GDBLayerMetadataWrite{
 		Name:                             layerName,
 		AliasName:                        layerName,
 		CatalogPath:                      "\\" + layerName,
+		LayerPath:                        "",
 		DSID:                             1,
 		DatasetType:                      GDBDatasetTypeFeatureClass,
 		FeatureType:                      GDBFeatureTypeSimple,
@@ -652,6 +666,7 @@ func (m *GDBLayerMetadataWrite) writeSpatialReference(sb *strings.Builder) {
 // gdbPath: GDB文件路径
 // layerName: 图层名称
 // metadata: 要写入的元数据
+
 func WriteGDBLayerMetadata(gdbPath string, layerName string, metadata *GDBLayerMetadataWrite) error {
 	// 初始化GDAL
 	InitializeGDAL()
@@ -660,6 +675,12 @@ func WriteGDBLayerMetadata(gdbPath string, layerName string, metadata *GDBLayerM
 	definitionXML, err := metadata.GenerateDefinitionXML()
 	if err != nil {
 		return fmt.Errorf("生成Definition XML失败: %w", err)
+	}
+
+	// 计算完整的Path值
+	fullPath := metadata.CatalogPath
+	if fullPath == "" {
+		fullPath = "\\" + layerName
 	}
 
 	cPath := C.CString(gdbPath)
@@ -703,8 +724,10 @@ func WriteGDBLayerMetadata(gdbPath string, layerName string, metadata *GDBLayerM
 	}
 	defer C.OGR_F_Destroy(hFeature)
 
-	// 获取Definition字段索引
+	// 获取字段定义
 	hFeatureDefn := C.OGR_L_GetLayerDefn(hGDBItemsLayer)
+
+	// 获取Definition字段索引并设置值
 	cDefinition := C.CString("Definition")
 	defer C.free(unsafe.Pointer(cDefinition))
 
@@ -714,11 +737,22 @@ func WriteGDBLayerMetadata(gdbPath string, layerName string, metadata *GDBLayerM
 		return fmt.Errorf("GDB_Items表中不存在Definition字段")
 	}
 
-	// 设置新的Definition值
 	cDefinitionXML := C.CString(definitionXML)
 	defer C.free(unsafe.Pointer(cDefinitionXML))
-
 	C.OGR_F_SetFieldString(hFeature, definitionIdx, cDefinitionXML)
+
+	// 获取Path字段索引并设置值
+	cPathField := C.CString("Path")
+	defer C.free(unsafe.Pointer(cPathField))
+
+	pathIdx := C.OGR_FD_GetFieldIndex(hFeatureDefn, cPathField)
+	if pathIdx >= 0 {
+		cFullPath := C.CString(fullPath)
+		defer C.free(unsafe.Pointer(cFullPath))
+		C.OGR_F_SetFieldString(hFeature, pathIdx, cFullPath)
+	} else {
+		fmt.Printf("警告: GDB_Items表中不存在Path字段\n")
+	}
 
 	// 更新要素
 	err2 := C.OGR_L_SetFeature(hGDBItemsLayer, hFeature)
@@ -738,9 +772,28 @@ func WriteGDBLayerMetadata(gdbPath string, layerName string, metadata *GDBLayerM
 
 	// 刷新数据集
 	C.GDALFlushCache(hDS)
-
-	fmt.Printf("成功更新图层 '%s' 的元数据\n", layerName)
+	if metadata.LayerPath != "" {
+		// 从LayerPath提取数据集名称
+		datasetName := extractDatasetName(metadata.LayerPath)
+		if datasetName != "" {
+			fmt.Printf("正在更新图层 '%s' 到数据集 '%s' 的关系...\n", layerName, datasetName)
+			relErr := UpdateGDBItemRelationship(gdbPath, layerName, datasetName)
+			if relErr != nil {
+				fmt.Printf("警告: 更新关系失败: %v\n", relErr)
+			}
+		}
+	}
+	fmt.Printf("成功更新图层 '%s' 的元数据，Path: %s\n", layerName, fullPath)
 	return nil
+}
+func extractDatasetName(layerPath string) string {
+	// LayerPath格式如 "\BCDataset" 或 "\Folder\BCDataset"
+	path := strings.TrimPrefix(layerPath, "\\")
+	parts := strings.Split(path, "\\")
+	if len(parts) > 0 && parts[0] != "" {
+		return parts[0]
+	}
+	return ""
 }
 
 // =====================================================
@@ -1100,11 +1153,23 @@ func BatchUpdateGDBMetadataFromConfig(gdbPath string, configs []GDBMetadataUpdat
 
 // ImportToGDBOptionsV3 导入选项（V3版本，支持元数据设置）
 type ImportToGDBOptionsV3 struct {
-	ImportToGDBOptionsV2                               // 继承V2选项
+	ImportToGDBOptionsV2     // 继承V2选项
+	LayerPath                string
 	LayerAlias               string                    // 图层别名
 	FieldAliases             map[string]string         // 字段别名映射
 	AutoUpdateMetadata       bool                      // 导入后自动更新元数据
 	SpatialReferenceOverride *GDBSpatialReferenceWrite // 空间参考覆盖设置
+}
+
+func (opts *ImportToGDBOptionsV3) WithLayerPath(path string) *ImportToGDBOptionsV3 {
+	// 统一使用反斜杠
+	opts.LayerPath = strings.ReplaceAll(path, "/", "\\")
+	// 确保LayerPath以反斜杠开头
+	if opts.LayerPath != "" && !strings.HasPrefix(opts.LayerPath, "\\") {
+		opts.LayerPath = "\\" + opts.LayerPath
+	}
+
+	return opts
 }
 
 // NewImportToGDBOptionsV3 创建默认的V3导入选项
@@ -1165,7 +1230,7 @@ func ImportPostGISToGDBV3(postGISConfig *PostGISConfig, gdbPath string, gdbLayer
 	}
 
 	// 如果启用了自动更新元数据
-	if options.AutoUpdateMetadata && (options.LayerAlias != "" || len(options.FieldAliases) > 0 || options.SpatialReferenceOverride != nil) {
+	if options.AutoUpdateMetadata && (options.LayerAlias != "" || options.LayerPath != "" || len(options.FieldAliases) > 0 || options.SpatialReferenceOverride != nil) {
 		fmt.Println("正在更新图层元数据...")
 
 		// 从导入的图层创建元数据
@@ -1178,6 +1243,11 @@ func ImportPostGISToGDBV3(postGISConfig *PostGISConfig, gdbPath string, gdbLayer
 		// 更新图层别名
 		if options.LayerAlias != "" {
 			meta.AliasName = options.LayerAlias
+		}
+
+		// 更新图层路径
+		if options.LayerPath != "" {
+			meta.WithLayerPath(options.LayerPath)
 		}
 
 		// 更新字段别名
@@ -1214,7 +1284,7 @@ func ImportPostGISToNewGDBLayerV3(postGISConfig *PostGISConfig, gdbPath string, 
 	}
 
 	// 如果启用了自动更新元数据
-	if options.AutoUpdateMetadata && (options.LayerAlias != "" || len(options.FieldAliases) > 0 || options.SpatialReferenceOverride != nil) {
+	if options.AutoUpdateMetadata && (options.LayerAlias != "" || options.LayerPath != "" || len(options.FieldAliases) > 0 || options.SpatialReferenceOverride != nil) {
 		fmt.Println("正在更新图层元数据...")
 
 		// 从导入的图层创建元数据
@@ -1227,6 +1297,11 @@ func ImportPostGISToNewGDBLayerV3(postGISConfig *PostGISConfig, gdbPath string, 
 		// 更新图层别名
 		if options.LayerAlias != "" {
 			meta.AliasName = options.LayerAlias
+		}
+
+		// 更新图层路径
+		if options.LayerPath != "" {
+			meta.WithLayerPath(options.LayerPath)
 		}
 
 		// 更新字段别名
@@ -1247,6 +1322,19 @@ func ImportPostGISToNewGDBLayerV3(postGISConfig *PostGISConfig, gdbPath string, 
 			fmt.Printf("警告: 更新元数据失败: %v\n", writeErr)
 		} else {
 			fmt.Println("元数据更新成功")
+		}
+		// 【新增】更新关系
+		if options.LayerPath != "" {
+			datasetName := extractDatasetName(options.LayerPath)
+			if datasetName != "" {
+				fmt.Printf("正在更新图层到数据集 '%s' 的关系...\n", datasetName)
+				relErr := UpdateGDBItemRelationship(gdbPath, layerName, datasetName)
+				if relErr != nil {
+					fmt.Printf("警告: 更新关系失败: %v\n", relErr)
+				} else {
+					fmt.Println("关系更新成功")
+				}
+			}
 		}
 	}
 
@@ -1606,6 +1694,7 @@ func (m *GDBLayerMetadataWrite) Clone() *GDBLayerMetadataWrite {
 		AliasName:                        m.AliasName,
 		CatalogPath:                      m.CatalogPath,
 		DSID:                             m.DSID,
+		LayerPath:                        m.LayerPath,
 		DatasetType:                      m.DatasetType,
 		FeatureType:                      m.FeatureType,
 		Versioned:                        m.Versioned,
@@ -1675,54 +1764,337 @@ func (m *GDBLayerMetadataWrite) Clone() *GDBLayerMetadataWrite {
 }
 
 // =====================================================
-// 使用示例函数
+// 新增：GDB_ItemRelationships 相关函数
 // =====================================================
 
-// ExampleUpdateLayerMetadata 示例：更新图层元数据
-func ExampleUpdateLayerMetadata() {
-	gdbPath := "/path/to/your.gdb"
-	layerName := "YourLayer"
+// GDBItemRelationship 表示GDB_ItemRelationships表中的一条记录
+type GDBItemRelationship struct {
+	ObjectID   int    // 对象ID
+	UUID       string // 关系UUID
+	Type       string // 关系类型UUID
+	OriginID   string // 源项UUID (父级，如数据集)
+	DestID     string // 目标项UUID (子级，如要素类)
+	Attributes string // 属性
+	Properties int    // 属性值
+}
 
-	// 方式1：简单更新图层别名
-	err := UpdateGDBLayerAlias(gdbPath, layerName, "图层中文名")
+// GDB关系类型UUID常量
+const (
+	// DatasetInFolder - 数据集在文件夹中的关系
+	GDBRelTypeDatasetInFolder = "{dc78f1ab-34e4-43ac-ba81-bc99dbe3e549}"
+	// DatasetInFeatureDataset - 要素类在要素数据集中的关系
+	GDBRelTypeDatasetInFeatureDataset = "{a1633a59-46ba-4448-8706-d8abe2b2b02e}"
+	// ItemInFolder - 项目在文件夹中的关系
+	GDBRelTypeItemInFolder = "{5dd0c1af-cb3d-4fea-8c51-cb3ba8d77cdb}"
+)
+
+// GDB_Items类型UUID常量
+const (
+	GDBItemTypeFeatureDataset = "{74737149-DCB5-4257-8904-B9724E32A530}"
+	GDBItemTypeFeatureClass   = "{70737809-852C-4A03-9E22-2CECEA5B9BFA}"
+	GDBItemTypeTable          = "{CD06BC3B-789D-4C51-AAFA-A467912B8965}"
+	GDBItemTypeWorkspace      = "{C673FE0F-7280-404F-8532-20755DD8FC06}"
+)
+
+// GetGDBItemUUID 获取GDB_Items表中指定项目的UUID
+func GetGDBItemUUID(gdbPath string, itemName string) (string, error) {
+	InitializeGDAL()
+
+	cPath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	hDS := C.openDatasetExUpdate(cPath, C.uint(0x04))
+	if hDS == nil {
+		return "", fmt.Errorf("无法打开GDB数据集: %s", gdbPath)
+	}
+	defer C.closeDataset(hDS)
+
+	cGDBItems := C.CString("GDB_Items")
+	defer C.free(unsafe.Pointer(cGDBItems))
+
+	hLayer := C.GDALDatasetGetLayerByName(hDS, cGDBItems)
+	if hLayer == nil {
+		return "", fmt.Errorf("无法获取GDB_Items表")
+	}
+
+	// 设置过滤器
+	filterSQL := fmt.Sprintf("Name = '%s'", itemName)
+	cFilter := C.CString(filterSQL)
+	defer C.free(unsafe.Pointer(cFilter))
+
+	C.OGR_L_SetAttributeFilter(hLayer, cFilter)
+	C.OGR_L_ResetReading(hLayer)
+
+	hFeature := C.OGR_L_GetNextFeature(hLayer)
+	if hFeature == nil {
+		C.OGR_L_SetAttributeFilter(hLayer, nil)
+		return "", fmt.Errorf("未找到项目: %s", itemName)
+	}
+	defer C.OGR_F_Destroy(hFeature)
+
+	// 获取UUID字段
+	hDefn := C.OGR_L_GetLayerDefn(hLayer)
+	cUUID := C.CString("UUID")
+	defer C.free(unsafe.Pointer(cUUID))
+
+	uuidIdx := C.OGR_FD_GetFieldIndex(hDefn, cUUID)
+	if uuidIdx < 0 {
+		C.OGR_L_SetAttributeFilter(hLayer, nil)
+		return "", fmt.Errorf("GDB_Items表中不存在UUID字段")
+	}
+
+	uuid := C.GoString(C.OGR_F_GetFieldAsString(hFeature, uuidIdx))
+	C.OGR_L_SetAttributeFilter(hLayer, nil)
+
+	return uuid, nil
+}
+
+// GetGDBRootUUID 获取GDB根目录的UUID
+func GetGDBRootUUID(gdbPath string) (string, error) {
+	InitializeGDAL()
+
+	cPath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	hDS := C.openDatasetExUpdate(cPath, C.uint(0x04))
+	if hDS == nil {
+		return "", fmt.Errorf("无法打开GDB数据集: %s", gdbPath)
+	}
+	defer C.closeDataset(hDS)
+
+	cGDBItems := C.CString("GDB_Items")
+	defer C.free(unsafe.Pointer(cGDBItems))
+
+	hLayer := C.GDALDatasetGetLayerByName(hDS, cGDBItems)
+	if hLayer == nil {
+		return "", fmt.Errorf("无法获取GDB_Items表")
+	}
+
+	// 查找根目录 (Type = Workspace类型 或 Path = '\')
+	filterSQL := fmt.Sprintf("Type = '%s'", GDBItemTypeWorkspace)
+	cFilter := C.CString(filterSQL)
+	defer C.free(unsafe.Pointer(cFilter))
+
+	C.OGR_L_SetAttributeFilter(hLayer, cFilter)
+	C.OGR_L_ResetReading(hLayer)
+
+	hFeature := C.OGR_L_GetNextFeature(hLayer)
+	if hFeature == nil {
+		C.OGR_L_SetAttributeFilter(hLayer, nil)
+		return "", fmt.Errorf("未找到GDB根目录")
+	}
+	defer C.OGR_F_Destroy(hFeature)
+
+	hDefn := C.OGR_L_GetLayerDefn(hLayer)
+	cUUID := C.CString("UUID")
+	defer C.free(unsafe.Pointer(cUUID))
+
+	uuidIdx := C.OGR_FD_GetFieldIndex(hDefn, cUUID)
+	if uuidIdx < 0 {
+		C.OGR_L_SetAttributeFilter(hLayer, nil)
+		return "", fmt.Errorf("GDB_Items表中不存在UUID字段")
+	}
+
+	uuid := C.GoString(C.OGR_F_GetFieldAsString(hFeature, uuidIdx))
+	C.OGR_L_SetAttributeFilter(hLayer, nil)
+
+	return uuid, nil
+}
+
+// AddGDBItemRelationship 在GDB_ItemRelationships表中添加关系
+func AddGDBItemRelationship(gdbPath string, originUUID string, destUUID string, relationType string) error {
+	InitializeGDAL()
+
+	cPath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	hDS := C.openDatasetExUpdate(cPath, C.uint(0x04|0x01))
+	if hDS == nil {
+		return fmt.Errorf("无法以更新模式打开GDB数据集: %s", gdbPath)
+	}
+	defer C.closeDataset(hDS)
+
+	cGDBItemRels := C.CString("GDB_ItemRelationships")
+	defer C.free(unsafe.Pointer(cGDBItemRels))
+
+	hLayer := C.GDALDatasetGetLayerByName(hDS, cGDBItemRels)
+	if hLayer == nil {
+		return fmt.Errorf("无法获取GDB_ItemRelationships表")
+	}
+
+	// 检查关系是否已存在
+	filterSQL := fmt.Sprintf("OriginID = '%s' AND DestID = '%s' AND Type = '%s'",
+		originUUID, destUUID, relationType)
+	cFilter := C.CString(filterSQL)
+	defer C.free(unsafe.Pointer(cFilter))
+
+	C.OGR_L_SetAttributeFilter(hLayer, cFilter)
+	C.OGR_L_ResetReading(hLayer)
+
+	existingFeature := C.OGR_L_GetNextFeature(hLayer)
+	if existingFeature != nil {
+		C.OGR_F_Destroy(existingFeature)
+		C.OGR_L_SetAttributeFilter(hLayer, nil)
+		fmt.Println("关系已存在，跳过添加")
+		return nil
+	}
+	C.OGR_L_SetAttributeFilter(hLayer, nil)
+
+	// 创建新要素
+	hDefn := C.OGR_L_GetLayerDefn(hLayer)
+	hFeature := C.OGR_F_Create(hDefn)
+	if hFeature == nil {
+		return fmt.Errorf("无法创建要素")
+	}
+	defer C.OGR_F_Destroy(hFeature)
+
+	// 生成新的UUID
+	newUUID := generateUUID()
+
+	// 设置字段值
+	setStringField := func(fieldName, value string) {
+		cFieldName := C.CString(fieldName)
+		defer C.free(unsafe.Pointer(cFieldName))
+		idx := C.OGR_FD_GetFieldIndex(hDefn, cFieldName)
+		if idx >= 0 {
+			cValue := C.CString(value)
+			defer C.free(unsafe.Pointer(cValue))
+			C.OGR_F_SetFieldString(hFeature, idx, cValue)
+		}
+	}
+
+	setIntField := func(fieldName string, value int) {
+		cFieldName := C.CString(fieldName)
+		defer C.free(unsafe.Pointer(cFieldName))
+		idx := C.OGR_FD_GetFieldIndex(hDefn, cFieldName)
+		if idx >= 0 {
+			C.OGR_F_SetFieldInteger(hFeature, idx, C.int(value))
+		}
+	}
+
+	setStringField("UUID", newUUID)
+	setStringField("Type", relationType)
+	setStringField("OriginID", originUUID)
+	setStringField("DestID", destUUID)
+	setIntField("Properties", 1)
+
+	// 创建要素
+	if C.OGR_L_CreateFeature(hLayer, hFeature) != 0 {
+		return fmt.Errorf("创建关系记录失败")
+	}
+
+	C.OGR_L_SyncToDisk(hLayer)
+	C.GDALFlushCache(hDS)
+
+	fmt.Printf("成功添加关系: %s -> %s\n", originUUID, destUUID)
+	return nil
+}
+
+// UpdateGDBItemRelationship 更新要素类的父级关系
+// 将要素类从当前位置移动到指定的数据集中
+func UpdateGDBItemRelationship(gdbPath string, featureClassName string, datasetName string) error {
+	// 获取要素类的UUID
+	featureClassUUID, err := GetGDBItemUUID(gdbPath, featureClassName)
 	if err != nil {
-		fmt.Printf("更新图层别名失败: %v\n", err)
+		return fmt.Errorf("获取要素类UUID失败: %w", err)
 	}
 
-	// 方式2：更新字段别名
-	fieldAliases := map[string]string{
-		"YSDM":  "要素代码",
-		"XZQDM": "行政区代码",
-		"MC":    "名称",
+	var parentUUID string
+	var relationType string
+
+	if datasetName == "" {
+		// 移动到根目录
+		parentUUID, err = GetGDBRootUUID(gdbPath)
+		if err != nil {
+			return fmt.Errorf("获取根目录UUID失败: %w", err)
+		}
+		relationType = GDBRelTypeDatasetInFolder
+	} else {
+		// 移动到指定数据集
+		parentUUID, err = GetGDBItemUUID(gdbPath, datasetName)
+		if err != nil {
+			return fmt.Errorf("获取数据集UUID失败: %w", err)
+		}
+		relationType = GDBRelTypeDatasetInFeatureDataset
 	}
-	err = UpdateGDBFieldAliases(gdbPath, layerName, fieldAliases)
+
+	// 先删除现有的父级关系
+	err = RemoveGDBItemRelationship(gdbPath, featureClassUUID)
 	if err != nil {
-		fmt.Printf("更新字段别名失败: %v\n", err)
+		fmt.Printf("警告: 删除现有关系失败: %v\n", err)
 	}
 
-	// 方式3：同时更新图层和字段别名
-	err = UpdateGDBLayerAndFieldAliases(gdbPath, layerName, "图层中文名", fieldAliases)
-	if err != nil {
-		fmt.Printf("更新元数据失败: %v\n", err)
+	// 添加新的父级关系
+	return AddGDBItemRelationship(gdbPath, parentUUID, featureClassUUID, relationType)
+}
+
+// RemoveGDBItemRelationship 删除指定目标项的所有父级关系
+func RemoveGDBItemRelationship(gdbPath string, destUUID string) error {
+	InitializeGDAL()
+
+	cPath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	hDS := C.openDatasetExUpdate(cPath, C.uint(0x04|0x01))
+	if hDS == nil {
+		return fmt.Errorf("无法以更新模式打开GDB数据集: %s", gdbPath)
+	}
+	defer C.closeDataset(hDS)
+
+	cGDBItemRels := C.CString("GDB_ItemRelationships")
+	defer C.free(unsafe.Pointer(cGDBItemRels))
+
+	hLayer := C.GDALDatasetGetLayerByName(hDS, cGDBItemRels)
+	if hLayer == nil {
+		return fmt.Errorf("无法获取GDB_ItemRelationships表")
 	}
 
-	// 方式4：完全自定义元数据
-	meta, err := CreateMetadataWriteFromLayer(gdbPath, layerName)
-	if err != nil {
-		fmt.Printf("读取元数据失败: %v\n", err)
-		return
+	// 查找并删除所有以destUUID为目标的关系
+	filterSQL := fmt.Sprintf("DestID = '%s'", destUUID)
+	cFilter := C.CString(filterSQL)
+	defer C.free(unsafe.Pointer(cFilter))
+
+	C.OGR_L_SetAttributeFilter(hLayer, cFilter)
+	C.OGR_L_ResetReading(hLayer)
+
+	var fidsToDelete []int64
+	for {
+		hFeature := C.OGR_L_GetNextFeature(hLayer)
+		if hFeature == nil {
+			break
+		}
+		fid := int64(C.OGR_F_GetFID(hFeature))
+		fidsToDelete = append(fidsToDelete, fid)
+		C.OGR_F_Destroy(hFeature)
 	}
 
-	// 修改元数据
-	meta.AliasName = "自定义图层名"
-	meta.WithAreaAndLengthFields("SHAPE_Area", "SHAPE_Length")
+	C.OGR_L_SetAttributeFilter(hLayer, nil)
 
-	// 设置空间参考（使用预设）
-	meta.SpatialReference = NewCGCS2000_3DegreeGK_Zone(35)
-
-	// 写入元数据
-	err = WriteGDBLayerMetadata(gdbPath, layerName, meta)
-	if err != nil {
-		fmt.Printf("写入元数据失败: %v\n", err)
+	// 删除找到的要素
+	for _, fid := range fidsToDelete {
+		if C.OGR_L_DeleteFeature(hLayer, C.GIntBig(fid)) != 0 {
+			fmt.Printf("警告: 删除FID %d 失败\n", fid)
+		}
 	}
+
+	C.OGR_L_SyncToDisk(hLayer)
+	C.GDALFlushCache(hDS)
+
+	fmt.Printf("已删除 %d 条关系记录\n", len(fidsToDelete))
+	return nil
+}
+
+// generateUUID 生成UUID字符串
+func generateUUID() string {
+	// 简单的UUID生成，实际使用中建议使用uuid库
+	b := make([]byte, 16)
+	for i := range b {
+		b[i] = byte(i * 17 % 256)
+	}
+	return fmt.Sprintf("{%08X-%04X-%04X-%04X-%012X}",
+		uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8|uint32(b[3]),
+		uint16(b[4])<<8|uint16(b[5]),
+		uint16(b[6])<<8|uint16(b[7]),
+		uint16(b[8])<<8|uint16(b[9]),
+		uint64(b[10])<<40|uint64(b[11])<<32|uint64(b[12])<<24|uint64(b[13])<<16|uint64(b[14])<<8|uint64(b[15]))
 }
