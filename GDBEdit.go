@@ -2335,3 +2335,238 @@ func ImportGDALLayerToGDB(sourceLayer *GDALLayer, gdbPath string, gdbLayerName s
 
 	return result, nil
 }
+
+// DeleteLayer 删除GDB文件中的指定图层
+// gdbPath: GDB文件路径
+// layerName: 要删除的图层名称
+func DeleteLayer(gdbPath string, layerName string) error { // 初始化GDAL
+	InitializeGDAL()
+
+	cFilePath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 以可写模式打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(1), nil) // 1表示可写
+	if dataset == nil {
+		return fmt.Errorf("无法以可写模式打开GDB文件: %s", gdbPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 检查数据源是否支持删除图层操作
+	if C.OGR_DS_TestCapability(dataset, C.CString("DeleteLayer")) == 0 {
+		return fmt.Errorf("该数据源不支持删除图层操作")
+	}
+
+	// 获取图层数量
+	layerCount := int(C.OGR_DS_GetLayerCount(dataset))
+	if layerCount == 0 {
+		return fmt.Errorf("GDB文件中没有图层")
+	}
+
+	// 查找图层索引
+	layerIndex := -1
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	for i := 0; i < layerCount; i++ {
+		layer := C.OGR_DS_GetLayer(dataset, C.int(i))
+		if layer == nil {
+			continue
+		}
+
+		currentLayerName := C.GoString(C.OGR_L_GetName(layer))
+		if currentLayerName == layerName {
+			layerIndex = i
+			break
+		}
+	}
+
+	if layerIndex < 0 {
+		return fmt.Errorf("未找到图层: %s", layerName)
+	}
+
+	// 删除图层
+	result := C.OGR_DS_DeleteLayer(dataset, C.int(layerIndex))
+	if result != C.OGRERR_NONE {
+		return fmt.Errorf("删除图层失败，错误代码: %d", int(result))
+	}
+
+	fmt.Printf("成功删除图层: %s\n", layerName)
+	return nil
+}
+
+// DeleteLayerByIndex 通过索引删除GDB文件中的图层
+// gdbPath: GDB文件路径
+// layerIndex: 图层索引（从0开始）
+func DeleteLayerByIndex(gdbPath string, layerIndex int) error {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cFilePath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 以可写模式打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(1), nil)
+	if dataset == nil {
+		return fmt.Errorf("无法以可写模式打开GDB文件: %s", gdbPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 检查数据源是否支持删除图层操作
+	if C.OGR_DS_TestCapability(dataset, C.CString("DeleteLayer")) == 0 {
+		return fmt.Errorf("该数据源不支持删除图层操作")
+	}
+
+	// 检查索引有效性
+	layerCount := int(C.OGR_DS_GetLayerCount(dataset))
+	if layerIndex < 0 || layerIndex >= layerCount {
+		return fmt.Errorf("图层索引无效: %d (有效范围: 0-%d)", layerIndex, layerCount-1)
+	}
+
+	// 获取图层名称（用于日志）
+	layer := C.OGR_DS_GetLayer(dataset, C.int(layerIndex))
+	layerName := ""
+	if layer != nil {
+		layerName = C.GoString(C.OGR_L_GetName(layer))
+	}
+
+	// 删除图层
+	result := C.OGR_DS_DeleteLayer(dataset, C.int(layerIndex))
+	if result != C.OGRERR_NONE {
+		return fmt.Errorf("删除图层失败，错误代码: %d", int(result))
+	}
+
+	fmt.Printf("成功删除图层[%d]: %s\n", layerIndex, layerName)
+	return nil
+}
+
+// DeleteMultipleLayers 批量删除GDB文件中的多个图层
+// gdbPath: GDB文件路径
+// layerNames: 要删除的图层名称列表
+// continueOnError: 遇到错误是否继续删除其他图层
+func DeleteMultipleLayers(gdbPath string, layerNames []string, continueOnError bool) (int, []error) {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cFilePath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 以可写模式打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(1), nil)
+	if dataset == nil {
+		return 0, []error{fmt.Errorf("无法以可写模式打开GDB文件: %s", gdbPath)}
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 检查数据源是否支持删除图层操作
+	if C.OGR_DS_TestCapability(dataset, C.CString("DeleteLayer")) == 0 {
+		return 0, []error{fmt.Errorf("该数据源不支持删除图层操作")}
+	}
+
+	deletedCount := 0
+	var errors []error
+
+	// 注意：删除图层后索引会变化，所以需要每次重新查找
+	for _, layerName := range layerNames {
+		// 重新获取图层数量和索引
+		layerCount := int(C.OGR_DS_GetLayerCount(dataset))
+		layerIndex := -1
+
+		for i := 0; i < layerCount; i++ {
+			layer := C.OGR_DS_GetLayer(dataset, C.int(i))
+			if layer == nil {
+				continue
+			}
+
+			currentLayerName := C.GoString(C.OGR_L_GetName(layer))
+			if currentLayerName == layerName {
+				layerIndex = i
+				break
+			}
+		}
+
+		if layerIndex < 0 {
+			err := fmt.Errorf("未找到图层: %s", layerName)
+			errors = append(errors, err)
+			if !continueOnError {
+				return deletedCount, errors
+			}
+			continue
+		}
+
+		// 删除图层
+		result := C.OGR_DS_DeleteLayer(dataset, C.int(layerIndex))
+		if result != C.OGRERR_NONE {
+			err := fmt.Errorf("删除图层 '%s' 失败，错误代码: %d", layerName, int(result))
+			errors = append(errors, err)
+			if !continueOnError {
+				return deletedCount, errors
+			}
+			continue
+		}
+
+		deletedCount++
+		fmt.Printf("成功删除图层: %s\n", layerName)
+	}
+
+	fmt.Printf("批量删除完成: 成功 %d 个，失败 %d 个\n", deletedCount, len(errors))
+	return deletedCount, errors
+}
+
+// LayerExists 检查GDB文件中是否存在指定图层
+// gdbPath: GDB文件路径
+// layerName: 图层名称
+func LayerExists(gdbPath string, layerName string) (bool, error) {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cFilePath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 以只读模式打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(0), nil)
+	if dataset == nil {
+		return false, fmt.Errorf("无法打开GDB文件: %s", gdbPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 查找图层
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	layer := C.OGR_DS_GetLayerByName(dataset, cLayerName)
+	return layer != nil, nil
+}
+
+// GetLayerNames 获取GDB文件中所有图层的名称
+// gdbPath: GDB文件路径
+func GetLayerNames(gdbPath string) ([]string, error) {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cFilePath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cFilePath))
+
+	// 以只读模式打开数据源
+	dataset := C.OGROpen(cFilePath, C.int(0), nil)
+	if dataset == nil {
+		return nil, fmt.Errorf("无法打开GDB文件: %s", gdbPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 获取图层数量
+	layerCount := int(C.OGR_DS_GetLayerCount(dataset))
+	layerNames := make([]string, 0, layerCount)
+
+	for i := 0; i < layerCount; i++ {
+		layer := C.OGR_DS_GetLayer(dataset, C.int(i))
+		if layer == nil {
+			continue
+		}
+
+		layerName := C.GoString(C.OGR_L_GetName(layer))
+		layerNames = append(layerNames, layerName)
+	}
+
+	return layerNames, nil
+}
