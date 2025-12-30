@@ -31,6 +31,7 @@ import "C"
 import (
 	"encoding/xml"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -619,4 +620,99 @@ func (c *GDBLayerMetadataCollection) GetAllFieldAliases() map[string]map[string]
 		result[layer.Name] = layer.GetFieldAliasMap()
 	}
 	return result
+}
+
+// SaveGDBDefinitionsToFile 读取GDB_Items表中的Definition字段并保存到本地txt文件
+// gdbPath: GDB文件路径
+// outputPath: 输出文件路径（如果为空，则在GDB同级目录生成）
+// 返回: 保存的文件路径和错误信息
+func SaveGDBDefinitionsToFile(gdbPath string, outputPath string) (string, error) {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cPath := C.CString(gdbPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	// 打开GDB数据集
+	hDS := C.openDatasetEx(cPath, C.uint(0x04|0x00)) // GDAL_OF_VECTOR | GDAL_OF_READONLY
+	if hDS == nil {
+		return "", fmt.Errorf("无法打开GDB数据集: %s", gdbPath)
+	}
+	defer C.closeDataset(hDS)
+
+	// 确定输出路径
+	if outputPath == "" {
+		gdbDir := filepath.Dir(gdbPath)
+		gdbName := strings.TrimSuffix(filepath.Base(gdbPath), filepath.Ext(gdbPath))
+		outputPath = filepath.Join(gdbDir, gdbName+"_definitions.txt")
+	}
+
+	// 使用SQL查询获取GDB_Items表数据
+	sql := "SELECT Name, Path, Definition FROM GDB_Items"
+	cSQL := C.CString(sql)
+	defer C.free(unsafe.Pointer(cSQL))
+
+	hResultLayer := C.GDALDatasetExecuteSQL(hDS, cSQL, nil, nil)
+	if hResultLayer == nil {
+		return "", fmt.Errorf("SQL查询失败，未找到GDB_Items表")
+	}
+	defer C.GDALDatasetReleaseResultSet(hDS, hResultLayer)
+
+	// 构建输出内容
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("GDB Path: %s\n", gdbPath))
+	sb.WriteString(strings.Repeat("=", 80) + "\n\n")
+
+	// 读取所有记录
+	C.OGR_L_ResetReading(hResultLayer)
+	itemIndex := 0
+
+	for {
+		hFeature := C.OGR_L_GetNextFeature(hResultLayer)
+		if hFeature == nil {
+			break
+		}
+
+		itemIndex++
+		name := ""
+		path := ""
+		definition := ""
+
+		// 读取Name
+		if C.OGR_F_IsFieldSet(hFeature, 0) != 0 && C.OGR_F_IsFieldNull(hFeature, 0) == 0 {
+			name = C.GoString(C.OGR_F_GetFieldAsString(hFeature, 0))
+		}
+
+		// 读取Path
+		if C.OGR_F_IsFieldSet(hFeature, 1) != 0 && C.OGR_F_IsFieldNull(hFeature, 1) == 0 {
+			path = C.GoString(C.OGR_F_GetFieldAsString(hFeature, 1))
+		}
+
+		// 读取Definition
+		if C.OGR_F_IsFieldSet(hFeature, 2) != 0 && C.OGR_F_IsFieldNull(hFeature, 2) == 0 {
+			definition = C.GoString(C.OGR_F_GetFieldAsString(hFeature, 2))
+		}
+
+		// 写入文件内容
+		sb.WriteString(fmt.Sprintf("[%d] Name: %s\n", itemIndex, name))
+		sb.WriteString(fmt.Sprintf("    Path: %s\n", path))
+		sb.WriteString("    Definition:\n")
+		if definition != "" {
+			sb.WriteString(definition)
+		} else {
+			sb.WriteString("    (empty)")
+		}
+		sb.WriteString("\n\n")
+		sb.WriteString(strings.Repeat("-", 80) + "\n\n")
+
+		C.OGR_F_Destroy(hFeature)
+	}
+
+	// 写入文件
+	err := os.WriteFile(outputPath, []byte(sb.String()), 0644)
+	if err != nil {
+		return "", fmt.Errorf("写入文件失败: %w", err)
+	}
+
+	return outputPath, nil
 }
