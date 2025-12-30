@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -58,6 +59,7 @@ type GDBLayerMetaData struct {
 	CatalogPath string `json:"catalog_path"` // 目录路径
 	UUID        string `json:"uuid"`         // 唯一标识
 	TypeUUID    string `json:"type_uuid"`    // 类型UUID
+	EPSG        int    `json:"epsg"`         // EPSG代码
 	// 数据集信息
 	DatasetName string `json:"dataset_name"` // 所属要素数据集名称
 	DatasetType string `json:"dataset_type"` // 数据集类型 (esriDTFeatureClass等)
@@ -78,6 +80,12 @@ type GDBLayerMetaData struct {
 	// 字段信息
 	Fields []GDBLayerFieldInfo `json:"fields"` // 字段列表
 }
+type SpatialReferenceXML struct {
+	XMLName    xml.Name `xml:"SpatialReference"`
+	WKT        string   `xml:"WKT"`
+	WKID       string   `xml:"WKID"`
+	LatestWKID string   `xml:"LatestWKID"`
+}
 
 // GDBLayerMetadataCollection GDB图层元数据集合
 type GDBLayerMetadataCollection struct {
@@ -92,23 +100,24 @@ type GDBLayerMetadataCollection struct {
 
 // DEFeatureClassInfo XML解析结构 - 用于解析definition字段
 type DEFeatureClassInfo struct {
-	XMLName           xml.Name       `xml:"DEFeatureClassInfo"`
-	CatalogPath       string         `xml:"CatalogPath"`
-	Name              string         `xml:"Name"`
-	DatasetType       string         `xml:"DatasetType"`
-	DSID              string         `xml:"DSID"`
-	HasOID            string         `xml:"HasOID"`
-	OIDFieldName      string         `xml:"OIDFieldName"`
-	AliasName         string         `xml:"AliasName"`
-	HasGlobalID       string         `xml:"HasGlobalID"`
-	GlobalIDFieldName string         `xml:"GlobalIDFieldName"`
-	FeatureType       string         `xml:"FeatureType"`
-	ShapeType         string         `xml:"ShapeType"`
-	ShapeFieldName    string         `xml:"ShapeFieldName"`
-	HasM              string         `xml:"HasM"`
-	HasZ              string         `xml:"HasZ"`
-	HasSpatialIndex   string         `xml:"HasSpatialIndex"`
-	GPFieldInfoExs    GPFieldInfoExs `xml:"GPFieldInfoExs"`
+	XMLName           xml.Name             `xml:"DEFeatureClassInfo"`
+	CatalogPath       string               `xml:"CatalogPath"`
+	Name              string               `xml:"Name"`
+	DatasetType       string               `xml:"DatasetType"`
+	DSID              string               `xml:"DSID"`
+	HasOID            string               `xml:"HasOID"`
+	OIDFieldName      string               `xml:"OIDFieldName"`
+	AliasName         string               `xml:"AliasName"`
+	HasGlobalID       string               `xml:"HasGlobalID"`
+	GlobalIDFieldName string               `xml:"GlobalIDFieldName"`
+	FeatureType       string               `xml:"FeatureType"`
+	ShapeType         string               `xml:"ShapeType"`
+	ShapeFieldName    string               `xml:"ShapeFieldName"`
+	HasM              string               `xml:"HasM"`
+	HasZ              string               `xml:"HasZ"`
+	HasSpatialIndex   string               `xml:"HasSpatialIndex"`
+	GPFieldInfoExs    GPFieldInfoExs       `xml:"GPFieldInfoExs"`
+	SpatialReference  *SpatialReferenceXML `xml:"SpatialReference"` // 新增：空间参考
 }
 
 // GPFieldInfoExs 字段信息数组
@@ -307,6 +316,7 @@ func extractDatasetNameFromPath(path string) string {
 }
 
 // parseDefinitionXML 解析Definition字段的XML内容
+// parseDefinitionXML 解析Definition字段的XML内容
 func parseDefinitionXML(definition string, layerMeta *GDBLayerMetaData) error {
 	// 预处理XML - 处理命名空间
 	definition = preprocessXML(definition)
@@ -334,6 +344,20 @@ func parseDefinitionXML(definition string, layerMeta *GDBLayerMetaData) error {
 	layerMeta.HasGlobalID = parseBoolSafe(deInfo.HasGlobalID)
 	layerMeta.GlobalIDFieldName = deInfo.GlobalIDFieldName
 
+	// 解析空间参考 - 新增
+	if deInfo.SpatialReference != nil {
+		// 优先使用LatestWKID，其次使用WKID
+		if deInfo.SpatialReference.LatestWKID != "" {
+			layerMeta.EPSG = parseIntSafe(deInfo.SpatialReference.LatestWKID)
+		} else if deInfo.SpatialReference.WKID != "" {
+			layerMeta.EPSG = parseIntSafe(deInfo.SpatialReference.WKID)
+		}
+		// 如果WKID为空，尝试从WKT中提取EPSG
+		if layerMeta.EPSG == 0 && deInfo.SpatialReference.WKT != "" {
+			layerMeta.EPSG = extractEPSGFromWKT(deInfo.SpatialReference.WKT)
+		}
+	}
+
 	// 解析字段信息
 	for _, fieldInfo := range deInfo.GPFieldInfoExs.GPFieldInfoEx {
 		field := GDBLayerFieldInfo{
@@ -355,6 +379,28 @@ func parseDefinitionXML(definition string, layerMeta *GDBLayerMetaData) error {
 	}
 
 	return nil
+}
+
+// extractEPSGFromWKT 从WKT字符串中提取EPSG代码
+func extractEPSGFromWKT(wkt string) int {
+	// 查找 AUTHORITY["EPSG","xxxx"] 模式
+	// 例如: AUTHORITY["EPSG",4490]
+	patterns := []string{
+		`AUTHORITY\["EPSG",(\d+)\]`,
+		`AUTHORITY\["EPSG","(\d+)"\]`}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(wkt)
+		if len(matches) >= 2 {
+			epsg := parseIntSafe(matches[1])
+			if epsg > 0 {
+				return epsg
+			}
+		}
+	}
+
+	return 0
 }
 
 // preprocessXML 预处理XML字符串
@@ -387,6 +433,27 @@ func parseDefinitionXMLFallback(definition string, layerMeta *GDBLayerMetaData) 
 	layerMeta.OIDFieldName = extractXMLValue(definition, "OIDFieldName")
 	layerMeta.HasGlobalID = parseBoolSafe(extractXMLValue(definition, "HasGlobalID"))
 	layerMeta.GlobalIDFieldName = extractXMLValue(definition, "GlobalIDFieldName")
+
+	// 解析EPSG - 新增
+	// 优先使用LatestWKID
+	latestWKID := extractXMLValue(definition, "LatestWKID")
+	if latestWKID != "" {
+		layerMeta.EPSG = parseIntSafe(latestWKID)
+	}
+	// 如果LatestWKID为空，使用WKID
+	if layerMeta.EPSG == 0 {
+		wkid := extractXMLValue(definition, "WKID")
+		if wkid != "" {
+			layerMeta.EPSG = parseIntSafe(wkid)
+		}
+	}
+	// 如果WKID也为空，尝试从WKT中提取
+	if layerMeta.EPSG == 0 {
+		wkt := extractXMLValue(definition, "WKT")
+		if wkt != "" {
+			layerMeta.EPSG = extractEPSGFromWKT(wkt)
+		}
+	}
 
 	// 解析字段信息
 	layerMeta.Fields = parseFieldInfosFallback(definition)
@@ -548,11 +615,10 @@ func (m *GDBLayerMetaData) PrintMetadata() {
 	fmt.Printf("几何字段: %s\n", m.ShapeFieldName)
 	fmt.Printf("HasZ: %v, HasM: %v\n", m.HasZ, m.HasM)
 	fmt.Printf("OID字段: %s (HasOID: %v)\n", m.OIDFieldName, m.HasOID)
-
+	fmt.Printf("EPSG: %d\n", m.EPSG) // 新增
 	fmt.Printf("\n字段列表 (%d 个):\n", len(m.Fields))
 	fmt.Printf("%-4s %-20s %-25s %-20s %-8s\n", "序号", "字段名", "别名", "类型", "可空")
 	fmt.Println(strings.Repeat("-", 85))
-
 	for i, field := range m.Fields {
 		fmt.Printf("%-4d %-20s %-25s %-20s %-8v\n",
 			i+1, field.Name, field.AliasName, field.FieldType, field.IsNullable)
