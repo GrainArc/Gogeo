@@ -514,3 +514,223 @@ func EnsureObjectIDField(shpPath string) (bool, error) {
 
 	return true, nil
 }
+
+// GetSHPEPSGCode 读取SHP文件的投影信息并返回EPSG代码
+// shpPath: SHP文件路径
+// 返回: EPSG代码（如果无法识别则返回0）, 错误信息
+func GetSHPEPSGCode(shpPath string) (int, error) {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cPath := C.CString(shpPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	// 使用OGROpen打开SHP文件
+	dataset := C.OGROpen(cPath, C.int(0), nil) // 0表示只读
+	if dataset == nil {
+		return 0, fmt.Errorf("无法打开SHP文件: %s", shpPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 获取第一个图层
+	if C.OGR_DS_GetLayerCount(dataset) == 0 {
+		return 0, fmt.Errorf("SHP文件没有图层: %s", shpPath)
+	}
+	layer := C.OGR_DS_GetLayer(dataset, C.int(0))
+	if layer == nil {
+		return 0, fmt.Errorf("无法获取图层: %s", shpPath)
+	}
+
+	// 获取空间参考
+	hSRS := C.OGR_L_GetSpatialRef(layer)
+	if hSRS == nil {
+		return 0, fmt.Errorf("SHP文件没有投影信息: %s", shpPath)
+	}
+
+	// 尝试获取EPSG代码
+	epsgCode := getEPSGFromSRS(hSRS)
+
+	return epsgCode, nil
+}
+
+// GetSHPSpatialReference 读取SHP文件的完整空间参考信息
+// shpPath: SHP文件路径
+// 返回: GDBSpatialReference结构体, 错误信息
+func GetSHPSpatialReference(shpPath string) (*GDBSpatialReference, error) {
+	// 初始化GDAL
+	InitializeGDAL()
+
+	cPath := C.CString(shpPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	// 使用OGROpen打开SHP文件
+	dataset := C.OGROpen(cPath, C.int(0), nil) // 0表示只读
+	if dataset == nil {
+		return nil, fmt.Errorf("无法打开SHP文件: %s", shpPath)
+	}
+	defer C.OGR_DS_Destroy(dataset)
+
+	// 获取第一个图层
+	if C.OGR_DS_GetLayerCount(dataset) == 0 {
+		return nil, fmt.Errorf("SHP文件没有图层: %s", shpPath)
+	}
+	layer := C.OGR_DS_GetLayer(dataset, C.int(0))
+	if layer == nil {
+		return nil, fmt.Errorf("无法获取图层: %s", shpPath)
+	}
+
+	// 获取空间参考
+	hSRS := C.OGR_L_GetSpatialRef(layer)
+	if hSRS == nil {
+		return nil, fmt.Errorf("SHP文件没有投影信息: %s", shpPath)
+	}
+
+	// 构建GDBSpatialReference
+	srs := &GDBSpatialReference{}
+
+	// 获取EPSG代码
+	srs.EPSG = getEPSGFromSRS(hSRS)
+
+	// 获取坐标系名称
+	srs.Name = getSRSName(hSRS)
+
+	// 判断坐标系类型
+	if C.OSRIsProjected(hSRS) != 0 {
+		srs.Type = SRSTypeProjected
+	} else if C.OSRIsGeographic(hSRS) != 0 {
+		srs.Type = SRSTypeGeographic
+	}
+
+	// 获取WKT
+	srs.WKT = getSRSWKT(hSRS)
+
+	// 获取Proj4
+	srs.Proj4 = getSRSProj4(hSRS)
+
+	// 设置描述
+	if srs.Type == SRSTypeGeographic {
+		srs.Description = fmt.Sprintf("地理坐标系: %s", srs.Name)
+	} else {
+		srs.Description = fmt.Sprintf("投影坐标系: %s", srs.Name)
+	}
+
+	return srs, nil
+}
+
+// getEPSGFromSRS 从OGRSpatialReferenceH获取EPSG代码
+func getEPSGFromSRS(hSRS C.OGRSpatialReferenceH) int {
+	if hSRS == nil {
+		return 0
+	}
+
+	// 尝试自动识别EPSG
+	C.OSRAutoIdentifyEPSG(hSRS)
+
+	// 尝试从AUTHORITY获取EPSG代码
+	// 首先尝试获取PROJCS的AUTHORITY
+	cAuthProjcs := C.CString("PROJCS")
+	defer C.free(unsafe.Pointer(cAuthProjcs))
+
+	authorityCode := C.OSRGetAuthorityCode(hSRS, cAuthProjcs)
+	if authorityCode != nil {
+		code := C.GoString(authorityCode)
+		if epsg := parseEPSGCode(code); epsg > 0 {
+			return epsg
+		}
+	}
+
+	// 尝试获取GEOGCS的AUTHORITY
+	cAuthGeogcs := C.CString("GEOGCS")
+	defer C.free(unsafe.Pointer(cAuthGeogcs))
+
+	authorityCode = C.OSRGetAuthorityCode(hSRS, cAuthGeogcs)
+	if authorityCode != nil {
+		code := C.GoString(authorityCode)
+		if epsg := parseEPSGCode(code); epsg > 0 {
+			return epsg
+		}
+	}
+
+	// 尝试从根节点获取
+	authorityCode = C.OSRGetAuthorityCode(hSRS, nil)
+	if authorityCode != nil {
+		code := C.GoString(authorityCode)
+		if epsg := parseEPSGCode(code); epsg > 0 {
+			return epsg
+		}
+	}
+
+	return 0
+}
+
+// parseEPSGCode 解析EPSG代码字符串为整数
+func parseEPSGCode(code string) int {
+	if code == "" {
+		return 0
+	}
+	var epsg int
+	_, err := fmt.Sscanf(code, "%d", &epsg)
+	if err != nil {
+		return 0
+	}
+	return epsg
+}
+
+// getSRSName 获取空间参考名称
+func getSRSName(hSRS C.OGRSpatialReferenceH) string {
+	if hSRS == nil {
+		return ""
+	}
+
+	// 尝试获取投影坐标系名称
+	if C.OSRIsProjected(hSRS) != 0 {
+		cKey := C.CString("PROJCS")
+		defer C.free(unsafe.Pointer(cKey))
+		name := C.OSRGetAttrValue(hSRS, cKey, 0)
+		if name != nil {
+			return C.GoString(name)
+		}
+	}
+
+	// 尝试获取地理坐标系名称
+	cKey := C.CString("GEOGCS")
+	defer C.free(unsafe.Pointer(cKey))
+	name := C.OSRGetAttrValue(hSRS, cKey, 0)
+	if name != nil {
+		return C.GoString(name)
+	}
+
+	return "Unknown"
+}
+
+// getSRSWKT 获取空间参考的WKT表示
+func getSRSWKT(hSRS C.OGRSpatialReferenceH) string {
+	if hSRS == nil {
+		return ""
+	}
+
+	var pszWKT *C.char
+	err := C.OSRExportToWkt(hSRS, &pszWKT)
+	if err != C.OGRERR_NONE || pszWKT == nil {
+		return ""
+	}
+	defer C.CPLFree(unsafe.Pointer(pszWKT))
+
+	return C.GoString(pszWKT)
+}
+
+// getSRSProj4 获取空间参考的Proj4表示
+func getSRSProj4(hSRS C.OGRSpatialReferenceH) string {
+	if hSRS == nil {
+		return ""
+	}
+
+	var pszProj4 *C.char
+	err := C.OSRExportToProj4(hSRS, &pszProj4)
+	if err != C.OGRERR_NONE || pszProj4 == nil {
+		return ""
+	}
+	defer C.CPLFree(unsafe.Pointer(pszProj4))
+
+	return C.GoString(pszProj4)
+}
