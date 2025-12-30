@@ -134,40 +134,52 @@ func GetWKTFromEPSG(epsg int) (string, error) {
 // GenerateFeatureDatasetDefinitionXML 生成要素数据集的Definition XML
 func (m *GDBFeatureDatasetMetadata) GenerateFeatureDatasetDefinitionXML() string {
 	var sb strings.Builder
-
-	// 根元素开始
-	sb.WriteString("<DEFeatureDataset xsi:type='typens:DEFeatureDataset' ")
-	sb.WriteString("xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' ")
-	sb.WriteString("xmlns:xs='http://www.w3.org/2001/XMLSchema' ")
-	sb.WriteString("xmlns:typens='http://www.esri.com/schemas/ArcGIS/10.6'>")
-
-	// 基本信息
+	// 根元素 - 注意命名空间版本
+	sb.WriteString(`<DEFeatureDataset xsi:type="typens:DEFeatureDataset" `)
+	sb.WriteString(`xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" `)
+	sb.WriteString(`xmlns:xs="http://www.w3.org/2001/XMLSchema" `)
+	sb.WriteString(`xmlns:typens="http://www.esri.com/schemas/ArcGIS/10.8">`) // 版本号可能需要调整
+	// CatalogPath - 必须是完整路径
 	catalogPath := "\\" + m.Name
 	sb.WriteString(fmt.Sprintf("<CatalogPath>%s</CatalogPath>", escapeXMLString(catalogPath)))
 	sb.WriteString(fmt.Sprintf("<Name>%s</Name>", escapeXMLString(m.Name)))
 	sb.WriteString("<ChildrenExpanded>false</ChildrenExpanded>")
 	sb.WriteString("<DatasetType>esriDTFeatureDataset</DatasetType>")
+
+	// DSID 必须大于0
 	sb.WriteString(fmt.Sprintf("<DSID>%d</DSID>", m.DSID))
+
 	sb.WriteString("<Versioned>false</Versioned>")
 	sb.WriteString("<CanVersion>false</CanVersion>")
 	sb.WriteString("<ConfigurationKeyword></ConfigurationKeyword>")
 	sb.WriteString("<RequiredGeodatabaseClientVersion>10.0</RequiredGeodatabaseClientVersion>")
-
-	// Extent (空)
-	sb.WriteString("<Extent xsi:nil='true'/>")
-
-	// SpatialReference
+	sb.WriteString("<HasOID>false</HasOID>") // 添加这个
+	// Extent - ArcGIS 可能需要有效的 Extent 而不是 nil
+	m.writeExtentForDataset(&sb)
+	// SpatialReference - 这是关键部分
 	if m.SpatialReference != nil {
 		m.writeSpatialReferenceForDataset(&sb)
 	}
-
-	// ChangeTracked
 	sb.WriteString("<ChangeTracked>false</ChangeTracked>")
-
-	// 根元素结束
 	sb.WriteString("</DEFeatureDataset>")
-
 	return sb.String()
+}
+func (m *GDBFeatureDatasetMetadata) writeExtentForDataset(sb *strings.Builder) {
+	if m.SpatialReference == nil {
+		sb.WriteString("<Extent xsi:nil=\"true\"/>")
+		return
+	}
+
+	// 写入一个空的 Extent 但带有空间参考
+	sb.WriteString("<Extent xsi:type=\"typens:EnvelopeN\">")
+	sb.WriteString("<XMin>0</XMin>")
+	sb.WriteString("<YMin>0</YMin>")
+	sb.WriteString("<XMax>0</XMax>")
+	sb.WriteString("<YMax>0</YMax>")
+	// Extent 内也需要空间参考
+	m.writeSpatialReferenceForDataset(sb)
+
+	sb.WriteString("</Extent>")
 }
 
 // writeSpatialReferenceForDataset 写入要素数据集的空间参考
@@ -175,49 +187,53 @@ func (m *GDBFeatureDatasetMetadata) writeSpatialReferenceForDataset(sb *strings.
 	if m.SpatialReference == nil {
 		return
 	}
-
 	sr := m.SpatialReference
-
 	// 根据是否为投影坐标系选择类型
 	srType := "typens:GeographicCoordinateSystem"
 	if sr.IsProjected {
 		srType = "typens:ProjectedCoordinateSystem"
 	}
-
-	sb.WriteString(fmt.Sprintf("<SpatialReference xsi:type='%s'>", srType))
-
-	// WKT
+	sb.WriteString(fmt.Sprintf("<SpatialReference xsi:type=\"%s\">", srType))
+	// WKT - 必须正确转义
 	if sr.WKT != "" {
-		sb.WriteString(fmt.Sprintf("<WKT>%s</WKT>", escapeWKT(sr.WKT)))
+		sb.WriteString(fmt.Sprintf("<WKT>%s</WKT>", escapeXMLForWKT(sr.WKT)))
 	}
-
-	// 精度参数
-	sb.WriteString(fmt.Sprintf("<XOrigin>%v</XOrigin>", sr.XOrigin))
-	sb.WriteString(fmt.Sprintf("<YOrigin>%v</YOrigin>", sr.YOrigin))
-	sb.WriteString(fmt.Sprintf("<XYScale>%v</XYScale>", sr.XYScale))
-	sb.WriteString(fmt.Sprintf("<ZOrigin>%v</ZOrigin>", sr.ZOrigin))
-	sb.WriteString(fmt.Sprintf("<ZScale>%v</ZScale>", sr.ZScale))
-	sb.WriteString(fmt.Sprintf("<MOrigin>%v</MOrigin>", sr.MOrigin))
-	sb.WriteString(fmt.Sprintf("<MScale>%v</MScale>", sr.MScale))
-	sb.WriteString(fmt.Sprintf("<XYTolerance>%v</XYTolerance>", sr.XYTolerance))
-	sb.WriteString(fmt.Sprintf("<ZTolerance>%v</ZTolerance>", sr.ZTolerance))
-	sb.WriteString(fmt.Sprintf("<MTolerance>%v</MTolerance>", sr.MTolerance))
+	// 精度参数 - 顺序很重要！
+	sb.WriteString(fmt.Sprintf("<XOrigin>%.15g</XOrigin>", sr.XOrigin))
+	sb.WriteString(fmt.Sprintf("<YOrigin>%.15g</YOrigin>", sr.YOrigin))
+	sb.WriteString(fmt.Sprintf("<XYScale>%.15g</XYScale>", sr.XYScale))
+	sb.WriteString(fmt.Sprintf("<ZOrigin>%.15g</ZOrigin>", sr.ZOrigin))
+	sb.WriteString(fmt.Sprintf("<ZScale>%.15g</ZScale>", sr.ZScale))
+	sb.WriteString(fmt.Sprintf("<MOrigin>%.15g</MOrigin>", sr.MOrigin))
+	sb.WriteString(fmt.Sprintf("<MScale>%.15g</MScale>", sr.MScale))
+	sb.WriteString(fmt.Sprintf("<XYTolerance>%.15g</XYTolerance>", sr.XYTolerance))
+	sb.WriteString(fmt.Sprintf("<ZTolerance>%.15g</ZTolerance>", sr.ZTolerance))
+	sb.WriteString(fmt.Sprintf("<MTolerance>%.15g</MTolerance>", sr.MTolerance))
 	sb.WriteString(fmt.Sprintf("<HighPrecision>%s</HighPrecision>", boolToString(sr.HighPrecision)))
-
-	// 地理坐标系特有的LeftLongitude
+	// 地理坐标系特有参数
 	if !sr.IsProjected {
 		sb.WriteString("<LeftLongitude>-180</LeftLongitude>")
 	}
-
-	// WKID
+	// WKID - 必须在 LatestWKID 之前
 	if sr.WKID > 0 {
 		sb.WriteString(fmt.Sprintf("<WKID>%d</WKID>", sr.WKID))
 	}
 	if sr.LatestWKID > 0 {
 		sb.WriteString(fmt.Sprintf("<LatestWKID>%d</LatestWKID>", sr.LatestWKID))
 	}
-
+	// VCS (垂直坐标系) - 可能需要
+	sb.WriteString("<VCSWKID>0</VCSWKID>")
+	sb.WriteString("<LatestVCSWKID>0</LatestVCSWKID>")
 	sb.WriteString("</SpatialReference>")
+}
+func escapeXMLForWKT(wkt string) string {
+	// 替换特殊字符
+	wkt = strings.ReplaceAll(wkt, "&", "&amp;")
+	wkt = strings.ReplaceAll(wkt, "<", "&lt;")
+	wkt = strings.ReplaceAll(wkt, ">", "&gt;")
+	wkt = strings.ReplaceAll(wkt, "\"", "&quot;")
+	wkt = strings.ReplaceAll(wkt, "'", "&apos;")
+	return wkt
 }
 
 // =====================================================
@@ -417,13 +433,21 @@ func CreateFeatureDataset(gdbPath string, metadata *GDBFeatureDatasetMetadata) e
 	}
 
 	// 设置各字段
+	setStringField("UUID", datasetUUID)
+	setStringField("Type", GDBItemTypeFeatureDataset)
 	setStringField("Name", metadata.Name)
 	setStringField("PhysicalName", strings.ToUpper(metadata.Name))
 	setStringField("Path", "\\"+metadata.Name)
-	setStringField("UUID", datasetUUID)
-	setStringField("Type", GDBItemTypeFeatureDataset)
+	setStringField("Url", "") // 空字符串而不是 NULL
 	setStringField("Definition", definitionXML)
+	setStringField("Documentation", "") // 空字符串
+	setStringField("ItemInfo", "")      // 空字符串
 	setIntField("Properties", 1)
+	setStringField("Defaults", "")        // 空字符串
+	setStringField("DatasetSubtype1", "") // 可能需要
+	setStringField("DatasetSubtype2", "") // 可能需要
+	setStringField("DatasetInfo1", "")    // 可能需要
+	setStringField("DatasetInfo2", "")    // 可能需要
 
 	// 创建要素
 	if C.OGR_L_CreateFeature(hLayer, hFeature) != 0 {
