@@ -17,9 +17,16 @@ import (
 
 // 用于生成唯一ID
 var (
-	tileCounter uint64
-	gdalMutex   sync.Mutex // GDAL 全局锁，防止并发问题
+	tileCounter  uint64
+	gdalMutex    sync.Mutex // GDAL 全局锁
+	gdalInitOnce sync.Once
 )
+
+func InitGDALOnce() {
+	gdalInitOnce.Do(func() {
+		InitializeGDAL()
+	})
+}
 
 // ImageProcessor GDAL图像处理器
 type ImageProcessor struct {
@@ -29,20 +36,20 @@ type ImageProcessor struct {
 	bands       int
 	tileImages  []C.GDALDatasetH
 	vsimemPaths []string
-	memBuffers  []unsafe.Pointer // 保存所有分配的内存
-	mu          sync.Mutex       // 实例级别锁
+	memBuffers  []unsafe.Pointer
+	mu          sync.Mutex
 	closed      bool
+	id          uint64 // 用于调试
 }
 
 func NewImageProcessor(width, height, bands int) (*ImageProcessor, error) {
 	if width <= 0 || height <= 0 || bands <= 0 {
 		return nil, errors.New("invalid dimensions")
 	}
-	// 限制最大尺寸，防止内存溢出
-	if width > 8192 || height > 8192 {
-		return nil, errors.New("dimensions too large, max 8192x8192")
+	if width > 4096 || height > 4096 {
+		return nil, errors.New("dimensions too large, max 4096x4096")
 	}
-	InitializeGDAL()
+	InitGDALOnce()
 	gdalMutex.Lock()
 	canvasDS := C.createBlankMemDataset(C.int(width), C.int(height), C.int(bands))
 	gdalMutex.Unlock()
@@ -57,8 +64,8 @@ func NewImageProcessor(width, height, bands int) (*ImageProcessor, error) {
 		tileImages:  make([]C.GDALDatasetH, 0, 16),
 		vsimemPaths: make([]string, 0, 16),
 		memBuffers:  make([]unsafe.Pointer, 0, 16),
+		id:          atomic.AddUint64(&tileCounter, 1),
 	}
-	// 设置 finalizer 作为安全网
 	runtime.SetFinalizer(p, func(proc *ImageProcessor) {
 		proc.Close()
 	})
@@ -87,52 +94,48 @@ func (p *ImageProcessor) AddTileFromBuffer(data []byte, format string, dstX, dst
 	if p.canvasDS == nil {
 		return errors.New("canvas dataset is nil")
 	}
-	// 验证目标坐标
 	if dstX < 0 || dstY < 0 || dstX >= p.width || dstY >= p.height {
 		return fmt.Errorf("invalid destination coordinates: (%d, %d)", dstX, dstY)
 	}
 	tileID := atomic.AddUint64(&tileCounter, 1)
-	vsimemPath := fmt.Sprintf("/vsimem/tile_%d_%d.%s", tileID, time.Now().UnixNano(), format)
-	// 分配 C 内存并复制数据（关键修复：不使用 defer 释放）
+	vsimemPath := fmt.Sprintf("/vsimem/proc_%d_tile_%d_%d.%s",
+		p.id, tileID, time.Now().UnixNano(), format)
+	// 分配 C 内存
 	cData := C.malloc(C.size_t(len(data)))
 	if cData == nil {
 		return errors.New("failed to allocate memory")
 	}
-
-	// 复制数据到 C 内存
+	// 复制数据
 	C.memcpy(cData, unsafe.Pointer(&data[0]), C.size_t(len(data)))
-
-	// 保存指针，稍后在 Close 时释放
 	p.memBuffers = append(p.memBuffers, cData)
 	cVsimemPath := C.CString(vsimemPath)
 	defer C.free(unsafe.Pointer(cVsimemPath))
+	// 所有 GDAL 操作都在全局锁内
 	gdalMutex.Lock()
-	// 创建 vsimem 文件（设置 bTakeOwnership 为 FALSE，我们自己管理内存）
-	fp := C.VSIFileFromMemBuffer(cVsimemPath, (*C.GByte)(cData), C.vsi_l_offset(len(data)), C.FALSE)
+	defer gdalMutex.Unlock()
+	// 创建 vsimem 文件
+	fp := C.VSIFileFromMemBuffer(cVsimemPath, (*C.GByte)(cData),
+		C.vsi_l_offset(len(data)), C.FALSE)
 	if fp == nil {
-		gdalMutex.Unlock()
 		return errors.New("failed to create vsimem file")
 	}
 	C.VSIFCloseL(fp)
 	p.vsimemPaths = append(p.vsimemPaths, vsimemPath)
 	// 打开数据集
 	hDS := C.GDALOpen(cVsimemPath, C.GA_ReadOnly)
-	gdalMutex.Unlock()
 	if hDS == nil {
 		return fmt.Errorf("failed to open tile, format: %s", format)
 	}
 	p.tileImages = append(p.tileImages, hDS)
 	tileWidth := C.GDALGetRasterXSize(hDS)
 	tileHeight := C.GDALGetRasterYSize(hDS)
-	// 验证瓦片尺寸
 	if tileWidth <= 0 || tileHeight <= 0 {
 		return errors.New("invalid tile dimensions")
 	}
-	gdalMutex.Lock()
+	// 复制到画布
 	result := C.copyTileToCanvas(hDS, p.canvasDS,
 		0, 0, tileWidth, tileHeight,
 		C.int(dstX), C.int(dstY))
-	gdalMutex.Unlock()
 	if result != 0 {
 		return fmt.Errorf("failed to copy tile: error code %d", result)
 	}
@@ -203,7 +206,6 @@ func (p *ImageProcessor) CropAndExport(cropX, cropY, cropWidth, cropHeight int, 
 	if p.canvasDS == nil {
 		return nil, errors.New("canvas dataset is nil")
 	}
-	// 参数验证
 	if cropWidth <= 0 || cropHeight <= 0 {
 		return nil, errors.New("invalid crop dimensions")
 	}
@@ -211,8 +213,7 @@ func (p *ImageProcessor) CropAndExport(cropX, cropY, cropWidth, cropHeight int, 
 		return nil, errors.New("invalid crop position")
 	}
 	if cropX+cropWidth > p.width || cropY+cropHeight > p.height {
-		return nil, fmt.Errorf("crop area exceeds canvas: crop(%d,%d,%d,%d) canvas(%d,%d)",
-			cropX, cropY, cropWidth, cropHeight, p.width, p.height)
+		return nil, fmt.Errorf("crop area exceeds canvas")
 	}
 	var outData *C.uchar
 	var outLen C.int
@@ -229,10 +230,10 @@ func (p *ImageProcessor) CropAndExport(cropX, cropY, cropWidth, cropHeight int, 
 	if outData == nil || outLen <= 0 {
 		return nil, errors.New("export returned empty data")
 	}
-	// 复制数据到 Go 切片
-	data := C.GoBytes(unsafe.Pointer(outData), outLen)
+	// 复制到 Go 内存
+	goData := C.GoBytes(unsafe.Pointer(outData), outLen)
 	C.free(unsafe.Pointer(outData))
-	return data, nil
+	return goData, nil
 }
 
 // Export 导出整个画布
@@ -322,7 +323,6 @@ func (p *ImageProcessor) Clear() error {
 	return nil
 }
 
-// Close 关闭处理器并释放资源
 func (p *ImageProcessor) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -332,32 +332,31 @@ func (p *ImageProcessor) Close() {
 	p.closed = true
 	gdalMutex.Lock()
 	defer gdalMutex.Unlock()
-	// 1. 先关闭所有瓦片数据集
+	// 1. 关闭瓦片数据集
 	for _, ds := range p.tileImages {
 		if ds != nil {
 			C.closeDataset(ds)
 		}
 	}
 	p.tileImages = nil
-	// 2. 清理 vsimem 文件
+	// 2. 删除 vsimem 文件
 	for _, path := range p.vsimemPaths {
 		cPath := C.CString(path)
 		C.VSIUnlink(cPath)
 		C.free(unsafe.Pointer(cPath))
 	}
 	p.vsimemPaths = nil
-	// 3. 释放所有分配的 C 内存
+	// 3. 释放 C 内存
 	for _, buf := range p.memBuffers {
 		if buf != nil {
 			C.free(buf)
 		}
 	}
 	p.memBuffers = nil
-	// 4. 最后关闭画布
+	// 4. 关闭画布
 	if p.canvasDS != nil {
 		C.closeDataset(p.canvasDS)
 		p.canvasDS = nil
 	}
-	// 移除 finalizer
 	runtime.SetFinalizer(p, nil)
 }
