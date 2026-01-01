@@ -17,16 +17,9 @@ import (
 
 // 用于生成唯一ID
 var (
-	tileCounter  uint64
-	gdalMutex    sync.Mutex // GDAL 全局锁
-	gdalInitOnce sync.Once
+	tileCounter uint64
+	gdalMutex   sync.Mutex // GDAL 全局锁
 )
-
-func InitGDALOnce() {
-	gdalInitOnce.Do(func() {
-		InitializeGDAL()
-	})
-}
 
 // ImageProcessor GDAL图像处理器
 type ImageProcessor struct {
@@ -49,7 +42,7 @@ func NewImageProcessor(width, height, bands int) (*ImageProcessor, error) {
 	if width > 4096 || height > 4096 {
 		return nil, errors.New("dimensions too large, max 4096x4096")
 	}
-	InitGDALOnce()
+
 	gdalMutex.Lock()
 	canvasDS := C.createBlankMemDataset(C.int(width), C.int(height), C.int(bands))
 	gdalMutex.Unlock()

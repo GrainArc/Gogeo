@@ -13,8 +13,6 @@ import (
 // shpPath: Shapefile文件路径（.shp文件）
 // fid: 要删除的要素ID
 func DeleteShapeFeatureByFID(shpPath string, fid int64) error {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -60,8 +58,6 @@ func DeleteShapeFeatureByFID(shpPath string, fid int64) error {
 // shpPath: Shapefile文件路径
 // whereClause: SQL WHERE条件，如 "ID > 100" 或 "NAME = 'test'"
 func DeleteShapeFeaturesByFilter(shpPath string, whereClause string) (int, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -146,9 +142,6 @@ func InsertLayerToShapefile(sourceLayer *GDALLayer, shpPath string, options *Ins
 	if sourceLayer == nil || sourceLayer.layer == nil {
 		return fmt.Errorf("源图层为空")
 	}
-
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -325,7 +318,6 @@ func InsertLayerToShapefile(sourceLayer *GDALLayer, shpPath string, options *Ins
 // shpPath: Shapefile文件路径
 // 注意：此操作会重建Shapefile，FID可能会改变
 func PackShapefile(shpPath string) error {
-	InitializeGDAL()
 
 	cFilePath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -363,8 +355,6 @@ func PackShapefile(shpPath string) error {
 // shpPath: Shapefile文件路径
 // 返回: 是否创建了新字段, error
 func EnsureObjectIDField(shpPath string) (bool, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -519,8 +509,6 @@ func EnsureObjectIDField(shpPath string) (bool, error) {
 // shpPath: SHP文件路径
 // 返回: EPSG代码（如果无法识别则返回0）, 错误信息
 func GetSHPEPSGCode(shpPath string) (int, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cPath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -557,8 +545,6 @@ func GetSHPEPSGCode(shpPath string) (int, error) {
 // shpPath: SHP文件路径
 // 返回: GDBSpatialReference结构体, 错误信息
 func GetSHPSpatialReference(shpPath string) (*GDBSpatialReference, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cPath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cPath))

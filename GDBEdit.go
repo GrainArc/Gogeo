@@ -14,8 +14,6 @@ import (
 // layerName: 图层名称
 // objectID: 要删除的ObjectID
 func DeleteFeatureByObjectID(gdbPath string, layerName string, objectID int64) error {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -118,8 +116,6 @@ func deleteFeatureByQuery(layer C.OGRLayerH, objectID int64) error {
 // layerName: 图层名称
 // whereClause: SQL WHERE条件，如 "OBJECTID = 0" 或 "OBJECTID IN (0, 1, 2)"
 func DeleteFeaturesByFilter(gdbPath string, layerName string, whereClause string) (int, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -205,9 +201,6 @@ func InsertLayerToGDB(sourceLayer *GDALLayer, gdbPath string, targetLayerName st
 	if sourceLayer == nil || sourceLayer.layer == nil {
 		return fmt.Errorf("源图层为空")
 	}
-
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -543,8 +536,6 @@ const (
 // layerName: 图层名称
 // fieldDef: 字段定义
 func AddField(gdbPath string, layerName string, fieldDef FieldDefinition) error {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -631,8 +622,6 @@ func AddField(gdbPath string, layerName string, fieldDef FieldDefinition) error 
 // layerName: 图层名称
 // fieldName: 要删除的字段名称
 func DeleteField(gdbPath string, layerName string, fieldName string) error {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -768,8 +757,6 @@ type SyncResult struct {
 // gdbLayerName: GDB图层名称
 // options: 同步选项
 func SyncFieldFromPostGIS(postGISConfig *PostGISConfig, gdbPath string, gdbLayerName string, options *SyncFieldOptions) (*SyncResult, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 设置默认选项
 	if options == nil {
@@ -1335,8 +1322,6 @@ func validateFieldsWithFID(sourceLayer, targetLayer C.OGRLayerH, options *SyncFi
 // gdbLayerName: GDB目标图层名称
 // options: 导入选项（可选）
 func ImportPostGISToGDB(postGISConfig *PostGISConfig, gdbPath string, gdbLayerName string, options *ImportToGDBOptions) (*ImportResult, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 设置默认选项
 	if options == nil {
@@ -1855,8 +1840,6 @@ func copyImportFieldValue(sourceFeature, targetFeature C.OGRFeatureH,
 // ImportPostGISToNewGDBLayer 将PostGIS数据表导入到GDB文件，创建新图层
 // 如果图层已存在，根据选项决定是覆盖还是追加
 func ImportPostGISToNewGDBLayer(postGISConfig *PostGISConfig, gdbPath string, layerName string, options *ImportToGDBOptions) (*ImportResult, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 设置默认选项
 	if options == nil {
@@ -2191,9 +2174,6 @@ func ImportGDALLayerToGDB(sourceLayer *GDALLayer, gdbPath string, gdbLayerName s
 		return nil, fmt.Errorf("源图层为空")
 	}
 
-	// 初始化GDAL
-	InitializeGDAL()
-
 	// 设置默认选项
 	if options == nil {
 		options = &ImportToGDBOptions{}
@@ -2340,7 +2320,6 @@ func ImportGDALLayerToGDB(sourceLayer *GDALLayer, gdbPath string, gdbLayerName s
 // gdbPath: GDB文件路径
 // layerName: 要删除的图层名称
 func DeleteLayer(gdbPath string, layerName string) error { // 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -2399,8 +2378,6 @@ func DeleteLayer(gdbPath string, layerName string) error { // 初始化GDAL
 // gdbPath: GDB文件路径
 // layerIndex: 图层索引（从0开始）
 func DeleteLayerByIndex(gdbPath string, layerIndex int) error {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -2445,8 +2422,6 @@ func DeleteLayerByIndex(gdbPath string, layerIndex int) error {
 // layerNames: 要删除的图层名称列表
 // continueOnError: 遇到错误是否继续删除其他图层
 func DeleteMultipleLayers(gdbPath string, layerNames []string, continueOnError bool) (int, []error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -2517,8 +2492,6 @@ func DeleteMultipleLayers(gdbPath string, layerNames []string, continueOnError b
 // gdbPath: GDB文件路径
 // layerName: 图层名称
 func LayerExists(gdbPath string, layerName string) (bool, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -2541,8 +2514,6 @@ func LayerExists(gdbPath string, layerName string) (bool, error) {
 // GetLayerNames 获取GDB文件中所有图层的名称
 // gdbPath: GDB文件路径
 func GetLayerNames(gdbPath string) ([]string, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cFilePath))

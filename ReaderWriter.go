@@ -58,7 +58,7 @@ func NewPostGISReader(config *PostGISConfig) *PostGISReader {
 // ReadGeometryTable 读取PostGIS几何表数据
 func (r *PostGISReader) ReadGeometryTable() (*GDALLayer, error) {
 	// 初始化GDAL
-	InitializeGDAL()
+
 	// 构建连接字符串
 	connStr := fmt.Sprintf("PG:host=%s port=%s dbname=%s user=%s password=%s",
 		r.config.Host, r.config.Port, r.config.Database,
@@ -184,9 +184,6 @@ func (r *FileGeoReader) ReadShapeFile(layerName ...string) (*GDALLayer, error) {
 		return nil, fmt.Errorf("文件类型不是Shapefile: %s", r.FileType)
 	}
 
-	// 初始化GDAL
-	InitializeGDAL()
-
 	cFilePath := C.CString(r.FilePath)
 	defer C.free(unsafe.Pointer(cFilePath))
 
@@ -238,9 +235,6 @@ func (r *FileGeoReader) ReadGDBFile(layerName ...string) (*GDALLayer, error) {
 	if r.FileType != "gdb" {
 		return nil, fmt.Errorf("文件类型不是GDB: %s", r.FileType)
 	}
-
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(r.FilePath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -314,8 +308,6 @@ func (r *FileGeoReader) ReadLayer(layerName ...string) (*GDALLayer, error) {
 
 // ListLayers 列出所有图层
 func (r *FileGeoReader) ListLayers() ([]string, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cFilePath := C.CString(r.FilePath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -483,8 +475,6 @@ func (w *FileGeoWriter) WriteShapeFile(sourceLayer *GDALLayer, layerName string)
 		return fmt.Errorf("文件类型不是Shapefile: %s", w.FileType)
 	}
 
-	// 初始化GDAL
-	InitializeGDAL()
 	// 设置Shapefile编码为GBK/GB2312（中文Windows系统）
 	C.CPLSetConfigOption(C.CString("SHAPE_ENCODING"), C.CString("GBK"))
 	defer C.CPLSetConfigOption(C.CString("SHAPE_ENCODING"), nil)
@@ -543,9 +533,6 @@ func (w *FileGeoWriter) WriteGDBFile(sourceLayer *GDALLayer, layerName string) e
 	if w.FileType != "gdb" {
 		return fmt.Errorf("文件类型不是GDB: %s", w.FileType)
 	}
-
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 获取FileGDB驱动
 	driver := C.OGRGetDriverByName(C.CString("OpenFileGDB"))
@@ -1286,8 +1273,6 @@ func (r *FileGeoReader) ReadGeoJSONFile(layerName ...string) (*GDALLayer, error)
 		return nil, fmt.Errorf("文件类型不是GeoJSON: %s", r.FileType)
 	}
 
-	InitializeGDAL()
-
 	cFilePath := C.CString(r.FilePath)
 	defer C.free(unsafe.Pointer(cFilePath))
 
@@ -1338,8 +1323,6 @@ func (r *FileGeoReader) ReadDXFFile(layerName ...string) (*GDALLayer, error) {
 		return nil, fmt.Errorf("文件类型不是DXF: %s", r.FileType)
 	}
 
-	InitializeGDAL()
-
 	cFilePath := C.CString(r.FilePath)
 	defer C.free(unsafe.Pointer(cFilePath))
 
@@ -1389,8 +1372,6 @@ func (r *FileGeoReader) ReadKMLFile(layerName ...string) (*GDALLayer, error) {
 	if r.FileType != "kml" {
 		return nil, fmt.Errorf("文件类型不是KML: %s", r.FileType)
 	}
-
-	InitializeGDAL()
 
 	cFilePath := C.CString(r.FilePath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -1444,8 +1425,6 @@ func (r *FileGeoReader) ReadKMZFile(layerName ...string) (*GDALLayer, error) {
 	if r.FileType != "kmz" {
 		return nil, fmt.Errorf("文件类型不是KMZ: %s", r.FileType)
 	}
-
-	InitializeGDAL()
 
 	// KMZ文件需要使用/vsizip/前缀访问
 	kmzPath := fmt.Sprintf("/vsizip/%s", r.FilePath)
@@ -1501,8 +1480,6 @@ func (w *FileGeoWriter) WriteGeoJSONFile(sourceLayer *GDALLayer, layerName strin
 	if w.FileType != "geojson" {
 		return fmt.Errorf("文件类型不是GeoJSON: %s", w.FileType)
 	}
-
-	InitializeGDAL()
 
 	// GeoJSON默认使用UTF-8编码
 	C.CPLSetConfigOption(C.CString("ENCODING"), C.CString("UTF-8"))
@@ -1568,8 +1545,6 @@ func (w *FileGeoWriter) WriteDXFFile(sourceLayer *GDALLayer, layerName string) e
 		return fmt.Errorf("文件类型不是DXF: %s", w.FileType)
 	}
 
-	InitializeGDAL()
-
 	if w.Overwrite {
 		if _, err := os.Stat(w.FilePath); err == nil {
 			os.Remove(w.FilePath)
@@ -1621,8 +1596,6 @@ func (w *FileGeoWriter) WriteKMLFile(sourceLayer *GDALLayer, layerName string) e
 	if w.FileType != "kml" {
 		return fmt.Errorf("文件类型不是KML: %s", w.FileType)
 	}
-
-	InitializeGDAL()
 
 	if w.Overwrite {
 		if _, err := os.Stat(w.FilePath); err == nil {
@@ -1683,8 +1656,6 @@ func (w *FileGeoWriter) WriteKMZFile(sourceLayer *GDALLayer, layerName string) e
 	if w.FileType != "kmz" {
 		return fmt.Errorf("文件类型不是KMZ: %s", w.FileType)
 	}
-
-	InitializeGDAL()
 
 	if w.Overwrite {
 		if _, err := os.Stat(w.FilePath); err == nil {

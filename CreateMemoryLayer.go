@@ -26,7 +26,6 @@ const (
 
 // CreateMemoryLayer 创建内存图层
 func CreateMemoryLayer(layerName string, geomType GeomType) (*GDALLayer, error) {
-	InitializeGDAL()
 
 	driverName := C.CString("Memory")
 	defer C.free(unsafe.Pointer(driverName))

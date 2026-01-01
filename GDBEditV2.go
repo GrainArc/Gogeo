@@ -110,8 +110,7 @@ func (opts *ImportToGDBOptionsV2) WithCGCS2000_3DegreeByCM(centralMeridian int) 
 // =====================================================
 // ImportPostGISToNewGDBLayerV2 将PostGIS数据表导入到GDB文件，创建新图层（支持目标坐标系）
 func ImportPostGISToNewGDBLayerV2(postGISConfig *PostGISConfig, gdbPath string, layerName string, options *ImportToGDBOptionsV2) (*ImportResult, error) {
-	// 初始化GDAL
-	InitializeGDAL()
+
 	// 设置默认选项
 	if options == nil {
 		options = NewImportToGDBOptionsV2()
@@ -300,8 +299,7 @@ func ImportPostGISToNewGDBLayerV2(postGISConfig *PostGISConfig, gdbPath string, 
 
 // ImportPostGISToGDBV2 将PostGIS数据表导入到GDB文件的指定图层（支持目标坐标系）
 func ImportPostGISToGDBV2(postGISConfig *PostGISConfig, gdbPath string, gdbLayerName string, options *ImportToGDBOptionsV2) (*ImportResult, error) {
-	// 初始化GDAL
-	InitializeGDAL()
+
 	// 设置默认选项
 	if options == nil {
 		options = NewImportToGDBOptionsV2()
@@ -485,8 +483,7 @@ func ImportGDALLayerToGDBV2(sourceLayer *GDALLayer, gdbPath string, gdbLayerName
 	if sourceLayer == nil || sourceLayer.layer == nil {
 		return nil, fmt.Errorf("源图层为空")
 	}
-	// 初始化GDAL
-	InitializeGDAL()
+
 	// 设置默认选项
 	if options == nil {
 		options = NewImportToGDBOptionsV2()

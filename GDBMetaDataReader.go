@@ -143,8 +143,6 @@ type GPFieldInfoEx struct {
 // gdbPath: GDB文件路径
 // 返回: GDBLayerMetadataCollection 包含所有图层的元数据信息
 func ReadGDBLayerMetadata(gdbPath string) (*GDBLayerMetadataCollection, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -693,8 +691,6 @@ func (c *GDBLayerMetadataCollection) GetAllFieldAliases() map[string]map[string]
 // outputPath: 输出文件路径（如果为空，则在GDB同级目录生成）
 // 返回: 保存的文件路径和错误信息
 func SaveGDBDefinitionsToFile(gdbPath string, outputPath string) (string, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))

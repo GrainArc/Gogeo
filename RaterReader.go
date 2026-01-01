@@ -44,7 +44,6 @@ type DatasetInfo struct {
 func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 	cPath := C.CString(imagePath)
 	defer C.free(unsafe.Pointer(cPath))
-	InitializeGDAL()
 
 	// 打开数据集
 	dataset := C.GDALOpen(cPath, C.GA_ReadOnly)

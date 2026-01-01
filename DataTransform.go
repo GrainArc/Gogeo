@@ -26,8 +26,6 @@ type GeoJsonLayers struct {
 }
 
 func GDBToGeoJSON(gdbPath string) ([]GeoJsonLayers, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	var layers []GeoJsonLayers
 
@@ -511,7 +509,6 @@ type FeatureData struct {
 // GDBToPostGIS 直接将GDB转换为PostGIS可用的数据结构
 // targetLayers: 指定要导入的图层名称列表，如果为空或nil则导入所有图层
 func GDBToPostGIS(gdbPath string, targetLayers []string) ([]GDBLayerInfo, error) {
-	InitializeGDAL()
 
 	var layers []GDBLayerInfo
 
@@ -841,9 +838,6 @@ func ConvertPostGISToShapefile(data []map[string]interface{}, outputPath string)
 		return fmt.Errorf("没有数据需要转换")
 	}
 
-	// 初始化GDAL
-	InitializeGDAL()
-
 	// 分析数据结构，按几何类型分组
 	layers := analyzeAndGroupData(data)
 
@@ -997,9 +991,6 @@ func ConvertPostGISToShapefileWithStructure(DB *gorm.DB, data []map[string]inter
 	if err != nil {
 		return fmt.Errorf("获取表结构失败: %v", err)
 	}
-
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 使用表结构分析和分组数据
 	layers := analyzeAndGroupDataWithStructure(data, tableStructure)
@@ -1579,7 +1570,6 @@ type SHPLayerInfo struct {
 
 // SHPToPostGIS 将SHP文件转换为PostGIS格式
 func SHPToPostGIS(shpPath string) (SHPLayerInfo, error) {
-	InitializeGDAL()
 
 	var layer SHPLayerInfo
 

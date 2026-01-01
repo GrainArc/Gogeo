@@ -105,7 +105,6 @@ func ConvertGDBSpatialReferenceToWrite(srs *GDBSpatialReference) *GDBSpatialRefe
 
 // GetWKTFromEPSG 从EPSG代码获取WKT字符串
 func GetWKTFromEPSG(epsg int) (string, error) {
-	InitializeGDAL()
 
 	hSRS := C.OSRNewSpatialReference(nil)
 	if hSRS == nil {
@@ -269,7 +268,6 @@ func generateRandomUUID() string {
 
 // GetNextDSID 获取下一个可用的DSID
 func GetNextDSID(gdbPath string) (int, error) {
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -358,7 +356,6 @@ func FeatureDatasetExists(gdbPath string, datasetName string) (bool, error) {
 
 // CreateFeatureDataset 在GDB中创建要素数据集
 func CreateFeatureDataset(gdbPath string, metadata *GDBFeatureDatasetMetadata) error {
-	InitializeGDAL()
 
 	// 检查是否已存在
 	exists, err := FeatureDatasetExists(gdbPath, metadata.Name)
@@ -552,7 +549,6 @@ func QuickCreateFeatureDatasetWithEPSG(gdbPath string, datasetName string, epsg 
 
 // ListFeatureDatasets 列出GDB中的所有要素数据集
 func ListFeatureDatasets(gdbPath string) ([]string, error) {
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -607,7 +603,6 @@ func ListFeatureDatasets(gdbPath string) ([]string, error) {
 
 // GetFeatureDatasetInfo 获取要素数据集的详细信息
 func GetFeatureDatasetInfo(gdbPath string, datasetName string) (*GDBFeatureDatasetMetadata, error) {
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -663,7 +658,6 @@ func GetFeatureDatasetInfo(gdbPath string, datasetName string) (*GDBFeatureDatas
 // DeleteFeatureDataset 删除要素数据集
 // 注意：这只会删除GDB_Items中的记录，不会删除数据集中的要素类
 func DeleteFeatureDataset(gdbPath string, datasetName string) error {
-	InitializeGDAL()
 
 	// 获取要素数据集的UUID
 	datasetUUID, err := GetGDBItemUUID(gdbPath, datasetName)
@@ -861,7 +855,6 @@ func MoveLayerToFeatureDataset(gdbPath string, layerName string, datasetName str
 
 // GetLayersInFeatureDataset 获取要素数据集中的所有图层
 func GetLayersInFeatureDataset(gdbPath string, datasetName string) ([]string, error) {
-	InitializeGDAL()
 
 	// 获取要素数据集的UUID
 	datasetUUID, err := GetGDBItemUUID(gdbPath, datasetName)

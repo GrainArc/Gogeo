@@ -668,8 +668,6 @@ func (m *GDBLayerMetadataWrite) writeSpatialReference(sb *strings.Builder) {
 // metadata: 要写入的元数据
 
 func WriteGDBLayerMetadata(gdbPath string, layerName string, metadata *GDBLayerMetadataWrite) error {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 生成Definition XML
 	definitionXML, err := metadata.GenerateDefinitionXML()
@@ -802,8 +800,6 @@ func extractDatasetName(layerPath string) string {
 
 // CreateMetadataWriteFromLayer 从GDB图层读取信息创建元数据写入对象
 func CreateMetadataWriteFromLayer(gdbPath string, layerName string) (*GDBLayerMetadataWrite, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -1529,8 +1525,6 @@ func NewUTMSpatialReference(zone int, isNorth bool) *GDBSpatialReferenceWrite {
 
 // NewSpatialReferenceFromEPSG 从EPSG代码创建空间参考
 func NewSpatialReferenceFromEPSG(epsg int) (*GDBSpatialReferenceWrite, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 创建空间参考对象
 	hSRS := C.OSRNewSpatialReference(nil)
@@ -1554,8 +1548,6 @@ func NewSpatialReferenceFromEPSG(epsg int) (*GDBSpatialReferenceWrite, error) {
 
 // NewSpatialReferenceFromWKT 从WKT创建空间参考
 func NewSpatialReferenceFromWKT(wkt string) (*GDBSpatialReferenceWrite, error) {
-	// 初始化GDAL
-	InitializeGDAL()
 
 	// 创建空间参考对象
 	hSRS := C.OSRNewSpatialReference(nil)
@@ -1798,7 +1790,6 @@ const (
 
 // GetGDBItemUUID 获取GDB_Items表中指定项目的UUID
 func GetGDBItemUUID(gdbPath string, itemName string) (string, error) {
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -1851,7 +1842,6 @@ func GetGDBItemUUID(gdbPath string, itemName string) (string, error) {
 
 // GetGDBRootUUID 获取GDB根目录的UUID
 func GetGDBRootUUID(gdbPath string) (string, error) {
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -1903,7 +1893,6 @@ func GetGDBRootUUID(gdbPath string) (string, error) {
 
 // AddGDBItemRelationship 在GDB_ItemRelationships表中添加关系
 func AddGDBItemRelationship(gdbPath string, originUUID string, destUUID string, relationType string) error {
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -2030,7 +2019,6 @@ func UpdateGDBItemRelationship(gdbPath string, featureClassName string, datasetN
 
 // RemoveGDBItemRelationship 删除指定目标项的所有父级关系
 func RemoveGDBItemRelationship(gdbPath string, destUUID string) error {
-	InitializeGDAL()
 
 	cPath := C.CString(gdbPath)
 	defer C.free(unsafe.Pointer(cPath))

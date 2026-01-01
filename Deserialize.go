@@ -513,7 +513,6 @@ func DeserializeLayerFromBinary(data []byte) (*DeserializeResult, error) {
 	return goResult, nil
 }
 
-
 // DeserializeLayerFromFile 从bin文件反序列化图层（修复版本）
 func DeserializeLayerFromFile(filePath string) (*GDALLayer, error) {
 	// 读取文件内容
@@ -525,7 +524,7 @@ func DeserializeLayerFromFile(filePath string) (*GDALLayer, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty file: %s", filePath)
 	}
-	InitializeGDAL()
+
 	// 反序列化
 	result, err := DeserializeLayerFromBinary(data)
 	if err != nil {
