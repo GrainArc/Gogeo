@@ -386,8 +386,21 @@ func getFieldValue(hFeature C.OGRFeatureH, fieldIndex C.int, fieldType C.OGRFiel
 		value := C.OGR_F_GetFieldAsDouble(hFeature, fieldIndex)
 		return float64(value)
 	case C.OFTDate, C.OFTTime, C.OFTDateTime:
-		value := C.OGR_F_GetFieldAsString(hFeature, fieldIndex)
-		return C.GoString(value)
+		// 使用 GDAL 的日期时间获取函数
+		var year, month, day, hour, minute, second, tzFlag C.int
+		if C.OGR_F_GetFieldAsDateTime(hFeature, fieldIndex, &year, &month, &day, &hour, &minute, &second, &tzFlag) == 1 {
+			// 成功获取日期时间
+			if fieldType == C.OFTDate {
+				return fmt.Sprintf("%04d-%02d-%02d", int(year), int(month), int(day))
+			} else if fieldType == C.OFTTime {
+				return fmt.Sprintf("%02d:%02d:%02d", int(hour), int(minute), int(second))
+			} else {
+				return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d",
+					int(year), int(month), int(day), int(hour), int(minute), int(second))
+			}
+		}
+		// 如果获取失败，返回 nil 而不是空字符串
+		return nil
 	default:
 		value := C.OGR_F_GetFieldAsString(hFeature, fieldIndex)
 		return C.GoString(value)
