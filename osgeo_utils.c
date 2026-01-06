@@ -1950,3 +1950,64 @@ void cleanupVsimem(const char* path) {
         VSIUnlink(path);
     }
 }
+// 快速读取瓦片数据（优化版本）
+int readTileDataFast(GDALDatasetH dataset,
+                     double minX, double minY, double maxX, double maxY,
+                     int tileSize, unsigned char* buffer) {
+    if (dataset == NULL || buffer == NULL) {
+        return 0;
+    }
+
+    double geoTransform[6];
+    if (GDALGetGeoTransform(dataset, geoTransform) != CE_None) {
+        return 0;
+    }
+
+    int rasterWidth = GDALGetRasterXSize(dataset);
+    int rasterHeight = GDALGetRasterYSize(dataset);
+    int bandCount = GDALGetRasterCount(dataset);
+
+    if (bandCount > 4) bandCount = 4;
+
+    // 计算像素坐标
+    double invGeoTransform[6];
+    if (!GDALInvGeoTransform(geoTransform, invGeoTransform)) {
+        return 0;
+    }
+
+    double srcMinX = invGeoTransform[0] + invGeoTransform[1] * minX + invGeoTransform[2] * maxY;
+    double srcMinY = invGeoTransform[3] + invGeoTransform[4] * minX + invGeoTransform[5] * maxY;
+    double srcMaxX = invGeoTransform[0] + invGeoTransform[1] * maxX + invGeoTransform[2] * minY;
+    double srcMaxY = invGeoTransform[3] + invGeoTransform[4] * maxX + invGeoTransform[5] * minY;
+
+    int xOff = (int)floor(srcMinX);
+    int yOff = (int)floor(srcMinY);
+    int xSize = (int)ceil(srcMaxX) - xOff;
+    int ySize = (int)ceil(srcMaxY) - yOff;
+
+    // 边界检查
+    if (xOff < 0) { xSize += xOff; xOff = 0; }
+    if (yOff < 0) { ySize += yOff; yOff = 0; }
+    if (xOff + xSize > rasterWidth) xSize = rasterWidth - xOff;
+    if (yOff + ySize > rasterHeight) ySize = rasterHeight - yOff;
+
+    if (xSize <= 0 || ySize <= 0) {
+        memset(buffer, 0, tileSize * tileSize * bandCount);
+        return bandCount;
+    }
+
+    // 使用RasterIO直接读取并重采样
+    for (int b = 0; b < bandCount; b++) {
+        GDALRasterBandH band = GDALGetRasterBand(dataset, b + 1);
+        CPLErr err = GDALRasterIO(band, GF_Read,
+                                   xOff, yOff, xSize, ySize,
+                                   buffer + b * tileSize * tileSize,
+                                   tileSize, tileSize,
+                                   GDT_Byte, 0, 0);
+        if (err != CE_None) {
+            return 0;
+        }
+    }
+
+    return bandCount;
+}

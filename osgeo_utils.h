@@ -112,7 +112,9 @@ void closeDataset(GDALDatasetH hDS);
 
 // 清理vsimem文件
 void cleanupVsimem(const char* path);
-
+int readTileDataFast(GDALDatasetH dataset,
+                     double minX, double minY, double maxX, double maxY,
+                     int tileSize, unsigned char* buffer);
 
 #ifdef __cplusplus
 }
