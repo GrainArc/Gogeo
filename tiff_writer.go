@@ -47,16 +47,37 @@ GDALDatasetH createMemGeoTiffWithSRS(int width, int height, int bands, int epsgC
     if (hDriver == NULL) {
         return NULL;
     }
+
     GDALDatasetH hDS = GDALCreate(hDriver, "", width, height, bands, GDT_Byte, NULL);
 
-    if (hDS != NULL && epsgCode > 0) {
-        OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
-        OSRImportFromEPSG(hSRS, epsgCode);
-        char *pszWKT = NULL;
-        OSRExportToWkt(hSRS, &pszWKT);
-        GDALSetProjection(hDS, pszWKT);
-        CPLFree(pszWKT);
-        OSRDestroySpatialReference(hSRS);
+    if (hDS != NULL) {
+        // 设置坐标系
+        if (epsgCode > 0) {
+            OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+            OSRImportFromEPSG(hSRS, epsgCode);
+            char *pszWKT = NULL;
+            OSRExportToWkt(hSRS, &pszWKT);
+            GDALSetProjection(hDS, pszWKT);
+            CPLFree(pszWKT);
+            OSRDestroySpatialReference(hSRS);
+        }
+
+        // 如果有4个波段，设置第4个波段为Alpha通道
+        if (bands == 4) {
+            GDALRasterBandH hAlphaBand = GDALGetRasterBand(hDS, 4);
+            if (hAlphaBand != NULL) {
+                GDALSetRasterColorInterpretation(hAlphaBand, GCI_AlphaBand);
+                // 初始化Alpha通道为完全不透明(255)
+                GDALFillRaster(hAlphaBand, 255.0, 0.0);
+            }
+        }
+
+        // 设置RGB波段的颜色解释
+        if (bands >= 3) {
+            GDALSetRasterColorInterpretation(GDALGetRasterBand(hDS, 1), GCI_RedBand);
+            GDALSetRasterColorInterpretation(GDALGetRasterBand(hDS, 2), GCI_GreenBand);
+            GDALSetRasterColorInterpretation(GDALGetRasterBand(hDS, 3), GCI_BlueBand);
+        }
     }
 
     return hDS;
@@ -66,40 +87,42 @@ int writeTileToDatasetRGB(GDALDatasetH hDstDS, GDALDatasetH hSrcDS,
     if (hDstDS == NULL || hSrcDS == NULL) {
         return -1;
     }
+
     int srcBands = GDALGetRasterCount(hSrcDS);
     int dstBands = GDALGetRasterCount(hDstDS);
 
-    // 确保至少有3个波段（RGB）
+    // 至少需要3个波段（RGB）
     if (srcBands < 3 || dstBands < 3) {
         return -1;
     }
+
     int srcWidth = GDALGetRasterXSize(hSrcDS);
     int srcHeight = GDALGetRasterYSize(hSrcDS);
     int readWidth = srcWidth < width ? srcWidth : width;
     int readHeight = srcHeight < height ? srcHeight : height;
+
     unsigned char *buffer = (unsigned char*)CPLMalloc(readWidth * readHeight);
     if (buffer == NULL) {
         return -2;
     }
-    // 明确按照 R, G, B, A 顺序处理
-    int bandMapping[] = {1, 2, 3, 4}; // 源波段到目标波段的映射
-    int bandsToProcess = srcBands < dstBands ? srcBands : dstBands;
-    if (bandsToProcess > 4) bandsToProcess = 4;
-    for (int i = 0; i < bandsToProcess; i++) {
-        GDALRasterBandH hSrcBand = GDALGetRasterBand(hSrcDS, bandMapping[i]);
-        GDALRasterBandH hDstBand = GDALGetRasterBand(hDstDS, bandMapping[i]);
+
+    // 处理RGB波段（1, 2, 3）
+    for (int i = 1; i <= 3; i++) {
+        GDALRasterBandH hSrcBand = GDALGetRasterBand(hSrcDS, i);
+        GDALRasterBandH hDstBand = GDALGetRasterBand(hDstDS, i);
+
         if (hSrcBand == NULL || hDstBand == NULL) {
             CPLFree(buffer);
             return -3;
         }
-        // 读取源波段
+
         CPLErr err = GDALRasterIO(hSrcBand, GF_Read, 0, 0, readWidth, readHeight,
                                    buffer, readWidth, readHeight, GDT_Byte, 0, 0);
         if (err != CE_None) {
             CPLFree(buffer);
             return -4;
         }
-        // 写入目标波段
+
         err = GDALRasterIO(hDstBand, GF_Write, dstX, dstY, readWidth, readHeight,
                            buffer, readWidth, readHeight, GDT_Byte, 0, 0);
         if (err != CE_None) {
@@ -107,33 +130,78 @@ int writeTileToDatasetRGB(GDALDatasetH hDstDS, GDALDatasetH hSrcDS,
             return -5;
         }
     }
+
+    // 处理Alpha通道（如果存在）
+    if (srcBands >= 4 && dstBands >= 4) {
+        GDALRasterBandH hSrcAlpha = GDALGetRasterBand(hSrcDS, 4);
+        GDALRasterBandH hDstAlpha = GDALGetRasterBand(hDstDS, 4);
+
+        if (hSrcAlpha != NULL && hDstAlpha != NULL) {
+            CPLErr err = GDALRasterIO(hSrcAlpha, GF_Read, 0, 0, readWidth, readHeight,
+                                       buffer, readWidth, readHeight, GDT_Byte, 0, 0);
+            if (err == CE_None) {
+                err = GDALRasterIO(hDstAlpha, GF_Write, dstX, dstY, readWidth, readHeight,
+                                   buffer, readWidth, readHeight, GDT_Byte, 0, 0);
+            }
+            // Alpha通道错误不致命，继续处理
+        }
+    } else if (dstBands >= 4) {
+        // 源没有Alpha通道，目标有，则填充为完全不透明(255)
+        memset(buffer, 255, readWidth * readHeight);
+        GDALRasterBandH hDstAlpha = GDALGetRasterBand(hDstDS, 4);
+        if (hDstAlpha != NULL) {
+            GDALRasterIO(hDstAlpha, GF_Write, dstX, dstY, readWidth, readHeight,
+                         buffer, readWidth, readHeight, GDT_Byte, 0, 0);
+        }
+    }
+
     CPLFree(buffer);
     return 0;
 }
+
+
 // 导出为GeoTIFF文件（支持指定EPSG）
 int exportToGeoTiffWithSRS(GDALDatasetH hSrcDS, const char* filename,
                            double* geoTransform, int epsgCode) {
     if (hSrcDS == NULL || filename == NULL) {
         return -1;
     }
+
     GDALDriverH hDriver = GDALGetDriverByName("GTiff");
     if (hDriver == NULL) {
         return -2;
     }
+
+    int bands = GDALGetRasterCount(hSrcDS);
+
     char **papszOptions = NULL;
     papszOptions = CSLSetNameValue(papszOptions, "COMPRESS", "LZW");
     papszOptions = CSLSetNameValue(papszOptions, "TILED", "YES");
-    papszOptions = CSLSetNameValue(papszOptions, "PHOTOMETRIC", "RGB"); // 明确指定RGB
+    papszOptions = CSLSetNameValue(papszOptions, "BLOCKXSIZE", "256");
+    papszOptions = CSLSetNameValue(papszOptions, "BLOCKYSIZE", "256");
+
+    // 根据波段数设置PHOTOMETRIC
+    if (bands == 3) {
+        papszOptions = CSLSetNameValue(papszOptions, "PHOTOMETRIC", "RGB");
+    } else if (bands == 4) {
+        // 4波段时使用RGB+Alpha
+        papszOptions = CSLSetNameValue(papszOptions, "PHOTOMETRIC", "RGB");
+        papszOptions = CSLSetNameValue(papszOptions, "ALPHA", "YES");
+    }
+
     GDALDatasetH hDstDS = GDALCreateCopy(hDriver, filename, hSrcDS, FALSE,
                                          papszOptions, NULL, NULL);
     CSLDestroy(papszOptions);
+
     if (hDstDS == NULL) {
         return -3;
     }
+
     // 设置地理变换
     if (geoTransform != NULL) {
         GDALSetGeoTransform(hDstDS, geoTransform);
     }
+
     // 设置投影
     OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
     if (epsgCode > 0) {
@@ -147,6 +215,15 @@ int exportToGeoTiffWithSRS(GDALDatasetH hSrcDS, const char* filename,
     GDALSetProjection(hDstDS, pszWKT);
     CPLFree(pszWKT);
     OSRDestroySpatialReference(hSRS);
+
+    // 确保Alpha通道的颜色解释正确
+    if (bands == 4) {
+        GDALRasterBandH hAlphaBand = GDALGetRasterBand(hDstDS, 4);
+        if (hAlphaBand != NULL) {
+            GDALSetRasterColorInterpretation(hAlphaBand, GCI_AlphaBand);
+        }
+    }
+
     GDALClose(hDstDS);
     return 0;
 }
