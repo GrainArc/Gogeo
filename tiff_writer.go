@@ -150,7 +150,64 @@ int exportToGeoTiffWithSRS(GDALDatasetH hSrcDS, const char* filename,
     GDALClose(hDstDS);
     return 0;
 }
+// 导出为内存中的GeoTIFF
+int exportToMemoryGeoTiff(GDALDatasetH hSrcDS, double* geoTransform,
+                          unsigned char** outData, int* outLen) {
+    if (hSrcDS == NULL || outData == NULL || outLen == NULL) {
+        return -1;
+    }
 
+    // 创建vsimem路径
+    const char* vsimemPath = "/vsimem/output_geotiff.tif";
+
+    GDALDriverH hDriver = GDALGetDriverByName("GTiff");
+    if (hDriver == NULL) {
+        return -2;
+    }
+
+    char **papszOptions = NULL;
+    papszOptions = CSLSetNameValue(papszOptions, "COMPRESS", "LZW");
+
+    GDALDatasetH hDstDS = GDALCreateCopy(hDriver, vsimemPath, hSrcDS, FALSE, papszOptions, NULL, NULL);
+    CSLDestroy(papszOptions);
+
+    if (hDstDS == NULL) {
+        return -3;
+    }
+
+    // 设置地理变换
+    if (geoTransform != NULL) {
+        GDALSetGeoTransform(hDstDS, geoTransform);
+    }
+
+    // 设置投影
+    OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+    OSRSetWellKnownGeogCS(hSRS, "WGS84");
+    char *pszWKT = NULL;
+    OSRExportToWkt(hSRS, &pszWKT);
+    GDALSetProjection(hDstDS, pszWKT);
+    CPLFree(pszWKT);
+    OSRDestroySpatialReference(hSRS);
+
+    GDALClose(hDstDS);
+
+    // 读取vsimem文件
+    vsi_l_offset nLength = 0;
+    GByte* pabyData = VSIGetMemFileBuffer(vsimemPath, &nLength, FALSE);
+
+    if (pabyData == NULL || nLength == 0) {
+        VSIUnlink(vsimemPath);
+        return -4;
+    }
+
+    // 复制数据
+    *outData = (unsigned char*)CPLMalloc(nLength);
+    memcpy(*outData, pabyData, nLength);
+    *outLen = (int)nLength;
+
+    VSIUnlink(vsimemPath);
+    return 0;
+}
 
 */
 import "C"
