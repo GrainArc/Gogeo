@@ -243,7 +243,7 @@ func InitializeGDAL() error {
 		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
 			projDataPath = envPath
 		} else {
-			projDataPath = exeDir + "/osgeo/share/proj/proj.db" // Linux默认路径
+			projDataPath = exeDir + "/osgeo/share/proj" // Linux默认路径
 		}
 	} else if runtime.GOOS == "android" {
 		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
