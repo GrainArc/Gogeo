@@ -197,7 +197,8 @@ import "C"
 import (
 	"errors" // 用于创建错误对象
 	"log"
-	"os"      // 用于环境变量操作
+	"os" // 用于环境变量操作
+	"path/filepath"
 	"runtime" // 用于运行时信息获取
 	"unsafe"  // 用于C指针操作
 )
@@ -225,19 +226,24 @@ type Geometry struct {
 func InitializeGDAL() error {
 	// 如果未指定PROJ路径，根据操作系统设置默认路径
 	projDataPath := ""
+	exePath, err := os.Executable()
+	if err != nil {
+		// 处理错误
+	}
+	exeDir := filepath.Dir(exePath)
 	if runtime.GOOS == "windows" {
 		// Windows下优先使用环境变量，否则使用默认路径
 		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
 			projDataPath = envPath
 		} else {
-			projDataPath = "C:/OSGeo4W/share/proj" // Windows默认路径
+			projDataPath = exeDir + "/OSGeo4W/share/proj" // Windows默认路径
 		}
 	} else if runtime.GOOS == "linux" {
 		// Linux下优先使用环境变量，否则使用系统路径
 		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
 			projDataPath = envPath
 		} else {
-			projDataPath = "/usr/share/proj" // Linux默认路径
+			projDataPath = exeDir + "/osgeo/share/proj/proj.db" // Linux默认路径
 		}
 	} else if runtime.GOOS == "android" {
 		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
