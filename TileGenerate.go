@@ -1148,7 +1148,7 @@ func GenerateTiles(inputLayer, methodLayer *GDALLayer, TileCount int, uuid strin
 type GroupTileFiles struct {
 	Index int
 	GPBin GroupBin
-	Size float64
+	Size  float64
 }
 type GroupBin struct {
 	Layer1 string

@@ -16,6 +16,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 package Gogeo
+
 /*
 #include "osgeo_utils.h"
 
@@ -23,12 +24,12 @@ package Gogeo
 import "C"
 import (
 	"fmt"
-	"path/filepath"
 	"io/ioutil"
 	"os"
-	"unsafe"
+	"path/filepath"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 func PerformSpatialIntersectionTest(shpFile1, shpFile2, outputFile string) error {
@@ -70,9 +71,9 @@ func PerformSpatialIntersectionTest(shpFile1, shpFile2, outputFile string) error
 
 	// 3. 配置并行相交分析参数
 	config := &ParallelGeosConfig{
-		TileCount:        50,                // 4x4分块
-		MaxWorkers:       32, // 使用所有CPU核心
-		BufferDistance:   0.0001,           // 分块缓冲距离
+		TileCount:  10, // 4x4分块
+		MaxWorkers: 32, // 使用所有CPU核心
+		// 分块缓冲距离
 		IsMergeTile:      true,             // 合并分块结果
 		ProgressCallback: progressCallback, // 进度回调函数
 		PrecisionConfig: &GeometryPrecisionConfig{
@@ -82,7 +83,6 @@ func PerformSpatialIntersectionTest(shpFile1, shpFile2, outputFile string) error
 			KeepCollapsed: false,       // 不保留退化几何
 		},
 	}
-
 
 	// 5. 执行空间相交分析
 	result, err := SpatialIdentityAnalysis(layer1, layer2, config)

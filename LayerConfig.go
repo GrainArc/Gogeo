@@ -42,9 +42,9 @@ type TileResult struct {
 
 // ParallelGeosConfig 并行相交分析配置
 type ParallelGeosConfig struct {
-	TileCount        int                      // 分块数量 (N*N)
-	MaxWorkers       int                      // 最大工作协程数
-	BufferDistance   float64                  // 分块缓冲距离
+	TileCount  int // 分块数量 (N*N)
+	MaxWorkers int // 最大工作协程数
+
 	IsMergeTile      bool                     // 是否合并瓦片
 	ProgressCallback ProgressCallback         // 进度回调
 	PrecisionConfig  *GeometryPrecisionConfig // 几何精度配置
