@@ -76,7 +76,7 @@ func SpatialSymDifferenceAnalysis(inputLayer, methodLayer *GDALLayer, config *Pa
 		}
 
 		// 删除临时的_identityID字段
-		err = deleteFieldFromLayerFuzzy(unionResult.OutputLayer, "gogeo_analysis_id")
+		err = DeleteFieldFromLayerFuzzy(unionResult.OutputLayer, "gogeo_analysis_id")
 		if err != nil {
 			fmt.Printf("警告: 删除临时标识字段失败: %v\n", err)
 		}

@@ -768,6 +768,8 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"gorm.io/gorm"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1204,4 +1206,424 @@ func readBinFilesMap(dir string) map[int]string {
 	})
 
 	return fileMap
+}
+
+// PG
+func GenerateTilesFromPG(db *gorm.DB, table1, table2 string, tileCount int, uuid string) error {
+	// 1. 直接从PG计算合并的extent
+	extent, err := getLayersExtentFromPG(db, table1, table2)
+	if err != nil {
+		return fmt.Errorf("获取图层范围失败: %v", err)
+	}
+	// 2. 创建瓦片信息
+	tiles := createTileInfos(extent, tileCount)
+	// 3. 配置处理参数
+	config := &TileProcessingConfig{
+		MaxConcurrency: runtime.NumCPU(),
+		BufferSize:     1024 * 1024,
+		EnableProgress: true,
+	}
+	// 4. 并发处理两个图层的瓦片裁剪
+	var wg sync.WaitGroup
+	var err1, err2 error
+	// 处理第一个图层
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err1 = clipAndSerializeTilesFromPG(
+			db,
+			table1,
+			tiles,
+			filepath.Join(uuid, "layer1"),
+			config,
+		)
+		if err1 != nil {
+			log.Printf("layer1 裁剪处理失败: %v\n", err1)
+		} else {
+			log.Printf("layer1 处理完成\n")
+		}
+	}()
+	// 处理第二个图层
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err2 = clipAndSerializeTilesFromPG(
+			db,
+			table2,
+			tiles,
+			filepath.Join(uuid, "layer2"),
+			config,
+		)
+		if err2 != nil {
+			log.Printf("layer2 裁剪处理失败: %v\n", err2)
+		} else {
+			log.Printf("layer2 处理完成\n")
+		}
+	}()
+	wg.Wait()
+	if err1 != nil || err2 != nil {
+		return fmt.Errorf("分割处理失败 - layer1: %v, layer2: %v", err1, err2)
+	}
+	fmt.Printf("所有图层分割处理完成\n")
+	return nil
+}
+
+// getLayersExtentFromPG 直接从PostgreSQL获取两个图层的合并范围
+func getLayersExtentFromPG(db *gorm.DB, table1, table2 string) (*Extent, error) {
+	// 使用UNION ALL合并两个表的extent，然后计算总体范围
+	query := fmt.Sprintf(`
+		WITH combined_extents AS (
+			SELECT ST_Extent(geom) as extent FROM %s
+			UNION ALL
+			SELECT ST_Extent(geom) as extent FROM %s
+		)
+		SELECT 
+			MIN(ST_XMin(extent)) as minx,
+			MIN(ST_YMin(extent)) as miny,
+			MAX(ST_XMax(extent)) as maxx,
+			MAX(ST_YMax(extent)) as maxy
+		FROM combined_extents
+	`, table1, table2)
+	var result struct {
+		MinX float64 `gorm:"column:minx"`
+		MinY float64 `gorm:"column:miny"`
+		MaxX float64 `gorm:"column:maxx"`
+		MaxY float64 `gorm:"column:maxy"`
+	}
+	err := db.Raw(query).Scan(&result).Error
+	if err != nil {
+		return nil, fmt.Errorf("查询extent失败: %v", err)
+	}
+	return &Extent{
+		MinX: result.MinX,
+		MinY: result.MinY,
+		MaxX: result.MaxX,
+		MaxY: result.MaxY,
+	}, nil
+}
+
+// clipAndSerializeTilesFromPG 从PG查询并裁剪瓦片数据，然后序列化为bin文件
+func clipAndSerializeTilesFromPG(db *gorm.DB, tableName string, tiles []*TileInfo, outputDir string, config *TileProcessingConfig) error {
+	// 创建输出目录
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("创建输出目录失败: %v", err)
+	}
+	// 使用信号量控制并发数
+	semaphore := make(chan struct{}, config.MaxConcurrency)
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(tiles))
+	successCount := 0
+	var countMutex sync.Mutex
+	for _, tile := range tiles {
+		wg.Add(1)
+		go func(t *TileInfo) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			err := processSingleTileFromPG(db, tableName, t, outputDir, config.BufferSize)
+			if err != nil {
+				errChan <- fmt.Errorf("处理瓦片 %d 失败: %v", t.Index, err)
+			} else {
+				countMutex.Lock()
+				successCount++
+				if successCount%10 == 0 {
+					log.Printf("[%s] 已完成 %d/%d 个瓦片", tableName, successCount, len(tiles))
+				}
+				countMutex.Unlock()
+			}
+		}(tile)
+	}
+	wg.Wait()
+	close(errChan)
+	// 检查错误
+	var errors []error
+	for err := range errChan {
+		errors = append(errors, err)
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf("处理过程中出现 %d 个错误，首个错误: %v", len(errors), errors[0])
+	}
+	log.Printf("[%s] 所有瓦片处理完成，成功: %d/%d", tableName, successCount, len(tiles))
+	return nil
+}
+
+// processSingleTileFromPG 处理单个瓦片：查询、裁剪、序列化
+func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outputDir string, bufferSize int) error {
+	// 1. 构建瓦片的WKT表示
+	tileWKT := fmt.Sprintf("POLYGON((%f %f, %f %f, %f %f, %f %f, %f %f))",
+		tile.MinX, tile.MinY,
+		tile.MaxX, tile.MinY,
+		tile.MaxX, tile.MaxY,
+		tile.MinX, tile.MaxY,
+		tile.MinX, tile.MinY,
+	)
+	// 2. 获取表的SRID
+	var srid int
+	err := db.Raw(fmt.Sprintf(`
+		SELECT Find_SRID('public', '%s', 'geom') as srid
+	`, tableName)).Scan(&srid).Error
+	if err != nil {
+		return fmt.Errorf("获取SRID失败: %v", err)
+	}
+	// 3. 使用空间索引查询并裁剪数据
+	// ST_Intersection会自动裁剪几何到瓦片范围内
+	query := fmt.Sprintf(`
+		SELECT 
+			ST_AsBinary(ST_Intersection(geom, ST_GeomFromText('%s', %d))) as geom_wkb,
+			*
+		FROM %s
+		WHERE ST_Intersects(geom, ST_GeomFromText('%s', %d))
+		AND NOT ST_IsEmpty(ST_Intersection(geom, ST_GeomFromText('%s', %d)))
+	`, tileWKT, srid, tableName, tileWKT, srid, tileWKT, srid)
+	// 4. 创建临时GDALLayer来存储查询结果
+	tempLayer, err := createLayerFromPGQuery(db, query, tableName, srid)
+	if err != nil {
+		return fmt.Errorf("创建临时图层失败: %v", err)
+	}
+	defer tempLayer.Close()
+	// 5. 检查是否有数据
+	featureCount := tempLayer.GetFeatureCount()
+	if featureCount == 0 {
+		// 创建空的bin文件
+		outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.bin", tile.Index))
+		return createEmptyBinFile(outputPath)
+	}
+	// 6. 序列化为bin文件
+	outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.bin", tile.Index))
+	err = serializeLayerToBinFile(tempLayer, outputPath, bufferSize)
+	if err != nil {
+		return fmt.Errorf("序列化失败: %v", err)
+	}
+	return nil
+}
+
+// createLayerFromPGQuery 从PostgreSQL查询结果创建GDALLayer
+func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid int) (*GDALLayer, error) {
+	// 创建内存数据源
+	driver := C.OGRGetDriverByName(C.CString("Memory"))
+	if driver == nil {
+		return nil, fmt.Errorf("无法获取Memory驱动")
+	}
+	ds := C.OGR_Dr_CreateDataSource(driver, C.CString(""), nil)
+	if ds == nil {
+		return nil, fmt.Errorf("创建内存数据源失败")
+	}
+	// 创建空间参考
+	srs := C.OSRNewSpatialReference(nil)
+	C.OSRImportFromEPSG(srs, C.int(srid))
+	defer C.OSRDestroySpatialReference(srs)
+	// 创建图层
+	layerName := C.CString("temp_layer")
+	defer C.free(unsafe.Pointer(layerName))
+
+	layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbUnknown, nil)
+	if layer == nil {
+		C.OGR_DS_Destroy(ds)
+		return nil, fmt.Errorf("创建图层失败")
+	}
+	// 获取源表的字段定义（排除geom字段）
+	var columns []struct {
+		ColumnName string `gorm:"column:column_name"`
+		DataType   string `gorm:"column:data_type"`
+	}
+
+	err := db.Raw(fmt.Sprintf(`
+		SELECT column_name, data_type
+		FROM information_schema.columns
+		WHERE table_name = '%s' 
+		AND column_name != 'geom'
+		ORDER BY ordinal_position
+	`, sourceTable)).Scan(&columns).Error
+	if err != nil {
+		C.OGR_DS_Destroy(ds)
+		return nil, fmt.Errorf("获取字段定义失败: %v", err)
+	}
+	// 添加字段定义到图层
+	for _, col := range columns {
+		fieldType := mapPostgreSQLTypeToOGR(col.DataType)
+		fieldName := C.CString(col.ColumnName)
+		fieldDefn := C.OGR_Fld_Create(fieldName, fieldType)
+
+		C.OGR_L_CreateField(layer, fieldDefn, 1)
+
+		C.OGR_Fld_Destroy(fieldDefn)
+		C.free(unsafe.Pointer(fieldName))
+	}
+	// 执行查询并填充数据
+	rows, err := db.Raw(query).Rows()
+	if err != nil {
+		C.OGR_DS_Destroy(ds)
+		return nil, fmt.Errorf("执行查询失败: %v", err)
+	}
+	defer rows.Close()
+	// 获取列名
+	columnNames, err := rows.Columns()
+	if err != nil {
+		C.OGR_DS_Destroy(ds)
+		return nil, fmt.Errorf("获取列名失败: %v", err)
+	}
+	// 创建列名到索引的映射
+	columnMap := make(map[string]int)
+	for i, name := range columnNames {
+		columnMap[name] = i
+	}
+	// 遍历结果集并创建要素
+	featureDefn := C.OGR_L_GetLayerDefn(layer)
+
+	for rows.Next() {
+		// 准备扫描目标
+		values := make([]interface{}, len(columnNames))
+		valuePtrs := make([]interface{}, len(columnNames))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+		err := rows.Scan(valuePtrs...)
+		if err != nil {
+			log.Printf("扫描行数据失败: %v", err)
+			continue
+		}
+		// 创建要素
+		feature := C.OGR_F_Create(featureDefn)
+		// 设置几何字段
+		if geomIdx, ok := columnMap["geom_wkb"]; ok {
+			if wkb, ok := values[geomIdx].([]byte); ok && len(wkb) > 0 {
+				geom := C.OGR_G_CreateGeometry(C.wkbUnknown)
+				if geom != nil {
+					result := C.OGR_G_ImportFromWkb(geom, (*C.uchar)(unsafe.Pointer(&wkb[0])), C.int(len(wkb)))
+					if result == C.OGRERR_NONE {
+						C.OGR_F_SetGeometry(feature, geom)
+					}
+					C.OGR_G_DestroyGeometry(geom)
+				}
+			}
+		}
+		// 设置属性字段
+		for _, col := range columns {
+			if colIdx, ok := columnMap[col.ColumnName]; ok {
+				fieldName := C.CString(col.ColumnName)
+				fieldIndex := C.OGR_F_GetFieldIndex(feature, fieldName)
+				C.free(unsafe.Pointer(fieldName))
+
+				if fieldIndex >= 0 {
+					setFeatureFieldValue(feature, fieldIndex, values[colIdx])
+				}
+			}
+		}
+		// 添加要素到图层
+		C.OGR_L_CreateFeature(layer, feature)
+		C.OGR_F_Destroy(feature)
+	}
+	return &GDALLayer{
+		layer:   layer,
+		dataset: ds,
+		driver:  driver,
+	}, nil
+}
+
+// mapPostgreSQLTypeToOGR 映射PostgreSQL类型到OGR字段类型
+func mapPostgreSQLTypeToOGR(pgType string) C.OGRFieldType {
+	switch pgType {
+	case "integer", "smallint", "int", "int4":
+		return C.OFTInteger
+	case "bigint", "int8":
+		return C.OFTInteger64
+	case "real", "float4", "double precision", "float8", "numeric", "decimal":
+		return C.OFTReal
+	case "character varying", "varchar", "text", "character", "char":
+		return C.OFTString
+	case "date":
+		return C.OFTDate
+	case "timestamp", "timestamp without time zone", "timestamp with time zone":
+		return C.OFTDateTime
+	case "boolean", "bool":
+		return C.OFTInteger
+	default:
+		return C.OFTString
+	}
+}
+
+// setFeatureFieldValue 设置要素字段值
+func setFeatureFieldValue(feature C.OGRFeatureH, fieldIndex C.int, value interface{}) {
+	if value == nil {
+		return
+	}
+	switch v := value.(type) {
+	case int:
+		C.OGR_F_SetFieldInteger(feature, fieldIndex, C.int(v))
+	case int32:
+		C.OGR_F_SetFieldInteger(feature, fieldIndex, C.int(v))
+	case int64:
+		C.OGR_F_SetFieldInteger64(feature, fieldIndex, C.longlong(v))
+	case float32:
+		C.OGR_F_SetFieldDouble(feature, fieldIndex, C.double(v))
+	case float64:
+		C.OGR_F_SetFieldDouble(feature, fieldIndex, C.double(v))
+	case string:
+		cStr := C.CString(v)
+		C.OGR_F_SetFieldString(feature, fieldIndex, cStr)
+		C.free(unsafe.Pointer(cStr))
+	case []byte:
+		str := string(v)
+		cStr := C.CString(str)
+		C.OGR_F_SetFieldString(feature, fieldIndex, cStr)
+		C.free(unsafe.Pointer(cStr))
+	case bool:
+		var intVal C.int
+		if v {
+			intVal = 1
+		} else {
+			intVal = 0
+		}
+		C.OGR_F_SetFieldInteger(feature, fieldIndex, intVal)
+	}
+}
+
+// serializeLayerToBinFile 将图层序列化到bin文件
+func serializeLayerToBinFile(layer *GDALLayer, outputPath string, bufferSize int) error {
+	// 调用C函数进行序列化
+	result := C.serializeLayerToBinary(layer.layer, C.int(bufferSize))
+	if result.success == 0 {
+		return fmt.Errorf("序列化失败")
+	}
+	defer C.free(unsafe.Pointer(result.data))
+	// 写入文件
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("创建文件失败: %v", err)
+	}
+	defer file.Close()
+	data := C.GoBytes(unsafe.Pointer(result.data), C.int(result.size))
+	_, err = file.Write(data)
+	if err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+	return nil
+}
+
+// createEmptyBinFile 创建空的bin文件（用于没有数据的瓦片）
+func createEmptyBinFile(outputPath string) error {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("创建空文件失败: %v", err)
+	}
+	defer file.Close()
+	// 写入一个标记表示这是空文件
+	_, err = file.Write([]byte{0})
+	return err
+}
+
+// IsValidBinFile 检查bin文件是否有效（存在且非空）
+func IsValidBinFile(filePath string) bool {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return false
+	}
+
+	// 检查文件大小，空文件只有1字节的标记
+	return info.Size() > 1
+}
+
+// CleanupTileFiles 清理临时瓦片文件
+func CleanupTileFiles(taskid string) error {
+	return os.RemoveAll(taskid)
 }

@@ -613,8 +613,8 @@ func deleteFieldFromLayer(layer *GDALLayer, fieldName string) error {
 	return nil
 }
 
-// deleteFieldFromLayerFuzzy 从图层中模糊匹配删除包含指定字段名的所有字段
-func deleteFieldFromLayerFuzzy(layer *GDALLayer, fieldName string) error {
+// DeleteFieldFromLayerFuzzy 从图层中模糊匹配删除包含指定字段名的所有字段
+func DeleteFieldFromLayerFuzzy(layer *GDALLayer, fieldName string) error {
 	layerDefn := C.OGR_L_GetLayerDefn(layer.layer)
 
 	// 收集需要删除的字段名称（而不是索引）

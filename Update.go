@@ -73,7 +73,7 @@ func SpatialUpdateAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelG
 		}
 
 		// 删除临时的_identityID字段
-		err = deleteFieldFromLayerFuzzy(unionResult.OutputLayer, "gogeo_analysis_id")
+		err = DeleteFieldFromLayerFuzzy(unionResult.OutputLayer, "gogeo_analysis_id")
 		if err != nil {
 			fmt.Printf("警告: 删除临时标识字段失败: %v\n", err)
 		}
@@ -81,7 +81,7 @@ func SpatialUpdateAnalysis(inputLayer, methodLayer *GDALLayer, config *ParallelG
 		return unionResult, nil
 	} else {
 		// 删除临时的_identityID字段
-		err = deleteFieldFromLayerFuzzy(resultLayer, "gogeo_analysis_id")
+		err = DeleteFieldFromLayerFuzzy(resultLayer, "gogeo_analysis_id")
 		if err != nil {
 			fmt.Printf("警告: 删除临时标识字段失败: %v\n", err)
 		}
