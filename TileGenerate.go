@@ -1489,7 +1489,9 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 			if wkb, ok := values[geomIdx].([]byte); ok && len(wkb) > 0 {
 				geom := C.OGR_G_CreateGeometry(C.wkbUnknown)
 				if geom != nil {
-					result := C.OGR_G_ImportFromWkb(geom, (*C.uchar)(unsafe.Pointer(&wkb[0])), C.int(len(wkb)))
+					cWkb := C.CBytes(wkb)
+					result := C.OGR_G_ImportFromWkb(geom, cWkb, C.int(len(wkb)))
+					C.free(cWkb)
 					if result == C.OGRERR_NONE {
 						C.OGR_F_SetGeometry(feature, geom)
 					}
