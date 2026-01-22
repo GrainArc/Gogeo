@@ -64,7 +64,7 @@ func SpatialIdentityAnalysis(inputLayer, methodLayer *GDALLayer, config *Paralle
 
 	if config.IsMergeTile {
 		// 执行按标识字段的融合操作
-		unionResult, err := performUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
+		unionResult, err := PerformUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
 		if err != nil {
 			return nil, fmt.Errorf("执行融合操作失败: %v", err)
 		}

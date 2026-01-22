@@ -60,7 +60,7 @@ func SpatialClipAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGeo
 	resultCount := resultLayer.GetFeatureCount()
 
 	if config.IsMergeTile == true {
-		unionResult, err := performUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
+		unionResult, err := PerformUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
 		if err != nil {
 			return nil, fmt.Errorf("执行融合操作失败: %v", err)
 		}

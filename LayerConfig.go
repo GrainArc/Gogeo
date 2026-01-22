@@ -668,7 +668,7 @@ func DeleteFieldFromLayerFuzzy(layer *GDALLayer, fieldName string) error {
 	return nil
 }
 
-func performUnionByFields(inputLayer *GDALLayer,
+func PerformUnionByFields(inputLayer *GDALLayer,
 	precisionConfig *GeometryPrecisionConfig, progressCallback ProgressCallback) (*GeosAnalysisResult, error) {
 	layerDefn := C.OGR_L_GetLayerDefn(inputLayer.layer)
 	fieldCount := int(C.OGR_FD_GetFieldCount(layerDefn))

@@ -70,7 +70,7 @@ func SpatialEraseAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGe
 
 	if config.IsMergeTile == true {
 		fmt.Println("配置要求执行融合操作，开始融合...")
-		unionResult, err := performUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
+		unionResult, err := PerformUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
 		if err != nil {
 			return nil, fmt.Errorf("执行融合操作失败: %v", err)
 		}
