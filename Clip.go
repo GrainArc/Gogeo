@@ -476,7 +476,7 @@ func SpatialClipAnalysisParallelPG(
 	// 6. 计算结果数量
 	resultCount := resultLayer.GetFeatureCount()
 	log.Printf("空间裁剪分析完成，共生成 %d 个要素", resultCount)
-	resultLayer.PrintLayerInfo()
+
 	// 7. 如果需要合并瓦片
 	if config.IsMergeTile {
 		log.Printf("开始合并瓦片...")
