@@ -1213,6 +1213,7 @@ func readBinFilesMap(dir string) map[int]string {
 func GenerateTilesFromPG(db *gorm.DB, table1, table2 string, tileCount int, uuid string) error {
 	// 1. 直接从PG计算合并的extent
 	extent, err := getLayersExtentFromPG(db, table1, table2)
+
 	if err != nil {
 		return fmt.Errorf("获取图层范围失败: %v", err)
 	}
@@ -1220,7 +1221,7 @@ func GenerateTilesFromPG(db *gorm.DB, table1, table2 string, tileCount int, uuid
 	tiles := createTileInfos(extent, tileCount)
 	// 3. 配置处理参数
 	config := &TileProcessingConfig{
-		MaxConcurrency: runtime.NumCPU(),
+		MaxConcurrency: runtime.NumCPU() / 2,
 		BufferSize:     1024 * 1024,
 		EnableProgress: true,
 	}
@@ -1348,7 +1349,6 @@ func clipAndSerializeTilesFromPG(db *gorm.DB, tableName string, tiles []*TileInf
 	return nil
 }
 
-// processSingleTileFromPG 处理单个瓦片：查询、裁剪、序列化
 func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outputDir string, bufferSize int) error {
 	// 1. 构建瓦片的WKT表示
 	tileWKT := fmt.Sprintf("POLYGON((%f %f, %f %f, %f %f, %f %f, %f %f))",
@@ -1411,10 +1411,14 @@ func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outp
 	}
 	fieldListStr := strings.Join(fieldList, ", ")
 
-	// 5. 使用明确字段列表的查询
+	// 5. 修改查询，强制转换所有几何为MultiPolygon
 	query := fmt.Sprintf(`
 		SELECT 
-			ST_AsBinary(ST_Intersection(geom, ST_GeomFromText('%s', %d))) as geom_wkb,
+			ST_AsBinary(
+				ST_Multi(
+					ST_Intersection(geom, ST_GeomFromText('%s', %d))
+				)
+			) as geom,
 			%s
 		FROM %s
 		WHERE ST_Intersects(geom, ST_GeomFromText('%s', %d))
@@ -1423,6 +1427,10 @@ func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outp
 
 	// 6. 创建临时GDALLayer来存储查询结果
 	tempLayer, err := createLayerFromPGQuery(db, query, tableName, srid)
+	err = WriteShapeFileLayer(tempLayer, fmt.Sprintf("C:\\Users\\Administrator\\Desktop\\新建文件夹 (2)\\%s_%d.shp", tableName, tile.Index), fmt.Sprintf("%d", tile.Index), true)
+	if err != nil {
+		fmt.Println(err.Error())
+	}
 	if err != nil {
 		return fmt.Errorf("创建临时图层失败: %v", err)
 	}
@@ -1443,8 +1451,45 @@ func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outp
 
 	return nil
 }
+func getTableGeometryType(db *gorm.DB, tableName string) (C.OGRwkbGeometryType, error) {
+	var result struct {
+		Type string `gorm:"column:type"`
+	}
 
-// createLayerFromPGQuery 从PostgreSQL查询结果创建GDALLayer
+	err := db.Raw(`
+        SELECT type 
+        FROM geometry_columns 
+        WHERE f_table_name = ? AND f_geometry_column = 'geom'
+    `, tableName).Scan(&result).Error
+
+	if err != nil {
+		return C.wkbUnknown, err
+	}
+
+	return mapGeometryColumnTypeToOGR(result.Type), nil
+}
+
+func mapGeometryColumnTypeToOGR(geomType string) C.OGRwkbGeometryType {
+	switch strings.ToUpper(geomType) {
+	case "POINT":
+		return C.wkbPoint
+	case "LINESTRING":
+		return C.wkbLineString
+	case "POLYGON":
+		return C.wkbPolygon
+	case "MULTIPOINT":
+		return C.wkbMultiPoint
+	case "MULTILINESTRING":
+		return C.wkbMultiLineString
+	case "MULTIPOLYGON":
+		return C.wkbMultiPolygon
+	case "GEOMETRY":
+		return C.wkbUnknown
+	default:
+		return C.wkbUnknown
+	}
+}
+
 func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid int) (*GDALLayer, error) {
 	// 创建内存数据源
 	driver := C.OGRGetDriverByName(C.CString("Memory"))
@@ -1455,18 +1500,42 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 	if ds == nil {
 		return nil, fmt.Errorf("创建内存数据源失败")
 	}
+
 	// 创建空间参考
 	srs := C.OSRNewSpatialReference(nil)
 	C.OSRImportFromEPSG(srs, C.int(srid))
 	defer C.OSRDestroySpatialReference(srs)
-	// 创建图层
+
+	// 创建图层 - 强制使用MultiPolygon类型
 	layerName := C.CString("temp_layer")
 	defer C.free(unsafe.Pointer(layerName))
-	layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbUnknown, nil)
+
+	// 获取原始几何类型并转换为Multi类型
+	originalGeomType, err := getTableGeometryType(db, sourceTable)
+	if err != nil {
+		log.Printf("获取几何类型失败，使用默认类型: %v", err)
+		originalGeomType = C.wkbPolygon // 默认为Polygon
+	}
+
+	// 转换为对应的Multi类型
+	var multiGeomType C.OGRwkbGeometryType
+	switch originalGeomType {
+	case C.wkbPolygon:
+		multiGeomType = C.wkbMultiPolygon
+	case C.wkbLineString:
+		multiGeomType = C.wkbMultiLineString
+	case C.wkbPoint:
+		multiGeomType = C.wkbMultiPoint
+	default:
+		multiGeomType = C.wkbMultiPolygon // 默认使用MultiPolygon
+	}
+
+	layer := C.OGR_DS_CreateLayer(ds, layerName, srs, multiGeomType, nil)
 	if layer == nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("创建图层失败")
 	}
+
 	// 获取源表的字段定义（排除geom字段）- 按顺序
 	var columns []struct {
 		ColumnName      string `gorm:"column:column_name"`
@@ -1474,7 +1543,7 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		UdtName         string `gorm:"column:udt_name"`
 		OrdinalPosition int    `gorm:"column:ordinal_position"`
 	}
-	err := db.Raw(fmt.Sprintf(`
+	err = db.Raw(fmt.Sprintf(`
 		SELECT column_name, data_type, udt_name, ordinal_position
 		FROM information_schema.columns
 		WHERE table_name = '%s' 
@@ -1486,11 +1555,7 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("获取字段定义失败: %v", err)
 	}
-	// 记录字段顺序用于调试
-	log.Printf("表 %s 的字段顺序:", sourceTable)
-	for i, col := range columns {
-		log.Printf("  %d: %s (%s/%s)", i, col.ColumnName, col.DataType, col.UdtName)
-	}
+
 	// 添加字段定义到图层
 	for _, col := range columns {
 		fieldType := mapPostgreSQLTypeToOGR(col.DataType)
@@ -1500,21 +1565,15 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		C.OGR_Fld_Destroy(fieldDefn)
 		C.free(unsafe.Pointer(fieldName))
 	}
-	// **关键修复：不使用传入的query，而是重新构建明确的查询**
-	// 从传入的query中提取WHERE条件
-	var fieldList []string
-	for _, col := range columns {
-		fieldList = append(fieldList, col.ColumnName)
-	}
 
-	log.Printf("使用重建的查询")
 	// 执行查询并填充数据
-	rows, err := db.Raw(query).Rows() // 仍使用原query，但后面会按新顺序处理
+	rows, err := db.Raw(query).Rows()
 	if err != nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("执行查询失败: %v", err)
 	}
 	defer rows.Close()
+
 	// 获取查询结果的列名
 	columnNames, err := rows.Columns()
 	if err != nil {
@@ -1522,14 +1581,27 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		return nil, fmt.Errorf("获取列名失败: %v", err)
 	}
 
-	log.Printf("查询返回的列: %v", columnNames)
-	// 创建列名到索引的映射
+	// 创建字段名到图层字段索引的映射
+	fieldNameToLayerIndex := make(map[string]int)
+	for i, col := range columns {
+		fieldNameToLayerIndex[col.ColumnName] = i
+	}
+
+	// 创建查询列名到结果索引的映射
 	columnMap := make(map[string]int)
 	for i, name := range columnNames {
 		columnMap[name] = i
 	}
-	// 遍历结果集并创建要素
+
+	// 获取图层字段定义
+	layerFieldDefns := make([]C.OGRFieldDefnH, len(columns))
 	featureDefn := C.OGR_L_GetLayerDefn(layer)
+	featureCount := 0
+
+	for i, _ := range columns {
+		layerFieldDefns[i] = C.OGR_FD_GetFieldDefn(featureDefn, C.int(i))
+	}
+
 	for rows.Next() {
 		// 准备扫描目标
 		values := make([]interface{}, len(columnNames))
@@ -1543,42 +1615,79 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 			log.Printf("扫描行数据失败: %v", err)
 			continue
 		}
+
 		// 创建要素
 		feature := C.OGR_F_Create(featureDefn)
 
-		// 设置几何字段
-		if geomIdx, ok := columnMap["geom_wkb"]; ok {
+		// 设置几何字段 - 关键修复：确保几何类型匹配
+		if geomIdx, ok := columnMap["geom"]; ok {
 			if wkb, ok := values[geomIdx].([]byte); ok && len(wkb) > 0 {
-				geom := C.OGR_G_CreateGeometry(C.wkbUnknown)
+				// 先创建几何对象
+				geom := C.OGR_G_CreateGeometry(multiGeomType) // 使用Unknown让GDAL自动识别
 				if geom != nil {
 					cWkb := C.CBytes(wkb)
 					result := C.OGR_G_ImportFromWkb(geom, cWkb, C.int(len(wkb)))
 					C.free(cWkb)
 
 					if result == C.OGRERR_NONE {
-						C.OGR_F_SetGeometry(feature, geom)
-					}
-					C.OGR_G_DestroyGeometry(geom)
-				}
-			}
-		}
-		// **关键修复：按照字段定义的顺序设置字段值**
-		for i, col := range columns {
-			if colIdx, ok := columnMap[col.ColumnName]; ok {
-				// 直接使用顺序索引 i，而不是通过名称查找
-				fieldIndex := C.int(i)
+						// 检查几何类型并转换为Multi类型（如果需要）
+						geomType := C.OGR_G_GetGeometryType(geom)
 
-				if colIdx < len(values) {
-					setFeatureFieldValue(feature, fieldIndex, values[colIdx])
+						var finalGeom C.OGRGeometryH
+
+						// 如果已经是Multi类型，直接使用
+						if isMultiGeometryType(geomType) {
+							finalGeom = geom
+						} else {
+							// 转换为Multi类型
+							finalGeom = convertToMultiGeometry(geom, multiGeomType)
+							if finalGeom != geom {
+								C.OGR_G_DestroyGeometry(geom) // 销毁原始几何
+							}
+						}
+
+						if finalGeom != nil {
+							setResult := C.OGR_F_SetGeometry(feature, finalGeom)
+							if setResult != C.OGRERR_NONE {
+								log.Printf("设置几何失败，错误码: %d", int(setResult))
+							}
+
+							if finalGeom != geom {
+								C.OGR_G_DestroyGeometry(finalGeom)
+							}
+						}
+					} else {
+						log.Printf("导入WKB失败，错误码: %d", int(result))
+					}
+
+					if geom != nil {
+						C.OGR_G_DestroyGeometry(geom)
+					}
 				}
-			} else {
-				log.Printf("警告: 字段 %s 在查询结果中不存在", col.ColumnName)
 			}
 		}
+
+		// 按字段定义顺序设置字段值
+		for i, col := range columns {
+			if queryColIdx, ok := columnMap[col.ColumnName]; ok {
+				if queryColIdx < len(values) && values[queryColIdx] != nil {
+					fieldDefn := layerFieldDefns[i]
+					fieldType := C.OGR_Fld_GetType(fieldDefn)
+					setFeatureFieldValueWithConversion(feature, C.int(i), values[queryColIdx], fieldType)
+				}
+			}
+		}
+
 		// 添加要素到图层
-		C.OGR_L_CreateFeature(layer, feature)
+		if C.OGR_L_CreateFeature(layer, feature) == C.OGRERR_NONE {
+			featureCount++
+		} else {
+			log.Printf("创建要素失败")
+		}
 		C.OGR_F_Destroy(feature)
 	}
+
+	log.Printf("成功创建图层，包含 %d 个要素", featureCount)
 	return &GDALLayer{
 		layer:   layer,
 		dataset: ds,
@@ -1586,24 +1695,195 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 	}, nil
 }
 
-// mapPostgreSQLTypeToOGR 映射PostgreSQL类型到OGR字段类型
+// 辅助函数：检查是否为Multi几何类型
+func isMultiGeometryType(geomType C.OGRwkbGeometryType) bool {
+	switch geomType {
+	case C.wkbMultiPoint, C.wkbMultiLineString, C.wkbMultiPolygon:
+		return true
+	default:
+		return false
+	}
+}
+
+// 辅助函数：将几何转换为Multi类型
+func convertToMultiGeometry(geom C.OGRGeometryH, targetMultiType C.OGRwkbGeometryType) C.OGRGeometryH {
+	if geom == nil {
+		return nil
+	}
+
+	// 创建Multi几何容器
+	multiGeom := C.OGR_G_CreateGeometry(targetMultiType)
+	if multiGeom == nil {
+		return nil
+	}
+
+	// 克隆原始几何并添加到Multi容器中
+	clonedGeom := C.OGR_G_Clone(geom)
+	if clonedGeom != nil {
+		result := C.OGR_G_AddGeometry(multiGeom, clonedGeom)
+		C.OGR_G_DestroyGeometry(clonedGeom)
+
+		if result == C.OGRERR_NONE {
+			return multiGeom
+		}
+	}
+
+	// 如果失败，清理并返回nil
+	C.OGR_G_DestroyGeometry(multiGeom)
+	return nil
+}
+
+// setFeatureFieldValueWithConversion 根据目标字段类型进行智能转换
+func setFeatureFieldValueWithConversion(feature C.OGRFeatureH, fieldIndex C.int, value interface{}, targetType C.OGRFieldType) {
+	if value == nil {
+		return
+	}
+
+	switch targetType {
+	case C.OFTInteger:
+		// 目标是整数
+		switch v := value.(type) {
+		case int, int32, int64:
+			C.OGR_F_SetFieldInteger(feature, fieldIndex, C.int(convertToInt64(v)))
+		case float32, float64:
+			C.OGR_F_SetFieldInteger(feature, fieldIndex, C.int(convertToFloat64(v)))
+		case []byte:
+			if intVal, err := strconv.ParseInt(string(v), 10, 32); err == nil {
+				C.OGR_F_SetFieldInteger(feature, fieldIndex, C.int(intVal))
+			}
+		case string:
+			if intVal, err := strconv.ParseInt(v, 10, 32); err == nil {
+				C.OGR_F_SetFieldInteger(feature, fieldIndex, C.int(intVal))
+			}
+		}
+
+	case C.OFTInteger64:
+		// 目标是64位整数
+		switch v := value.(type) {
+		case int, int32, int64:
+			C.OGR_F_SetFieldInteger64(feature, fieldIndex, C.longlong(convertToInt64(v)))
+		case float32, float64:
+			C.OGR_F_SetFieldInteger64(feature, fieldIndex, C.longlong(convertToFloat64(v)))
+		case []byte:
+			if intVal, err := strconv.ParseInt(string(v), 10, 64); err == nil {
+				C.OGR_F_SetFieldInteger64(feature, fieldIndex, C.longlong(intVal))
+			}
+		case string:
+			if intVal, err := strconv.ParseInt(v, 10, 64); err == nil {
+				C.OGR_F_SetFieldInteger64(feature, fieldIndex, C.longlong(intVal))
+			}
+		}
+
+	case C.OFTReal:
+		// 目标是浮点数
+		switch v := value.(type) {
+		case float32, float64:
+			C.OGR_F_SetFieldDouble(feature, fieldIndex, C.double(convertToFloat64(v)))
+		case int, int32, int64:
+			C.OGR_F_SetFieldDouble(feature, fieldIndex, C.double(convertToInt64(v)))
+		case []byte:
+			if floatVal, err := strconv.ParseFloat(string(v), 64); err == nil {
+				C.OGR_F_SetFieldDouble(feature, fieldIndex, C.double(floatVal))
+			}
+		case string:
+			if floatVal, err := strconv.ParseFloat(v, 64); err == nil {
+				C.OGR_F_SetFieldDouble(feature, fieldIndex, C.double(floatVal))
+			}
+		}
+
+	case C.OFTString:
+		// 目标是字符串
+		var strVal string
+		switch v := value.(type) {
+		case string:
+			strVal = v
+		case []byte:
+			strVal = string(v)
+		case int, int32, int64:
+			strVal = fmt.Sprintf("%d", convertToInt64(v))
+		case float32, float64:
+			strVal = fmt.Sprintf("%f", convertToFloat64(v))
+		default:
+			strVal = fmt.Sprintf("%v", v)
+		}
+		cStr := C.CString(strVal)
+		C.OGR_F_SetFieldString(feature, fieldIndex, cStr)
+		C.free(unsafe.Pointer(cStr))
+
+	default:
+		// 其他类型，尝试转换为字符串
+		var strVal string
+		switch v := value.(type) {
+		case string:
+			strVal = v
+		case []byte:
+			strVal = string(v)
+		default:
+			strVal = fmt.Sprintf("%v", v)
+		}
+		cStr := C.CString(strVal)
+		C.OGR_F_SetFieldString(feature, fieldIndex, cStr)
+		C.free(unsafe.Pointer(cStr))
+	}
+}
+
+// 辅助转换函数
+func convertToInt64(v interface{}) int64 {
+	switch val := v.(type) {
+	case int:
+		return int64(val)
+	case int32:
+		return int64(val)
+	case int64:
+		return val
+	case float32:
+		return int64(val)
+	case float64:
+		return int64(val)
+	default:
+		return 0
+	}
+}
+
+func convertToFloat64(v interface{}) float64 {
+	switch val := v.(type) {
+	case float32:
+		return float64(val)
+	case float64:
+		return val
+	case int:
+		return float64(val)
+	case int32:
+		return float64(val)
+	case int64:
+		return float64(val)
+	default:
+		return 0
+	}
+}
+
 func mapPostgreSQLTypeToOGR(pgType string) C.OGRFieldType {
-	switch pgType {
-	case "integer", "smallint", "int", "int4":
+	switch strings.ToLower(pgType) {
+	case "integer", "smallint", "int", "int2", "int4":
 		return C.OFTInteger
 	case "bigint", "int8":
 		return C.OFTInteger64
-	case "real", "float4", "double precision", "float8", "numeric", "decimal":
+	case "real", "float4":
 		return C.OFTReal
-	case "character varying", "varchar", "text", "character", "char":
+	case "double precision", "float8":
+		return C.OFTReal
+	case "numeric", "decimal":
+		return C.OFTReal // numeric 映射为 Real
+	case "character varying", "varchar", "text", "character", "char", "bpchar":
 		return C.OFTString
 	case "date":
 		return C.OFTDate
-	case "timestamp", "timestamp without time zone", "timestamp with time zone":
+	case "timestamp", "timestamp without time zone", "timestamp with time zone", "timestamptz":
 		return C.OFTDateTime
 	case "boolean", "bool":
 		return C.OFTInteger
 	default:
+		log.Printf("未知的PostgreSQL类型: %s，使用String类型", pgType)
 		return C.OFTString
 	}
 }
