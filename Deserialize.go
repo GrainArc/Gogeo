@@ -35,7 +35,7 @@ OGRGeometryH createGeometryFromWKB(unsigned char* wkbData, int wkbSize) {
     return hGeom;
 }
 
-// 反序列化单个要素
+// 反序列化单个要素（修复版）
 OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
                               OGRFeatureDefnH hDefn, size_t* bytesRead) {
     if (!buffer || !hDefn || !bytesRead || bufferSize == 0) return NULL;
@@ -58,7 +58,6 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
     remainingSize -= sizeof(int);
     *bytesRead += sizeof(int);
 
-    // 验证字段数量的合理性
     if (fieldCount < 0 || fieldCount > 10000) return NULL;
 
     // 创建要素
@@ -71,6 +70,16 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
 
     // 读取字段数据
     for (int i = 0; i < fieldCount; i++) {
+        // 读取字段设置标志
+        int isSet;
+        if (!safeMemcpy(&isSet, ptr, sizeof(int), remainingSize)) {
+            OGR_F_Destroy(hFeature);
+            return NULL;
+        }
+        ptr += sizeof(int);
+        remainingSize -= sizeof(int);
+        *bytesRead += sizeof(int);
+
         // 读取字段类型
         int fieldType;
         if (!safeMemcpy(&fieldType, ptr, sizeof(int), remainingSize)) {
@@ -81,24 +90,22 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
         remainingSize -= sizeof(int);
         *bytesRead += sizeof(int);
 
-        // 读取数据长度
-        int dataSize;
-        if (!safeMemcpy(&dataSize, ptr, sizeof(int), remainingSize)) {
-            OGR_F_Destroy(hFeature);
-            return NULL;
-        }
-        ptr += sizeof(int);
-        remainingSize -= sizeof(int);
-        *bytesRead += sizeof(int);
+        if (isSet && i < layerFieldCount) {
+            // 读取数据长度
+            int dataSize;
+            if (!safeMemcpy(&dataSize, ptr, sizeof(int), remainingSize)) {
+                OGR_F_Destroy(hFeature);
+                return NULL;
+            }
+            ptr += sizeof(int);
+            remainingSize -= sizeof(int);
+            *bytesRead += sizeof(int);
 
-        // 验证数据长度的合理性
-        if (dataSize < 0 || dataSize > remainingSize) {
-            OGR_F_Destroy(hFeature);
-            return NULL;
-        }
+            if (dataSize < 0 || dataSize > remainingSize) {
+                OGR_F_Destroy(hFeature);
+                return NULL;
+            }
 
-        // 只处理在图层定义范围内的字段
-        if (i < layerFieldCount) {
             // 根据字段类型读取数据
             switch (fieldType) {
                 case OFTInteger: {
@@ -146,16 +153,13 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
                     }
                     break;
                 }
-                default:
-                    // 跳过未支持的字段类型
-                    break;
             }
-        }
 
-        // 移动指针，即使没有处理数据也要跳过
-        ptr += dataSize;
-        remainingSize -= dataSize;
-        *bytesRead += dataSize;
+            ptr += dataSize;
+            remainingSize -= dataSize;
+            *bytesRead += dataSize;
+        }
+        // 如果字段未设置，不读取数据部分
     }
 
     // 读取几何数据
@@ -169,7 +173,7 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
     *bytesRead += sizeof(int);
 
     if (wkbSize > 0) {
-        if (wkbSize <= remainingSize && wkbSize < 100000000) { // 100MB上限
+        if (wkbSize <= remainingSize && wkbSize < 100000000) {
             OGRGeometryH hGeom = createGeometryFromWKB(ptr, wkbSize);
             if (hGeom) {
                 OGR_F_SetGeometry(hFeature, hGeom);
@@ -187,6 +191,7 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
 
     return hFeature;
 }
+
 
 // 从二进制数据反序列化图层
 DeserializeResult deserializeLayerFromBinary(unsigned char* buffer, size_t bufferSize) {
