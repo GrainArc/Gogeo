@@ -591,8 +591,8 @@ func createMemoryLayerCopy(sourceLayer *GDALLayer, layerName string) (*GDALLayer
 	return memLayer, nil
 }
 
-// deleteFieldFromLayer 从图层中删除指定字段
-func deleteFieldFromLayer(layer *GDALLayer, fieldName string) error {
+// DeleteFieldFromLayer 从图层中删除指定字段
+func DeleteFieldFromLayer(layer *GDALLayer, fieldName string) error {
 	layerDefn := C.OGR_L_GetLayerDefn(layer.layer)
 	fieldNameC := C.CString(fieldName)
 	defer C.free(unsafe.Pointer(fieldNameC))
@@ -684,6 +684,19 @@ func PerformUnionByFields(inputLayer *GDALLayer,
 			break
 		}
 	}
+
+	// 构建输出图层名称
+	outputLayerName := fmt.Sprintf("analysis_union_outlayer")
+	precisionConfig.GridSize = 0
+	// 执行融合操作
+	return UnionByFieldsWithPrecision(inputLayer, groupFields, outputLayerName, precisionConfig, progressCallback)
+}
+
+func PerformUnionByFieldsPG(inputLayer *GDALLayer,
+	precisionConfig *GeometryPrecisionConfig, progressCallback ProgressCallback) (*GeosAnalysisResult, error) {
+
+	var groupFields []string
+	groupFields = append(groupFields, "id")
 
 	// 构建输出图层名称
 	outputLayerName := fmt.Sprintf("analysis_union_outlayer")

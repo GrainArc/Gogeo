@@ -1427,10 +1427,10 @@ func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outp
 
 	// 6. 创建临时GDALLayer来存储查询结果
 	tempLayer, err := createLayerFromPGQuery(db, query, tableName, srid)
-	err = WriteShapeFileLayer(tempLayer, fmt.Sprintf("C:\\Users\\Administrator\\Desktop\\新建文件夹 (2)\\%s_%d.shp", tableName, tile.Index), fmt.Sprintf("%d", tile.Index), true)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
+	//err = WriteShapeFileLayer(tempLayer, fmt.Sprintf("C:\\Users\\Administrator\\Desktop\\新建文件夹 (2)\\%s_%d.shp", tableName, tile.Index), fmt.Sprintf("%d", tile.Index), true)
+	//if err != nil {
+	//	fmt.Println(err.Error())
+	//}
 	if err != nil {
 		return fmt.Errorf("创建临时图层失败: %v", err)
 	}

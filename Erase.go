@@ -33,6 +33,7 @@ import "C"
 import (
 	"fmt"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"log"
 	"runtime"
 	"sync"
@@ -77,7 +78,7 @@ func SpatialEraseAnalysis(inputLayer, methodlayer *GDALLayer, config *ParallelGe
 
 		fmt.Printf("融合操作完成，最终生成 %d 个要素\n", unionResult.ResultCount)
 		// 删除临时的字段
-		err = deleteFieldFromLayer(unionResult.OutputLayer, "gogeo_analysis_id")
+		err = DeleteFieldFromLayer(unionResult.OutputLayer, "gogeo_analysis_id")
 		if err != nil {
 			fmt.Printf("警告: 删除临时标识字段失败: %v\n", err)
 		}
@@ -447,5 +448,259 @@ func executeGDALEraseWithProgress(inputLayer, eraseLayer, resultLayer *GDALLayer
 		return fmt.Errorf("GDAL擦除操作失败，错误代码: %d", int(err))
 	}
 
+	return nil
+}
+
+// SpatialEraseAnalysisParallelPG PostgreSQL版本的并行空间擦除分析
+func SpatialEraseAnalysisParallelPG(
+	db *gorm.DB,
+	table1, table2 string,
+	config *ParallelGeosConfig,
+) (*GeosAnalysisResult, error) {
+
+	taskid := uuid.New().String()
+	// 1. 直接从PG生成瓦片bin文件（优化版本）
+	log.Printf("开始从PostgreSQL生成瓦片...")
+	err := GenerateTilesFromPG(db, table1, table2, config.TileCount, taskid)
+	if err != nil {
+		return nil, fmt.Errorf("生成瓦片失败: %v", err)
+	}
+	// 2. 读取bin文件分组
+	log.Printf("读取瓦片分组...")
+	GPbins, err := ReadAndGroupBinFiles(taskid)
+	if err != nil {
+		return nil, fmt.Errorf("读取分组文件失败: %v", err)
+	}
+
+	resultLayer, err := createResultLayerFromBinForErase(GPbins, table1, table2)
+	if err != nil {
+		return nil, fmt.Errorf("创建结果图层失败: %v", err)
+	}
+
+	log.Printf("开始并发执行空间擦除分析...")
+	err = ExecuteConcurrentEraseAnalysisPG(GPbins, resultLayer, config)
+	if err != nil {
+		resultLayer.Close()
+		return nil, fmt.Errorf("并发分析失败: %v", err)
+	}
+	// 5. 清理临时文件
+	defer func() {
+		err := CleanupTileFiles(taskid)
+		if err != nil {
+			log.Printf("清理临时文件失败: %v", err)
+		}
+	}()
+	// 6. 计算结果数量
+	resultCount := resultLayer.GetFeatureCount()
+	log.Printf("空间擦除分析完成，共生成 %d 个要素", resultCount)
+	resultLayer.PrintLayerInfo()
+	// 7. 如果需要合并瓦片
+	if config.IsMergeTile {
+		log.Printf("开始合并瓦片...")
+		unionResult, err := PerformUnionByFieldsPG(resultLayer, config.PrecisionConfig, config.ProgressCallback)
+		if err != nil {
+			return nil, fmt.Errorf("执行融合操作失败: %v", err)
+		}
+		// 删除临时标识字段
+		err = DeleteFieldFromLayer(unionResult.OutputLayer, "id")
+		if err != nil {
+			log.Printf("警告: 删除临时标识字段失败: %v", err)
+		}
+		log.Printf("合并完成，最终结果: %d 个要素", unionResult.ResultCount)
+		return unionResult, nil
+	}
+	return &GeosAnalysisResult{
+		OutputLayer: resultLayer,
+		ResultCount: resultCount,
+	}, nil
+}
+
+// createResultLayerFromBinForErase 从bin文件创建擦除结果图层
+func createResultLayerFromBinForErase(GPbins []GroupTileFiles, table1, table2 string) (*GDALLayer, error) {
+	// 找到第一个非空的bin文件
+	var layer1Path string
+
+	for _, group := range GPbins {
+		// 检查文件是否存在且非空
+		if IsValidBinFile(group.GPBin.Layer1) {
+			layer1Path = group.GPBin.Layer1
+			break
+		}
+	}
+	if layer1Path == "" {
+		return nil, fmt.Errorf("未找到有效的bin文件")
+	}
+	// 反序列化第一个bin文件以获取schema信息
+	tempLayer1, err := DeserializeLayerFromFile(layer1Path)
+	if err != nil {
+		return nil, fmt.Errorf("反序列化layer1失败: %v", err)
+	}
+	defer tempLayer1.Close()
+
+	// 创建结果图层（复用现有函数）
+	return createEraseAnalysisResultLayer(tempLayer1)
+}
+
+// processTileGroupforErasePG PG优化版本的分块处理
+func processTileGroupforErasePG(tileGroup GroupTileFiles, config *ParallelGeosConfig) (*GDALLayer, error) {
+	// 加载layer1的bin文件
+	inputTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer1)
+	if err != nil {
+		return nil, fmt.Errorf("加载输入分块文件失败: %v", err)
+	}
+	// 加载layer2的bin文件
+	eraseTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer2)
+	if err != nil {
+		inputTileLayer.Close()
+		return nil, fmt.Errorf("加载擦除分块文件失败: %v", err)
+	}
+
+	defer func() {
+		inputTileLayer.Close()
+		eraseTileLayer.Close()
+	}()
+	// **关键修改：在这里应用精度设置**
+	if config.PrecisionConfig != nil && config.PrecisionConfig.Enabled {
+		err = applyPrecisionToLayer(inputTileLayer, config.PrecisionConfig)
+		if err != nil {
+			return nil, fmt.Errorf("应用精度到输入图层失败: %v", err)
+		}
+		err = applyPrecisionToLayer(eraseTileLayer, config.PrecisionConfig)
+		if err != nil {
+			return nil, fmt.Errorf("应用精度到擦除图层失败: %v", err)
+		}
+	}
+	// 为当前分块创建临时结果图层
+	tileName := fmt.Sprintf("tile_result_%d", tileGroup.Index)
+	tileResultLayer, err := createTileResultLayer(inputTileLayer, tileName)
+	if err != nil {
+		return nil, fmt.Errorf("创建分块结果图层失败: %v", err)
+	}
+	// 执行擦除分析
+	err = executeEraseAnalysis(inputTileLayer, eraseTileLayer, tileResultLayer, nil)
+	if err != nil {
+		tileResultLayer.Close()
+		return nil, fmt.Errorf("执行擦除分析失败: %v", err)
+	}
+	return tileResultLayer, nil
+}
+
+// worker_erase_pg PG优化版本的worker
+func worker_erase_pg(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup) {
+	defer wg.Done()
+	tasksProcessed := 0
+	for tileGroup := range taskQueue {
+		start := time.Now()
+		// 使用优化版本处理单个分块（包含精度应用）
+		layer, err := processTileGroupforErasePG(tileGroup, config)
+		duration := time.Since(start)
+		tasksProcessed++
+		// 发送结果
+		results <- taskResult{
+			layer:    layer,
+			err:      err,
+			duration: duration,
+			index:    tileGroup.Index,
+		}
+
+		runtime.GC()
+	}
+}
+
+// ExecuteConcurrentEraseAnalysisPG PG优化版本的并发擦除分析
+func ExecuteConcurrentEraseAnalysisPG(tileGroups []GroupTileFiles, resultLayer *GDALLayer, config *ParallelGeosConfig) error {
+	maxWorkers := config.MaxWorkers
+	if maxWorkers <= 0 {
+		maxWorkers = runtime.NumCPU()
+	}
+	totalTasks := len(tileGroups)
+	if totalTasks == 0 {
+		return fmt.Errorf("没有分块需要处理")
+	}
+	// 创建任务队列和结果队列
+	taskQueue := make(chan GroupTileFiles, totalTasks)
+	results := make(chan taskResult, totalTasks)
+	// 启动固定数量的工作协程（使用优化版本的worker）
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go worker_erase_pg(i, taskQueue, results, config, &wg)
+	}
+	// 发送所有任务到队列
+	go func() {
+		for _, tileGroup := range tileGroups {
+			taskQueue <- tileGroup
+		}
+		close(taskQueue)
+	}()
+	// 启动结果收集协程
+	var resultWg sync.WaitGroup
+	resultWg.Add(1)
+	var processingError error
+	completed := 0
+	go func() {
+		defer resultWg.Done()
+		var totalDuration time.Duration
+		var minDuration, maxDuration time.Duration
+		for i := 0; i < totalTasks; i++ {
+			result := <-results
+			completed++
+			if result.err != nil {
+				processingError = fmt.Errorf("分块 %d 处理失败: %v", result.index, result.err)
+				log.Printf("错误: %v", processingError)
+				return
+			}
+			// 统计执行时间
+			totalDuration += result.duration
+			if i == 0 {
+				minDuration = result.duration
+				maxDuration = result.duration
+			} else {
+				if result.duration < minDuration {
+					minDuration = result.duration
+				}
+				if result.duration > maxDuration {
+					maxDuration = result.duration
+				}
+			}
+			// 将结果合并到主图层
+			if result.layer != nil {
+				err := mergeResultsToMainLayer(result.layer, resultLayer)
+				if err != nil {
+					processingError = fmt.Errorf("合并分块 %d 结果失败: %v", result.index, err)
+					log.Printf("错误: %v", processingError)
+					return
+				}
+				// 释放临时图层资源
+				result.layer.Close()
+			}
+			// 进度回调
+			if config.ProgressCallback != nil {
+				progress := float64(completed) / float64(totalTasks)
+				avgDuration := totalDuration / time.Duration(completed)
+				var memStats runtime.MemStats
+				runtime.ReadMemStats(&memStats)
+				message := fmt.Sprintf("已完成: %d/%d, 平均耗时: %v, 内存: %.2fMB, 协程数: %d",
+					completed, totalTasks, avgDuration,
+					float64(memStats.Alloc)/1024/1024, runtime.NumGoroutine())
+				config.ProgressCallback(progress, message)
+			}
+			// 每处理50个任务输出一次详细统计
+			if completed%50 == 0 || completed == totalTasks {
+				avgDuration := totalDuration / time.Duration(completed)
+				log.Printf("进度统计 - 已完成: %d/%d, 平均耗时: %v, 最快: %v, 最慢: %v",
+					completed, totalTasks, avgDuration, minDuration, maxDuration)
+			}
+		}
+		log.Printf("所有分块处理完成，总计: %d", completed)
+	}()
+	// 等待所有工作协程完成
+	wg.Wait()
+	close(results)
+	// 等待结果收集完成
+	resultWg.Wait()
+	if processingError != nil {
+		return processingError
+	}
 	return nil
 }

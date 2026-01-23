@@ -33,6 +33,7 @@ import "C"
 import (
 	"fmt"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"log"
 	"runtime"
 	"sync"
@@ -616,7 +617,7 @@ func executeGDALIntersection(inputLayer, methodLayer, resultLayer *GDALLayer, op
 
 //PG版本
 
-func processTileGroupforIntersectionOptimized(tileGroup GroupTileFiles, config *ParallelGeosConfig, strategy FieldMergeStrategy) (*GDALLayer, error) {
+func processTileGroupforIntersectionPG(tileGroup GroupTileFiles, config *ParallelGeosConfig, strategy FieldMergeStrategy) (*GDALLayer, error) {
 	// 加载layer1的bin文件
 	inputTileLayer, err := DeserializeLayerFromFile(tileGroup.GPBin.Layer1)
 	if err != nil {
@@ -672,13 +673,13 @@ func applyPrecisionToLayer(layer *GDALLayer, precisionConfig *GeometryPrecisionC
 }
 
 // 修改worker函数以使用优化版本
-func worker_intersection_optimized(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup, strategy FieldMergeStrategy) {
+func worker_intersection_pg(workerID int, taskQueue <-chan GroupTileFiles, results chan<- taskResult, config *ParallelGeosConfig, wg *sync.WaitGroup, strategy FieldMergeStrategy) {
 	defer wg.Done()
 	tasksProcessed := 0
 	for tileGroup := range taskQueue {
 		start := time.Now()
 		// 使用优化版本处理单个分块（包含精度应用）
-		layer, err := processTileGroupforIntersectionOptimized(tileGroup, config, strategy)
+		layer, err := processTileGroupforIntersectionPG(tileGroup, config, strategy)
 		duration := time.Since(start)
 		tasksProcessed++
 		// 发送结果
@@ -694,7 +695,7 @@ func worker_intersection_optimized(workerID int, taskQueue <-chan GroupTileFiles
 }
 
 // 修改ExecuteConcurrentIntersectionAnalysis以支持优化版本
-func ExecuteConcurrentIntersectionAnalysisOptimized(tileGroups []GroupTileFiles, resultLayer *GDALLayer, config *ParallelGeosConfig, strategy FieldMergeStrategy) error {
+func ExecuteConcurrentIntersectionAnalysisPG(tileGroups []GroupTileFiles, resultLayer *GDALLayer, config *ParallelGeosConfig, strategy FieldMergeStrategy) error {
 	maxWorkers := config.MaxWorkers
 	if maxWorkers <= 0 {
 		maxWorkers = runtime.NumCPU()
@@ -710,7 +711,7 @@ func ExecuteConcurrentIntersectionAnalysisOptimized(tileGroups []GroupTileFiles,
 	var wg sync.WaitGroup
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
-		go worker_intersection_optimized(i, taskQueue, results, config, &wg, strategy)
+		go worker_intersection_pg(i, taskQueue, results, config, &wg, strategy)
 	}
 	// 发送所有任务到队列
 	go func() {
@@ -791,48 +792,102 @@ func ExecuteConcurrentIntersectionAnalysisOptimized(tileGroups []GroupTileFiles,
 	return nil
 }
 
-func performIntersectionAnalysisOptimized(inputLayer, methodLayer *GDALLayer, strategy FieldMergeStrategy, config *ParallelGeosConfig, useOptimized bool) (*GDALLayer, error) {
-	// **移除精度预处理部分**
-	// 不再在这里创建内存副本和应用精度
-	// 精度将在反序列化bin文件后应用
-	// 创建结果图层
-	resultLayer, err := CreateIntersectionResultLayer(inputLayer, methodLayer, strategy)
+func SpatialIntersectionAnalysisParallelPG(
+	db *gorm.DB,
+	table1, table2 string,
+	strategy FieldMergeStrategy,
+	config *ParallelGeosConfig,
+) (*GeosAnalysisResult, error) {
+
+	taskid := uuid.New().String()
+	// 1. 直接从PG生成瓦片bin文件（优化版本）
+	log.Printf("开始从PostgreSQL生成瓦片...")
+	err := GenerateTilesFromPG(db, table1, table2, config.TileCount, taskid)
+	if err != nil {
+		return nil, fmt.Errorf("生成瓦片失败: %v", err)
+	}
+	// 2. 读取bin文件分组
+	log.Printf("读取瓦片分组...")
+	GPbins, err := ReadAndGroupBinFiles(taskid)
+	if err != nil {
+		return nil, fmt.Errorf("读取分组文件失败: %v", err)
+	}
+
+	resultLayer, err := createResultLayerFromBin(GPbins, table1, table2, strategy)
 	if err != nil {
 		return nil, fmt.Errorf("创建结果图层失败: %v", err)
 	}
 
-	taskid := uuid.New().String()
-
-	if useOptimized {
-		// 使用优化版本：直接从PG生成bin文件
-		// 注意：这里需要传入数据库连接和表名
-		// 这个函数签名需要调整，或者在更上层调用
-		log.Printf("使用优化版本生成瓦片")
-	} else {
-		// 使用原版本：对GDALLayer进行分块
-		GenerateTiles(inputLayer, methodLayer, config.TileCount, taskid)
-	}
-
-	// 读取文件列表，并发执行相交操作
-	GPbins, err := ReadAndGroupBinFiles(taskid)
-	if err != nil {
-		return nil, fmt.Errorf("提取分组文件失败: %v", err)
-	}
-
-	// 并发执行分析（使用优化版本，会在反序列化后应用精度）
-	err = ExecuteConcurrentIntersectionAnalysisOptimized(GPbins, resultLayer, config, strategy)
+	log.Printf("开始并发执行空间分析...")
+	err = ExecuteConcurrentIntersectionAnalysisPG(GPbins, resultLayer, config, strategy)
 	if err != nil {
 		resultLayer.Close()
 		return nil, fmt.Errorf("并发分析失败: %v", err)
 	}
-
-	// 清理临时文件
+	// 5. 清理临时文件
 	defer func() {
-		err := cleanupTileFiles(taskid)
+		err := CleanupTileFiles(taskid)
 		if err != nil {
 			log.Printf("清理临时文件失败: %v", err)
 		}
 	}()
+	// 6. 计算结果数量
+	resultCount := resultLayer.GetFeatureCount()
+	log.Printf("空间分析完成，共生成 %d 个要素", resultCount)
+	resultLayer.PrintLayerInfo()
+	// 7. 如果需要合并瓦片
+	if config.IsMergeTile {
+		log.Printf("开始合并瓦片...")
+		unionResult, err := PerformUnionByFieldsPG(resultLayer, config.PrecisionConfig, config.ProgressCallback)
+		if err != nil {
+			return nil, fmt.Errorf("执行融合操作失败: %v", err)
+		}
+		// 删除临时标识字段
+		err = DeleteFieldFromLayer(unionResult.OutputLayer, "id")
+		if err != nil {
+			log.Printf("警告: 删除临时标识字段失败: %v", err)
+		}
+		log.Printf("合并完成，最终结果: %d 个要素", unionResult.ResultCount)
+		return unionResult, nil
+	}
+	return &GeosAnalysisResult{
+		OutputLayer: resultLayer,
+		ResultCount: resultCount,
+	}, nil
+}
 
-	return resultLayer, nil
+// createResultLayerFromBin 从bin文件创建结果图层
+func createResultLayerFromBin(GPbins []GroupTileFiles, table1, table2 string, strategy FieldMergeStrategy) (*GDALLayer, error) {
+	// 找到第一个非空的bin文件
+	var layer1Path, layer2Path string
+
+	for _, group := range GPbins {
+		// 检查文件是否存在且非空
+		if IsValidBinFile(group.GPBin.Layer1) {
+			layer1Path = group.GPBin.Layer1
+		}
+		if IsValidBinFile(group.GPBin.Layer2) {
+			layer2Path = group.GPBin.Layer2
+		}
+
+		if layer1Path != "" && layer2Path != "" {
+			break
+		}
+	}
+	if layer1Path == "" || layer2Path == "" {
+		return nil, fmt.Errorf("未找到有效的bin文件")
+	}
+	// 反序列化第一个bin文件以获取schema信息
+	tempLayer1, err := DeserializeLayerFromFile(layer1Path)
+	if err != nil {
+		return nil, fmt.Errorf("反序列化layer1失败: %v", err)
+	}
+	defer tempLayer1.Close()
+	tempLayer2, err := DeserializeLayerFromFile(layer2Path)
+	if err != nil {
+		return nil, fmt.Errorf("反序列化layer2失败: %v", err)
+	}
+	defer tempLayer2.Close()
+	// 创建结果图层（复用现有函数）
+	return CreateIntersectionResultLayer(tempLayer1, tempLayer2, strategy)
 }
