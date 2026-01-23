@@ -254,7 +254,7 @@ func InitializeGDAL() error {
 	}
 
 	// 如果未指定编码，使用默认编码
-	shapeEncoding := "UTF-8"
+	shapeEncoding := ""
 
 	// 转换Go字符串为C字符串
 	cProjPath := C.CString(projDataPath)
