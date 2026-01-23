@@ -1576,10 +1576,22 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		return nil, fmt.Errorf("获取字段定义失败: %v", err)
 	}
 
-	// 添加字段定义到图层
+	// 添加字段定义到图层，并处理字段重命名
+	fieldNameMapping := make(map[string]string) // 原字段名 -> 新字段名的映射
 	for _, col := range columns {
 		fieldType := mapPostgreSQLTypeToOGR(col.DataType)
-		fieldName := C.CString(col.ColumnName)
+
+		// 检查是否需要重命名id字段
+		var finalFieldName string
+		if strings.ToLower(col.ColumnName) == "id" {
+			finalFieldName = sourceTable + "_gogeo_analysis_id"
+			fieldNameMapping[col.ColumnName] = finalFieldName
+		} else {
+			finalFieldName = col.ColumnName
+			fieldNameMapping[col.ColumnName] = finalFieldName
+		}
+
+		fieldName := C.CString(finalFieldName)
 		fieldDefn := C.OGR_Fld_Create(fieldName, fieldType)
 		C.OGR_L_CreateField(layer, fieldDefn, 1)
 		C.OGR_Fld_Destroy(fieldDefn)
@@ -1601,10 +1613,11 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		return nil, fmt.Errorf("获取列名失败: %v", err)
 	}
 
-	// 创建字段名到图层字段索引的映射
+	// 创建字段名到图层字段索引的映射（使用重命名后的字段名）
 	fieldNameToLayerIndex := make(map[string]int)
 	for i, col := range columns {
-		fieldNameToLayerIndex[col.ColumnName] = i
+		finalFieldName := fieldNameMapping[col.ColumnName]
+		fieldNameToLayerIndex[finalFieldName] = i
 	}
 
 	// 创建查询列名到结果索引的映射
@@ -1687,7 +1700,7 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 			}
 		}
 
-		// 按字段定义顺序设置字段值
+		// 按字段定义顺序设置字段值（使用原始字段名查找数据）
 		for i, col := range columns {
 			if queryColIdx, ok := columnMap[col.ColumnName]; ok {
 				if queryColIdx < len(values) && values[queryColIdx] != nil {

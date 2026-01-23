@@ -838,12 +838,12 @@ func SpatialIntersectionAnalysisParallelPG(
 	// 7. 如果需要合并瓦片
 	if config.IsMergeTile {
 		log.Printf("开始合并瓦片...")
-		unionResult, err := PerformUnionByFieldsPG(resultLayer, config.PrecisionConfig, config.ProgressCallback)
+		unionResult, err := PerformUnionByFields(resultLayer, config.PrecisionConfig, config.ProgressCallback)
 		if err != nil {
 			return nil, fmt.Errorf("执行融合操作失败: %v", err)
 		}
 		// 删除临时标识字段
-		err = DeleteFieldFromLayer(unionResult.OutputLayer, "id")
+		err = DeleteFieldFromLayerFuzzy(unionResult.OutputLayer, "gogeo_analysis_id")
 		if err != nil {
 			log.Printf("警告: 删除临时标识字段失败: %v", err)
 		}
