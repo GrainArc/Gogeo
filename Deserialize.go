@@ -459,9 +459,11 @@ DeserializeResult deserializeLayerFromBinary(unsigned char* buffer, size_t buffe
 import "C"
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"unsafe"
 )
 
@@ -513,29 +515,64 @@ func DeserializeLayerFromBinary(data []byte) (*DeserializeResult, error) {
 	return goResult, nil
 }
 
-// DeserializeLayerFromFile 从bin文件反序列化图层（修复版本）
 func DeserializeLayerFromFile(filePath string) (*GDALLayer, error) {
 	// 读取文件内容
 	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file %s: %v", filePath, err)
 	}
-
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty file: %s", filePath)
 	}
 
+	// **添加：检查是否是空bin文件（28字节且要素数为0）**
+	if len(data) == 28 {
+		// 检查魔数
+		if string(data[0:8]) == "GDALLYR2" {
+			// 检查要素数（偏移24的位置）
+			featureCount := binary.LittleEndian.Uint32(data[24:28])
+			if featureCount == 0 {
+				log.Printf("文件 %s 是空瓦片，跳过", filePath)
+				// 返回一个空图层或特殊标记
+				return createEmptyMemoryLayer(), nil
+			}
+		}
+	}
 	// 反序列化
 	result, err := DeserializeLayerFromBinary(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize from file %s: %v", filePath, err)
 	}
-
 	if !result.Success {
 		return nil, fmt.Errorf("deserialization failed for file %s: %s", filePath, result.ErrorMessage)
 	}
-
 	return result.Layer, nil
+}
+func createEmptyMemoryLayer() *GDALLayer {
+	driver := C.OGRGetDriverByName(C.CString("Memory"))
+	if driver == nil {
+		return nil
+	}
+
+	ds := C.OGR_Dr_CreateDataSource(driver, C.CString(""), nil)
+	if ds == nil {
+		return nil
+	}
+
+	layerName := C.CString("empty_layer")
+	defer C.free(unsafe.Pointer(layerName))
+
+	layer := C.OGR_DS_CreateLayer(ds, layerName, nil, C.wkbUnknown, nil)
+	if layer == nil {
+		C.OGR_DS_Destroy(ds)
+		return nil
+	}
+
+	return &GDALLayer{
+		layer:   layer,
+		dataset: ds,
+		driver:  driver,
+	}
 }
 
 // SafeDeserializeLayerFromFile 安全版本的文件反序列化

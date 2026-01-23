@@ -356,13 +356,34 @@ func PackShapefile(shpPath string) error {
 // 返回: 是否创建了新字段, error
 func EnsureObjectIDField(shpPath string) (bool, error) {
 
+	// 检测并设置编码（添加这部分）
+	encoding := detectSHPEncoding(shpPath)
+
+	cEncodingKey := C.CString("SHAPE_ENCODING")
+	cEncodingValue := C.CString(encoding)
+	C.CPLSetConfigOption(cEncodingKey, cEncodingValue)
+	err := InitializeGDALSHPCoding(encoding)
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	defer func() {
+		C.CPLSetConfigOption(cEncodingKey, nil)
+		C.free(unsafe.Pointer(cEncodingKey))
+		C.free(unsafe.Pointer(cEncodingValue))
+	}()
 	cFilePath := C.CString(shpPath)
 	defer C.free(unsafe.Pointer(cFilePath))
 
 	// 以可写模式打开Shapefile
-	dataset := C.OGROpen(cFilePath, C.int(1), nil) // 1表示可写
+	dataset := C.OGROpen(cFilePath, C.int(1), nil)
 	if dataset == nil {
-		return false, fmt.Errorf("无法以可写模式打开Shapefile: %s", shpPath)
+		// 获取详细的 GDAL 错误信息
+		errMsg := C.GoString(C.CPLGetLastErrorMsg())
+		errNo := int(C.CPLGetLastErrorNo())
+		errType := int(C.CPLGetLastErrorType())
+
+		return false, fmt.Errorf("无法打开Shapefile: %s\n错误码: %d\n错误类型: %d\n错误信息: %s",
+			shpPath, errNo, errType, errMsg)
 	}
 	defer C.OGR_DS_Destroy(dataset)
 

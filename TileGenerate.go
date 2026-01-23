@@ -766,6 +766,7 @@ int clipAndGroupByTilesOptimized(OGRLayerH hInputLayer, double* minXs, double* m
 import "C"
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"gorm.io/gorm"
@@ -1357,6 +1358,7 @@ func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outp
 		tile.MinX, tile.MaxY,
 		tile.MinX, tile.MinY,
 	)
+
 	// 2. 获取表的SRID
 	var srid int
 	err := db.Raw(fmt.Sprintf(`
@@ -1365,35 +1367,80 @@ func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outp
 	if err != nil {
 		return fmt.Errorf("获取SRID失败: %v", err)
 	}
-	// 3. 使用空间索引查询并裁剪数据
-	// ST_Intersection会自动裁剪几何到瓦片范围内
+
+	// 3. 先检查是否有数据
+	var count int64
+	err = db.Raw(fmt.Sprintf(`
+		SELECT COUNT(*) as count
+		FROM %s
+		WHERE ST_Intersects(geom, ST_GeomFromText('%s', %d))
+	`, tableName, tileWKT, srid)).Scan(&count).Error
+
+	if err != nil {
+		return fmt.Errorf("检查数据失败: %v", err)
+	}
+
+	outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.bin", tile.Index))
+
+	// 如果没有数据，创建空bin文件
+	if count == 0 {
+		log.Printf("瓦片 %d 无数据，创建空bin文件", tile.Index)
+		return createEmptyBinFile(outputPath)
+	}
+
+	// 4. 获取字段列表（按顺序）
+	var columns []struct {
+		ColumnName string `gorm:"column:column_name"`
+	}
+	err = db.Raw(fmt.Sprintf(`
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_name = '%s' 
+		AND column_name != 'geom'
+		ORDER BY ordinal_position
+	`, tableName)).Scan(&columns).Error
+
+	if err != nil {
+		return fmt.Errorf("获取字段列表失败: %v", err)
+	}
+
+	// 构建明确的字段列表
+	var fieldList []string
+	for _, col := range columns {
+		fieldList = append(fieldList, col.ColumnName)
+	}
+	fieldListStr := strings.Join(fieldList, ", ")
+
+	// 5. 使用明确字段列表的查询
 	query := fmt.Sprintf(`
 		SELECT 
 			ST_AsBinary(ST_Intersection(geom, ST_GeomFromText('%s', %d))) as geom_wkb,
-			*
+			%s
 		FROM %s
 		WHERE ST_Intersects(geom, ST_GeomFromText('%s', %d))
 		AND NOT ST_IsEmpty(ST_Intersection(geom, ST_GeomFromText('%s', %d)))
-	`, tileWKT, srid, tableName, tileWKT, srid, tileWKT, srid)
-	// 4. 创建临时GDALLayer来存储查询结果
+	`, tileWKT, srid, fieldListStr, tableName, tileWKT, srid, tileWKT, srid)
+
+	// 6. 创建临时GDALLayer来存储查询结果
 	tempLayer, err := createLayerFromPGQuery(db, query, tableName, srid)
 	if err != nil {
 		return fmt.Errorf("创建临时图层失败: %v", err)
 	}
 	defer tempLayer.Close()
-	// 5. 检查是否有数据
+
+	// 7. 检查是否有数据
 	featureCount := tempLayer.GetFeatureCount()
 	if featureCount == 0 {
 		// 创建空的bin文件
-		outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.bin", tile.Index))
 		return createEmptyBinFile(outputPath)
 	}
-	// 6. 序列化为bin文件
-	outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.bin", tile.Index))
+
+	// 8. 序列化为bin文件
 	err = serializeLayerToBinFile(tempLayer, outputPath, bufferSize)
 	if err != nil {
 		return fmt.Errorf("序列化失败: %v", err)
 	}
+
 	return nil
 }
 
@@ -1415,53 +1462,67 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 	// 创建图层
 	layerName := C.CString("temp_layer")
 	defer C.free(unsafe.Pointer(layerName))
-
 	layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbUnknown, nil)
 	if layer == nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("创建图层失败")
 	}
-	// 获取源表的字段定义（排除geom字段）
+	// 获取源表的字段定义（排除geom字段）- 按顺序
 	var columns []struct {
-		ColumnName string `gorm:"column:column_name"`
-		DataType   string `gorm:"column:data_type"`
+		ColumnName      string `gorm:"column:column_name"`
+		DataType        string `gorm:"column:data_type"`
+		UdtName         string `gorm:"column:udt_name"`
+		OrdinalPosition int    `gorm:"column:ordinal_position"`
 	}
-
 	err := db.Raw(fmt.Sprintf(`
-		SELECT column_name, data_type
+		SELECT column_name, data_type, udt_name, ordinal_position
 		FROM information_schema.columns
 		WHERE table_name = '%s' 
 		AND column_name != 'geom'
 		ORDER BY ordinal_position
 	`, sourceTable)).Scan(&columns).Error
+
 	if err != nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("获取字段定义失败: %v", err)
+	}
+	// 记录字段顺序用于调试
+	log.Printf("表 %s 的字段顺序:", sourceTable)
+	for i, col := range columns {
+		log.Printf("  %d: %s (%s/%s)", i, col.ColumnName, col.DataType, col.UdtName)
 	}
 	// 添加字段定义到图层
 	for _, col := range columns {
 		fieldType := mapPostgreSQLTypeToOGR(col.DataType)
 		fieldName := C.CString(col.ColumnName)
 		fieldDefn := C.OGR_Fld_Create(fieldName, fieldType)
-
 		C.OGR_L_CreateField(layer, fieldDefn, 1)
-
 		C.OGR_Fld_Destroy(fieldDefn)
 		C.free(unsafe.Pointer(fieldName))
 	}
+	// **关键修复：不使用传入的query，而是重新构建明确的查询**
+	// 从传入的query中提取WHERE条件
+	var fieldList []string
+	for _, col := range columns {
+		fieldList = append(fieldList, col.ColumnName)
+	}
+
+	log.Printf("使用重建的查询")
 	// 执行查询并填充数据
-	rows, err := db.Raw(query).Rows()
+	rows, err := db.Raw(query).Rows() // 仍使用原query，但后面会按新顺序处理
 	if err != nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("执行查询失败: %v", err)
 	}
 	defer rows.Close()
-	// 获取列名
+	// 获取查询结果的列名
 	columnNames, err := rows.Columns()
 	if err != nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("获取列名失败: %v", err)
 	}
+
+	log.Printf("查询返回的列: %v", columnNames)
 	// 创建列名到索引的映射
 	columnMap := make(map[string]int)
 	for i, name := range columnNames {
@@ -1469,7 +1530,6 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 	}
 	// 遍历结果集并创建要素
 	featureDefn := C.OGR_L_GetLayerDefn(layer)
-
 	for rows.Next() {
 		// 准备扫描目标
 		values := make([]interface{}, len(columnNames))
@@ -1477,6 +1537,7 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
+
 		err := rows.Scan(valuePtrs...)
 		if err != nil {
 			log.Printf("扫描行数据失败: %v", err)
@@ -1484,6 +1545,7 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		}
 		// 创建要素
 		feature := C.OGR_F_Create(featureDefn)
+
 		// 设置几何字段
 		if geomIdx, ok := columnMap["geom_wkb"]; ok {
 			if wkb, ok := values[geomIdx].([]byte); ok && len(wkb) > 0 {
@@ -1492,6 +1554,7 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 					cWkb := C.CBytes(wkb)
 					result := C.OGR_G_ImportFromWkb(geom, cWkb, C.int(len(wkb)))
 					C.free(cWkb)
+
 					if result == C.OGRERR_NONE {
 						C.OGR_F_SetGeometry(feature, geom)
 					}
@@ -1499,16 +1562,17 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 				}
 			}
 		}
-		// 设置属性字段
-		for _, col := range columns {
+		// **关键修复：按照字段定义的顺序设置字段值**
+		for i, col := range columns {
 			if colIdx, ok := columnMap[col.ColumnName]; ok {
-				fieldName := C.CString(col.ColumnName)
-				fieldIndex := C.OGR_F_GetFieldIndex(feature, fieldName)
-				C.free(unsafe.Pointer(fieldName))
+				// 直接使用顺序索引 i，而不是通过名称查找
+				fieldIndex := C.int(i)
 
-				if fieldIndex >= 0 {
+				if colIdx < len(values) {
 					setFeatureFieldValue(feature, fieldIndex, values[colIdx])
 				}
+			} else {
+				log.Printf("警告: 字段 %s 在查询结果中不存在", col.ColumnName)
 			}
 		}
 		// 添加要素到图层
@@ -1604,13 +1668,43 @@ func serializeLayerToBinFile(layer *GDALLayer, outputPath string, bufferSize int
 
 // createEmptyBinFile 创建空的bin文件（用于没有数据的瓦片）
 func createEmptyBinFile(outputPath string) error {
+	// 创建一个最小的有效bin文件结构
+	// 包含：魔数(8) + 版本(4) + 几何类型(4) + SRS大小(4) + 字段数(4) + 要素数(4) = 28字节
+
+	buffer := make([]byte, 28)
+	offset := 0
+
+	// 写入魔数 "GDALLYR2"
+	copy(buffer[offset:], []byte("GDALLYR2"))
+	offset += 8
+
+	// 写入版本号 2
+	binary.LittleEndian.PutUint32(buffer[offset:], 2)
+	offset += 4
+
+	// 写入几何类型 wkbUnknown (0)
+	binary.LittleEndian.PutUint32(buffer[offset:], 0)
+	offset += 4
+
+	// 写入SRS大小 0
+	binary.LittleEndian.PutUint32(buffer[offset:], 0)
+	offset += 4
+
+	// 写入字段数 0
+	binary.LittleEndian.PutUint32(buffer[offset:], 0)
+	offset += 4
+
+	// 写入要素数 0
+	binary.LittleEndian.PutUint32(buffer[offset:], 0)
+
+	// 写入文件
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("创建空文件失败: %v", err)
 	}
 	defer file.Close()
-	// 写入一个标记表示这是空文件
-	_, err = file.Write([]byte{0})
+
+	_, err = file.Write(buffer)
 	return err
 }
 

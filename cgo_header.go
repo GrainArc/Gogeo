@@ -42,7 +42,7 @@ void initializeGDALWithProjFix(const char* projDataPath, const char* shapeEncodi
     if (shapeEncoding && strlen(shapeEncoding) > 0) {
         CPLSetConfigOption("SHAPE_ENCODING", shapeEncoding); // 设置Shapefile文件编码
     }
-	CPLSetErrorHandler(CPLQuietErrorHandler);
+	//CPLSetErrorHandler(CPLQuietErrorHandler);
     // 注册所有GDAL驱动程序，启用栅格数据支持
     GDALAllRegister();
     // 注册所有OGR驱动程序，启用矢量数据支持
@@ -236,7 +236,7 @@ func InitializeGDAL() error {
 		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
 			projDataPath = envPath
 		} else {
-			projDataPath = exeDir + "/OSGeo4W/share/proj" // Windows默认路径
+			projDataPath = "C:/OSGeo4W/share/proj" // Windows默认路径
 		}
 	} else if runtime.GOOS == "linux" {
 		// Linux下优先使用环境变量，否则使用系统路径
@@ -269,6 +269,50 @@ func InitializeGDAL() error {
 
 	return nil // 初始化成功
 }
+func InitializeGDALSHPCoding(shapeEncoding string) error {
+	// 如果未指定PROJ路径，根据操作系统设置默认路径
+	projDataPath := ""
+	exePath, err := os.Executable()
+	if err != nil {
+		// 处理错误
+	}
+	exeDir := filepath.Dir(exePath)
+	if runtime.GOOS == "windows" {
+		// Windows下优先使用环境变量，否则使用默认路径
+		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
+			projDataPath = envPath
+		} else {
+			projDataPath = "C:/OSGeo4W/share/proj" // Windows默认路径
+		}
+	} else if runtime.GOOS == "linux" {
+		// Linux下优先使用环境变量，否则使用系统路径
+		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
+			projDataPath = envPath
+		} else {
+			projDataPath = exeDir + "/osgeo/share/proj" // Linux默认路径
+		}
+	} else if runtime.GOOS == "android" {
+		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
+			projDataPath = envPath
+		} else {
+			projDataPath = "/data/data/com.termux/files/usr/share/proj" // Linux默认路径
+		}
+	}
+
+	// 转换Go字符串为C字符串
+	cProjPath := C.CString(projDataPath)
+	cEncoding := C.CString(shapeEncoding)
+
+	// 确保C字符串资源被释放
+	defer C.free(unsafe.Pointer(cProjPath))
+	defer C.free(unsafe.Pointer(cEncoding))
+
+	// 调用C函数初始化GDAL
+	C.initializeGDALWithProjFix(cProjPath, cEncoding)
+
+	return nil // 初始化成功
+}
+
 func CreateEPSG4490WithCorrectAxis() (*SpatialReference, error) {
 	// 调用C函数创建空间参考系统
 	cPtr := C.createEPSG4490WithCorrectAxis()

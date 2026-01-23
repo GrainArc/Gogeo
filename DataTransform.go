@@ -1588,7 +1588,7 @@ func SHPToPostGIS(shpPath string) (SHPLayerInfo, error) {
 
 	// 检测编码
 	encoding := detectSHPEncoding(shpPath)
-	fmt.Printf(encoding)
+
 	// 设置GDAL编码选项
 	cEncodingKey := C.CString("SHAPE_ENCODING")
 	cEncodingValue := C.CString(encoding)
@@ -1597,6 +1597,7 @@ func SHPToPostGIS(shpPath string) (SHPLayerInfo, error) {
 
 	C.CPLSetConfigOption(cEncodingKey, cEncodingValue)
 	C.CPLSetConfigOption(cFilenameKey, cFilenameValue)
+	InitializeGDALSHPCoding(encoding)
 
 	defer func() {
 		C.CPLSetConfigOption(cEncodingKey, nil)
