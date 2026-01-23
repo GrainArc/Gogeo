@@ -392,7 +392,7 @@ func createTableFromLayerInfo(db *sql.DB, layerInfo *LayerAnalysisResult, tableN
 	for _, field := range layerInfo.Fields {
 		// 检查是否为保留字段（不区分大小写）
 		if reservedFields[strings.ToLower(field.Name)] {
-			log.Printf("警告: 跳过保留字段 '%s'", field.Name)
+
 			continue
 		}
 

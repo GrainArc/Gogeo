@@ -755,9 +755,6 @@ func (w *FileGeoWriter) copyFeatures(sourceLayer *GDALLayer, targetLayer C.OGRLa
 		}()
 	}
 
-	fmt.Printf("要素复制完成 - 总计: %d, 成功: %d, 过滤非几何要素: %d\n",
-		totalFeatures, successCount, errorCount)
-
 	return nil
 }
 
@@ -1788,9 +1785,6 @@ func (w *FileGeoWriter) copyFeaturesWithTransform(sourceLayer *GDALLayer, target
 			successCount++
 		}()
 	}
-
-	fmt.Printf("要素复制完成 - 总计: %d, 成功: %d, 失败: %d\n",
-		totalFeatures, successCount, errorCount)
 
 	return nil
 }

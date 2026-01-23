@@ -1345,7 +1345,7 @@ func clipAndSerializeTilesFromPG(db *gorm.DB, tableName string, tiles []*TileInf
 	if len(errors) > 0 {
 		return fmt.Errorf("处理过程中出现 %d 个错误，首个错误: %v", len(errors), errors[0])
 	}
-	log.Printf("[%s] 所有瓦片处理完成，成功: %d/%d", tableName, successCount, len(tiles))
+
 	return nil
 }
 
@@ -1687,7 +1687,6 @@ func createLayerFromPGQuery(db *gorm.DB, query string, sourceTable string, srid 
 		C.OGR_F_Destroy(feature)
 	}
 
-	log.Printf("成功创建图层，包含 %d 个要素", featureCount)
 	return &GDALLayer{
 		layer:   layer,
 		dataset: ds,
