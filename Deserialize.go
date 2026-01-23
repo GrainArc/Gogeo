@@ -35,7 +35,6 @@ OGRGeometryH createGeometryFromWKB(unsigned char* wkbData, int wkbSize) {
     return hGeom;
 }
 
-// 反序列化单个要素（修复版）
 OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
                               OGRFeatureDefnH hDefn, size_t* bytesRead) {
     if (!buffer || !hDefn || !bytesRead || bufferSize == 0) return NULL;
@@ -68,7 +67,7 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
 
     int layerFieldCount = OGR_FD_GetFieldCount(hDefn);
 
-    // 读取字段数据
+    // 读取字段数据（按顺序处理所有字段）
     for (int i = 0; i < fieldCount; i++) {
         // 读取字段设置标志
         int isSet;
@@ -141,6 +140,7 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
                         if (str) {
                             memset(str, 0, dataSize + 1);
                             memcpy(str, ptr, dataSize);
+                            str[dataSize] = '\0';  // 确保null终止
                             OGR_F_SetFieldString(hFeature, i, str);
                             free(str);
                         }
@@ -153,6 +153,9 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
                     }
                     break;
                 }
+                default:
+                    // 未知类型，跳过数据
+                    break;
             }
 
             ptr += dataSize;
@@ -191,7 +194,6 @@ OGRFeatureH deserializeFeature(unsigned char* buffer, size_t bufferSize,
 
     return hFeature;
 }
-
 
 // 从二进制数据反序列化图层
 DeserializeResult deserializeLayerFromBinary(unsigned char* buffer, size_t bufferSize) {

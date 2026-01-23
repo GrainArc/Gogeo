@@ -73,30 +73,32 @@ int geometryIntersectsBounds(OGRGeometryH hGeom, double minX, double minY, doubl
 
     return intersects;
 }
-// 序列化单个要素的几何和属性
+// 序列化单个要素（完全重写版本）
 int serializeFeature(OGRFeatureH hFeature, unsigned char** buffer, size_t* size) {
     if (!hFeature || !buffer || !size) return 0;
 
-    // 获取要素定义
     OGRFeatureDefnH hDefn = OGR_F_GetDefnRef(hFeature);
     if (!hDefn) return 0;
 
-    // 计算需要的缓冲区大小
     size_t totalSize = 0;
+    int fieldCount = OGR_FD_GetFieldCount(hDefn);
 
     // 1. 要素ID (8字节)
     totalSize += sizeof(GIntBig);
 
     // 2. 字段数量 (4字节)
-    int fieldCount = OGR_FD_GetFieldCount(hDefn);
     totalSize += sizeof(int);
 
-    // 3. 每个字段的数据
+    // 3. 为每个字段分配空间（无论是否设置）
     for (int i = 0; i < fieldCount; i++) {
+        totalSize += sizeof(int); // 字段设置标志
+        totalSize += sizeof(int); // 字段类型
+
         if (OGR_F_IsFieldSet(hFeature, i)) {
-            OGRFieldType fieldType = OGR_Fld_GetType(OGR_FD_GetFieldDefn(hDefn, i));
-            totalSize += sizeof(int); // 字段类型
             totalSize += sizeof(int); // 数据长度
+
+            OGRFieldDefnH hFieldDefn = OGR_FD_GetFieldDefn(hDefn, i);
+            OGRFieldType fieldType = OGR_Fld_GetType(hFieldDefn);
 
             switch (fieldType) {
                 case OFTInteger:
@@ -110,7 +112,7 @@ int serializeFeature(OGRFeatureH hFeature, unsigned char** buffer, size_t* size)
                     break;
                 case OFTString: {
                     const char* str = OGR_F_GetFieldAsString(hFeature, i);
-                    totalSize += strlen(str) + 1;
+                    totalSize += strlen(str);  // 不包含null终止符
                     break;
                 }
                 case OFTBinary: {
@@ -130,10 +132,8 @@ int serializeFeature(OGRFeatureH hFeature, unsigned char** buffer, size_t* size)
     int wkbSize = 0;
     if (hGeom) {
         wkbSize = OGR_G_WkbSize(hGeom);
-        totalSize += sizeof(int) + wkbSize; // WKB大小 + WKB数据
-    } else {
-        totalSize += sizeof(int); // 0表示无几何
     }
+    totalSize += sizeof(int) + wkbSize;
 
     // 分配缓冲区
     *buffer = (unsigned char*)malloc(totalSize);
@@ -152,17 +152,22 @@ int serializeFeature(OGRFeatureH hFeature, unsigned char** buffer, size_t* size)
     memcpy(ptr, &fieldCount, sizeof(int));
     ptr += sizeof(int);
 
-    // 3. 字段数据
+    // 3. 处理所有字段（按顺序）
     for (int i = 0; i < fieldCount; i++) {
-        if (OGR_F_IsFieldSet(hFeature, i)) {
-            OGRFieldDefnH hFieldDefn = OGR_FD_GetFieldDefn(hDefn, i);
-            OGRFieldType fieldType = OGR_Fld_GetType(hFieldDefn);
+        int isSet = OGR_F_IsFieldSet(hFeature, i) ? 1 : 0;
+        OGRFieldDefnH hFieldDefn = OGR_FD_GetFieldDefn(hDefn, i);
+        OGRFieldType fieldType = OGR_Fld_GetType(hFieldDefn);
 
-            // 字段类型
-            memcpy(ptr, &fieldType, sizeof(int));
-            ptr += sizeof(int);
+        // 写入字段设置标志
+        memcpy(ptr, &isSet, sizeof(int));
+        ptr += sizeof(int);
 
-            // 字段数据
+        // 写入字段类型
+        memcpy(ptr, &fieldType, sizeof(int));
+        ptr += sizeof(int);
+
+        if (isSet) {
+            // 写入数据长度和数据
             switch (fieldType) {
                 case OFTInteger: {
                     int value = OGR_F_GetFieldAsInteger(hFeature, i);
@@ -193,11 +198,13 @@ int serializeFeature(OGRFeatureH hFeature, unsigned char** buffer, size_t* size)
                 }
                 case OFTString: {
                     const char* str = OGR_F_GetFieldAsString(hFeature, i);
-                    int strLen = strlen(str) + 1;
+                    int strLen = strlen(str);  // 不包含null终止符
                     memcpy(ptr, &strLen, sizeof(int));
                     ptr += sizeof(int);
-                    memcpy(ptr, str, strLen);
-                    ptr += strLen;
+                    if (strLen > 0) {
+                        memcpy(ptr, str, strLen);
+                        ptr += strLen;
+                    }
                     break;
                 }
                 case OFTBinary: {
@@ -205,28 +212,41 @@ int serializeFeature(OGRFeatureH hFeature, unsigned char** buffer, size_t* size)
                     GByte* binaryData = OGR_F_GetFieldAsBinary(hFeature, i, &binarySize);
                     memcpy(ptr, &binarySize, sizeof(int));
                     ptr += sizeof(int);
-                    memcpy(ptr, binaryData, binarySize);
-                    ptr += binarySize;
+                    if (binarySize > 0) {
+                        memcpy(ptr, binaryData, binarySize);
+                        ptr += binarySize;
+                    }
+                    break;
+                }
+                default: {
+                    // 未知类型，写入0长度
+                    int zeroSize = 0;
+                    memcpy(ptr, &zeroSize, sizeof(int));
+                    ptr += sizeof(int);
                     break;
                 }
             }
         }
+        // 如果字段未设置，不写入数据长度和数据部分
     }
 
     // 4. 几何数据
+    memcpy(ptr, &wkbSize, sizeof(int));
+    ptr += sizeof(int);
+
     if (hGeom && wkbSize > 0) {
-        memcpy(ptr, &wkbSize, sizeof(int));
-        ptr += sizeof(int);
-        OGR_G_ExportToWkb(hGeom, wkbNDR, ptr);
+        OGRErr err = OGR_G_ExportToWkb(hGeom, wkbNDR, ptr);
+        if (err != OGRERR_NONE) {
+            free(*buffer);
+            *buffer = NULL;
+            return 0;
+        }
         ptr += wkbSize;
-    } else {
-        int zeroSize = 0;
-        memcpy(ptr, &zeroSize, sizeof(int));
-        ptr += sizeof(int);
     }
 
     return 1;
 }
+
 
 // 改进的序列化函数，增加性能优化
 SerializeResult serializeLayerToBinary(OGRLayerH hLayer, int preallocSize) {
