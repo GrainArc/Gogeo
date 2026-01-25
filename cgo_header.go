@@ -236,7 +236,7 @@ func InitializeGDAL() error {
 		if envPath := os.Getenv("PROJ_DATA"); envPath != "" {
 			projDataPath = envPath
 		} else {
-			projDataPath = "C:/OSGeo4W/share/proj" // Windows默认路径
+			projDataPath = exeDir + "/OSGeo4W/share/proj" // Windows默认路径
 		}
 	} else if runtime.GOOS == "linux" {
 		// Linux下优先使用环境变量，否则使用系统路径
