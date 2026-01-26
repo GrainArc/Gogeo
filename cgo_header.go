@@ -42,7 +42,7 @@ void initializeGDALWithProjFix(const char* projDataPath, const char* shapeEncodi
     if (shapeEncoding && strlen(shapeEncoding) > 0) {
         CPLSetConfigOption("SHAPE_ENCODING", shapeEncoding); // 设置Shapefile文件编码
     }
-	//CPLSetErrorHandler(CPLQuietErrorHandler);
+	CPLSetErrorHandler(CPLQuietErrorHandler);
     // 注册所有GDAL驱动程序，启用栅格数据支持
     GDALAllRegister();
     // 注册所有OGR驱动程序，启用矢量数据支持
