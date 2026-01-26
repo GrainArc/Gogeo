@@ -1592,19 +1592,19 @@ func SHPToPostGIS(shpPath string) (SHPLayerInfo, error) {
 	// 设置GDAL编码选项
 	cEncodingKey := C.CString("SHAPE_ENCODING")
 	cEncodingValue := C.CString(encoding)
-	cFilenameKey := C.CString("GDAL_FILENAME_IS_UTF8")
+
 	cFilenameValue := C.CString("NO")
 
 	C.CPLSetConfigOption(cEncodingKey, cEncodingValue)
-	C.CPLSetConfigOption(cFilenameKey, cFilenameValue)
+
 	InitializeGDALSHPCoding(encoding)
 
 	defer func() {
 		C.CPLSetConfigOption(cEncodingKey, nil)
-		C.CPLSetConfigOption(cFilenameKey, nil)
+
 		C.free(unsafe.Pointer(cEncodingKey))
 		C.free(unsafe.Pointer(cEncodingValue))
-		C.free(unsafe.Pointer(cFilenameKey))
+
 		C.free(unsafe.Pointer(cFilenameValue))
 	}()
 
