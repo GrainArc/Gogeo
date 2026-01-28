@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
 	"unsafe"
 )
 
@@ -56,32 +57,51 @@ func NewVectorTileGenerator(config VectorTileConfig) *VectorTileGenerator {
 		config.Opacity = 1.0
 	}
 
-	// 注册GDAL驱动
-	C.GDALAllRegister()
-	C.OGRRegisterAll()
-
 	return &VectorTileGenerator{
 		config: config,
 	}
 }
 
 func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeature, srid int, geomType C.OGRwkbGeometryType) (*GDALLayer, error) {
-	// 创建内存数据源 - 使用 Memory 驱动
-	driver := C.OGRGetDriverByName(C.CString("Memory"))
+	gdalMutex.Lock()
+	defer gdalMutex.Unlock()
+
+	// 使用MEM驱动而不是Memory驱动
+	driverName := C.CString("MEM")
+	defer C.free(unsafe.Pointer(driverName))
+
+	driver := C.OGRGetDriverByName(driverName)
 	if driver == nil {
-		return nil, fmt.Errorf("无法获取Memory驱动")
+		return nil, fmt.Errorf("无法获取MEM驱动")
 	}
-	ds := C.OGR_Dr_CreateDataSource(driver, C.CString(""), nil)
+
+	dsName := C.CString("")
+	defer C.free(unsafe.Pointer(dsName))
+
+	ds := C.OGR_Dr_CreateDataSource(driver, dsName, nil)
 	if ds == nil {
 		return nil, fmt.Errorf("创建内存数据源失败")
 	}
+
 	// 创建空间参考
 	srs := C.OSRNewSpatialReference(nil)
-	C.OSRImportFromEPSG(srs, C.int(srid))
+	if srs == nil {
+		C.OGR_DS_Destroy(ds)
+		return nil, fmt.Errorf("创建空间参考失败")
+	}
+
+	result := C.OSRImportFromEPSG(srs, C.int(srid))
+	if result != C.OGRERR_NONE {
+		C.OSRDestroySpatialReference(srs)
+		C.OGR_DS_Destroy(ds)
+		return nil, fmt.Errorf("设置EPSG失败: %d", int(result))
+	}
 	defer C.OSRDestroySpatialReference(srs)
+
 	// 创建图层 - 使用明确的Multi几何类型
 	layerName := C.CString("vector_layer")
 	defer C.free(unsafe.Pointer(layerName))
+
 	// 确保使用Multi类型
 	var multiGeomType C.OGRwkbGeometryType
 	if isMultiGeometryType(geomType) {
@@ -99,33 +119,56 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 			multiGeomType = C.wkbMultiPolygon
 		}
 	}
+
 	fmt.Printf("创建图层，几何类型: %d\n", int(multiGeomType))
 	layer := C.OGR_DS_CreateLayer(ds, layerName, srs, multiGeomType, nil)
 	if layer == nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("创建图层失败")
 	}
+
 	// 添加属性字段（从第一个要素推断）
 	if len(features) > 0 && len(features[0].Attributes) > 0 {
 		for attrName := range features[0].Attributes {
 			fieldName := C.CString(attrName)
 			fieldDefn := C.OGR_Fld_Create(fieldName, C.OFTString)
-			C.OGR_L_CreateField(layer, fieldDefn, 1)
+			if fieldDefn == nil {
+				C.free(unsafe.Pointer(fieldName))
+				continue
+			}
+
+			createResult := C.OGR_L_CreateField(layer, fieldDefn, 1)
 			C.OGR_Fld_Destroy(fieldDefn)
 			C.free(unsafe.Pointer(fieldName))
+
+			if createResult != C.OGRERR_NONE {
+				fmt.Printf("警告: 创建字段 %s 失败\n", attrName)
+			}
 		}
 	}
+
 	featureDefn := C.OGR_L_GetLayerDefn(layer)
+	if featureDefn == nil {
+		C.OGR_DS_Destroy(ds)
+		return nil, fmt.Errorf("获取图层定义失败")
+	}
+
 	// 添加要素
 	successCount := 0
 	failCount := 0
 	for i, feat := range features {
 		feature := C.OGR_F_Create(featureDefn)
+		if feature == nil {
+			failCount++
+			continue
+		}
+
 		// 设置几何字段 - 确保类型匹配
 		if len(feat.WKB) > 0 {
 			var geom C.OGRGeometryH
 			cWkb := (*C.uchar)(C.CBytes(feat.WKB))
 			wkbSize := C.int(len(feat.WKB))
+
 			// 从WKB创建几何体
 			result := C.OGR_G_CreateFromWkb(
 				unsafe.Pointer(cWkb),
@@ -134,6 +177,7 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 				wkbSize,
 			)
 			C.free(unsafe.Pointer(cWkb))
+
 			if result == C.OGRERR_NONE && geom != nil {
 				// 检查几何体是否为空
 				if C.OGR_G_IsEmpty(geom) == 0 {
@@ -147,6 +191,7 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 						// 转换为Multi类型
 						finalGeom = convertToMultiGeometry(geom, multiGeomType)
 					}
+
 					if finalGeom != nil {
 						setResult := C.OGR_F_SetGeometry(feature, finalGeom)
 						if setResult == C.OGRERR_NONE {
@@ -176,6 +221,7 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 				}
 			}
 		}
+
 		// 设置属性
 		for attrName, attrValue := range feat.Attributes {
 			cAttrName := C.CString(attrName)
@@ -187,13 +233,20 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 			}
 			C.free(unsafe.Pointer(cAttrName))
 		}
-		C.OGR_L_CreateFeature(layer, feature)
+
+		createResult := C.OGR_L_CreateFeature(layer, feature)
 		C.OGR_F_Destroy(feature)
+
+		if createResult != C.OGRERR_NONE {
+			failCount++
+		}
 	}
+
 	fmt.Printf("\n几何体导入统计:\n")
 	fmt.Printf("  成功: %d\n", successCount)
 	fmt.Printf("  失败: %d\n", failCount)
 	fmt.Printf("  总计: %d\n", len(features))
+
 	return &GDALLayer{
 		layer:   layer,
 		dataset: ds,
@@ -209,10 +262,16 @@ type VectorFeature struct {
 
 // RasterizeGDALLayer 栅格化矢量图层为PNG
 func (gen *VectorTileGenerator) RasterizeVectorLayer(GDALLayer *GDALLayer, bounds VectorTileBounds) ([]byte, error) {
+	gdalMutex.Lock()
+	defer gdalMutex.Unlock()
+
 	tileSize := gen.config.TileSize
 
 	// 1. 创建内存栅格数据集
-	memDriver := C.GDALGetDriverByName(C.CString("MEM"))
+	memDriverName := C.CString("MEM")
+	defer C.free(unsafe.Pointer(memDriverName))
+
+	memDriver := C.GDALGetDriverByName(memDriverName)
 	if memDriver == nil {
 		return nil, fmt.Errorf("无法获取MEM驱动")
 	}
@@ -222,7 +281,10 @@ func (gen *VectorTileGenerator) RasterizeVectorLayer(GDALLayer *GDALLayer, bound
 	pixelHeight := (bounds.MaxLat - bounds.MinLat) / float64(tileSize)
 
 	// 创建4波段RGBA栅格
-	rasterDS := C.GDALCreate(memDriver, C.CString(""), C.int(tileSize), C.int(tileSize), 4, C.GDT_Byte, nil)
+	rasterName := C.CString("")
+	defer C.free(unsafe.Pointer(rasterName))
+
+	rasterDS := C.GDALCreate(memDriver, rasterName, C.int(tileSize), C.int(tileSize), 4, C.GDT_Byte, nil)
 	if rasterDS == nil {
 		return nil, fmt.Errorf("创建栅格数据集失败")
 	}
@@ -241,12 +303,15 @@ func (gen *VectorTileGenerator) RasterizeVectorLayer(GDALLayer *GDALLayer, bound
 
 	// 设置投影
 	srs := C.OSRNewSpatialReference(nil)
-	C.OSRImportFromEPSG(srs, 4326)
-	var wkt *C.char
-	C.OSRExportToWkt(srs, &wkt)
-	C.GDALSetProjection(rasterDS, wkt)
-	C.OSRDestroySpatialReference(srs)
-	C.CPLFree(unsafe.Pointer(wkt))
+	if srs != nil {
+		C.OSRImportFromEPSG(srs, 4326)
+		var wkt *C.char
+		if C.OSRExportToWkt(srs, &wkt) == C.OGRERR_NONE && wkt != nil {
+			C.GDALSetProjection(rasterDS, wkt)
+			C.CPLFree(unsafe.Pointer(wkt))
+		}
+		C.OSRDestroySpatialReference(srs)
+	}
 
 	// 2. 根据颜色配置进行栅格化
 	if err := gen.rasterizeWithColors(rasterDS, GDALLayer); err != nil {
@@ -286,10 +351,20 @@ func (gen *VectorTileGenerator) rasterizeWithColors(rasterDS C.GDALDatasetH, GDA
 
 // rasterizeSingleColor 单一颜色栅格化
 func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, color RGBA) error {
+	// 验证输入参数
+	if rasterDS == nil || GDALLayer == nil || GDALLayer.layer == nil {
+		return fmt.Errorf("无效的输入参数")
+	}
+
 	burnValues := []C.double{C.double(color.R), C.double(color.G), C.double(color.B), C.double(color.A)}
 	bands := []C.int{1, 2, 3, 4}
 
-	options := C.CSLSetNameValue(nil, C.CString("ALL_TOUCHED"), C.CString("TRUE"))
+	optionKey := C.CString("ALL_TOUCHED")
+	optionValue := C.CString("TRUE")
+	defer C.free(unsafe.Pointer(optionKey))
+	defer C.free(unsafe.Pointer(optionValue))
+
+	options := C.CSLSetNameValue(nil, optionKey, optionValue)
 	defer C.CSLDestroy(options)
 
 	err := C.GDALRasterizeLayers(
@@ -315,6 +390,11 @@ func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, GD
 
 // rasterizeByAttribute 按属性值栅格化
 func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, attName string, colorValues map[string]string) error {
+	// 验证输入参数
+	if rasterDS == nil || GDALLayer == nil || GDALLayer.layer == nil {
+		return fmt.Errorf("无效的输入参数")
+	}
+
 	for attrValue, colorStr := range colorValues {
 		// 设置属性过滤器
 		whereClause := fmt.Sprintf("%s = '%s'", attName, strings.ReplaceAll(attrValue, "'", "''"))
@@ -330,7 +410,9 @@ func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, GD
 		burnValues := []C.double{C.double(rgb.R), C.double(rgb.G), C.double(rgb.B), C.double(rgb.A)}
 		bands := []C.int{1, 2, 3, 4}
 
-		options := C.CSLSetNameValue(nil, C.CString("ALL_TOUCHED"), C.CString("TRUE"))
+		optionKey := C.CString("ALL_TOUCHED")
+		optionValue := C.CString("TRUE")
+		options := C.CSLSetNameValue(nil, optionKey, optionValue)
 
 		C.GDALRasterizeLayers(
 			rasterDS,
@@ -347,6 +429,8 @@ func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, GD
 		)
 
 		C.CSLDestroy(options)
+		C.free(unsafe.Pointer(optionKey))
+		C.free(unsafe.Pointer(optionValue))
 	}
 
 	// 清除过滤器
@@ -357,6 +441,10 @@ func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, GD
 
 // rasterToPNG 将栅格转换为PNG
 func (gen *VectorTileGenerator) rasterToPNG(rasterDS C.GDALDatasetH, tileSize int) ([]byte, error) {
+	if rasterDS == nil {
+		return nil, fmt.Errorf("无效的栅格数据集")
+	}
+
 	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
 
 	for band := 1; band <= 4; band++ {
