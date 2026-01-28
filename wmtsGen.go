@@ -39,21 +39,6 @@ type VectorTileBounds struct {
 	MaxLat float64
 }
 
-// VectorLayer 矢量图层封装
-type VectorLayer struct {
-	layer   C.OGRLayerH
-	dataset C.OGRDataSourceH
-	driver  C.OGRSFDriverH
-}
-
-// Close 关闭矢量图层
-func (vl *VectorLayer) Close() {
-	if vl.dataset != nil {
-		C.OGR_DS_Destroy(vl.dataset)
-		vl.dataset = nil
-	}
-}
-
 // VectorTileGenerator 矢量瓦片生成器
 type VectorTileGenerator struct {
 	config VectorTileConfig
@@ -81,7 +66,7 @@ func NewVectorTileGenerator(config VectorTileConfig) *VectorTileGenerator {
 }
 
 // CreateVectorLayerFromWKB 从WKB数据创建矢量图层
-func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeature, srid int) (*VectorLayer, error) {
+func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeature, srid int) (*GDALLayer, error) {
 	// 创建内存数据源
 	driver := C.OGRGetDriverByName(C.CString("Memory"))
 	if driver == nil {
@@ -154,7 +139,7 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 		C.OGR_F_Destroy(feature)
 	}
 
-	return &VectorLayer{
+	return &GDALLayer{
 		layer:   layer,
 		dataset: ds,
 		driver:  driver,
@@ -167,8 +152,8 @@ type VectorFeature struct {
 	Attributes map[string]string // 属性字段
 }
 
-// RasterizeVectorLayer 栅格化矢量图层为PNG
-func (gen *VectorTileGenerator) RasterizeVectorLayer(vectorLayer *VectorLayer, bounds VectorTileBounds) ([]byte, error) {
+// RasterizeGDALLayer 栅格化矢量图层为PNG
+func (gen *VectorTileGenerator) RasterizeVectorLayer(GDALLayer *GDALLayer, bounds VectorTileBounds) ([]byte, error) {
 	tileSize := gen.config.TileSize
 
 	// 1. 创建内存栅格数据集
@@ -209,7 +194,7 @@ func (gen *VectorTileGenerator) RasterizeVectorLayer(vectorLayer *VectorLayer, b
 	C.CPLFree(unsafe.Pointer(wkt))
 
 	// 2. 根据颜色配置进行栅格化
-	if err := gen.rasterizeWithColors(rasterDS, vectorLayer); err != nil {
+	if err := gen.rasterizeWithColors(rasterDS, GDALLayer); err != nil {
 		return nil, err
 	}
 
@@ -218,10 +203,10 @@ func (gen *VectorTileGenerator) RasterizeVectorLayer(vectorLayer *VectorLayer, b
 }
 
 // rasterizeWithColors 根据颜色配置栅格化
-func (gen *VectorTileGenerator) rasterizeWithColors(rasterDS C.GDALDatasetH, vectorLayer *VectorLayer) error {
+func (gen *VectorTileGenerator) rasterizeWithColors(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer) error {
 	if len(gen.config.ColorMap) == 0 {
 		// 默认灰色
-		return gen.rasterizeSingleColor(rasterDS, vectorLayer, RGBA{128, 128, 128, int(gen.config.Opacity * 255)})
+		return gen.rasterizeSingleColor(rasterDS, GDALLayer, RGBA{128, 128, 128, int(gen.config.Opacity * 255)})
 	}
 
 	rule := gen.config.ColorMap[0]
@@ -230,22 +215,22 @@ func (gen *VectorTileGenerator) rasterizeWithColors(rasterDS C.GDALDatasetH, vec
 	if rule.AttributeName == "默认" && rule.AttributeValue == "默认" {
 		rgb := ParseColor(rule.Color)
 		rgb.A = int(gen.config.Opacity * 255)
-		return gen.rasterizeSingleColor(rasterDS, vectorLayer, rgb)
+		return gen.rasterizeSingleColor(rasterDS, GDALLayer, rgb)
 	}
 
 	// 按属性值分组栅格化
 	if len(rule.ColorValues) > 0 {
-		return gen.rasterizeByAttribute(rasterDS, vectorLayer, rule.AttributeName, rule.ColorValues)
+		return gen.rasterizeByAttribute(rasterDS, GDALLayer, rule.AttributeName, rule.ColorValues)
 	}
 
 	// 单一颜色
 	rgb := ParseColor(rule.Color)
 	rgb.A = int(gen.config.Opacity * 255)
-	return gen.rasterizeSingleColor(rasterDS, vectorLayer, rgb)
+	return gen.rasterizeSingleColor(rasterDS, GDALLayer, rgb)
 }
 
 // rasterizeSingleColor 单一颜色栅格化
-func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, vectorLayer *VectorLayer, color RGBA) error {
+func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, color RGBA) error {
 	burnValues := []C.double{C.double(color.R), C.double(color.G), C.double(color.B), C.double(color.A)}
 	bands := []C.int{1, 2, 3, 4}
 
@@ -257,7 +242,7 @@ func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, ve
 		4,
 		(*C.int)(unsafe.Pointer(&bands[0])),
 		1,
-		&vectorLayer.layer,
+		&GDALLayer.layer,
 		nil,
 		nil,
 		(*C.double)(unsafe.Pointer(&burnValues[0])),
@@ -274,12 +259,12 @@ func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, ve
 }
 
 // rasterizeByAttribute 按属性值栅格化
-func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, vectorLayer *VectorLayer, attName string, colorValues map[string]string) error {
+func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, attName string, colorValues map[string]string) error {
 	for attrValue, colorStr := range colorValues {
 		// 设置属性过滤器
 		whereClause := fmt.Sprintf("%s = '%s'", attName, strings.ReplaceAll(attrValue, "'", "''"))
 		cWhereClause := C.CString(whereClause)
-		C.OGR_L_SetAttributeFilter(vectorLayer.layer, cWhereClause)
+		C.OGR_L_SetAttributeFilter(GDALLayer.layer, cWhereClause)
 		C.free(unsafe.Pointer(cWhereClause))
 
 		// 解析颜色
@@ -297,7 +282,7 @@ func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, ve
 			4,
 			(*C.int)(unsafe.Pointer(&bands[0])),
 			1,
-			&vectorLayer.layer,
+			&GDALLayer.layer,
 			nil,
 			nil,
 			(*C.double)(unsafe.Pointer(&burnValues[0])),
@@ -310,7 +295,7 @@ func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, ve
 	}
 
 	// 清除过滤器
-	C.OGR_L_SetAttributeFilter(vectorLayer.layer, nil)
+	C.OGR_L_SetAttributeFilter(GDALLayer.layer, nil)
 
 	return nil
 }
