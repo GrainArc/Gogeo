@@ -65,34 +65,46 @@ func NewVectorTileGenerator(config VectorTileConfig) *VectorTileGenerator {
 	}
 }
 
-// CreateVectorLayerFromWKB 从WKB数据创建矢量图层
-func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeature, srid int) (*GDALLayer, error) {
-	// 创建内存数据源
+func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeature, srid int, geomType C.OGRwkbGeometryType) (*GDALLayer, error) {
+	// 创建内存数据源 - 使用 Memory 驱动
 	driver := C.OGRGetDriverByName(C.CString("Memory"))
 	if driver == nil {
 		return nil, fmt.Errorf("无法获取Memory驱动")
 	}
-
 	ds := C.OGR_Dr_CreateDataSource(driver, C.CString(""), nil)
 	if ds == nil {
 		return nil, fmt.Errorf("创建内存数据源失败")
 	}
-
 	// 创建空间参考
 	srs := C.OSRNewSpatialReference(nil)
 	C.OSRImportFromEPSG(srs, C.int(srid))
 	defer C.OSRDestroySpatialReference(srs)
-
-	// 创建图层
+	// 创建图层 - 使用明确的Multi几何类型
 	layerName := C.CString("vector_layer")
 	defer C.free(unsafe.Pointer(layerName))
-
-	layer := C.OGR_DS_CreateLayer(ds, layerName, srs, C.wkbUnknown, nil)
+	// 确保使用Multi类型
+	var multiGeomType C.OGRwkbGeometryType
+	if isMultiGeometryType(geomType) {
+		multiGeomType = geomType
+	} else {
+		// 转换为对应的Multi类型
+		switch geomType {
+		case C.wkbPoint:
+			multiGeomType = C.wkbMultiPoint
+		case C.wkbLineString:
+			multiGeomType = C.wkbMultiLineString
+		case C.wkbPolygon:
+			multiGeomType = C.wkbMultiPolygon
+		default:
+			multiGeomType = C.wkbMultiPolygon
+		}
+	}
+	fmt.Printf("创建图层，几何类型: %d\n", int(multiGeomType))
+	layer := C.OGR_DS_CreateLayer(ds, layerName, srs, multiGeomType, nil)
 	if layer == nil {
 		C.OGR_DS_Destroy(ds)
 		return nil, fmt.Errorf("创建图层失败")
 	}
-
 	// 添加属性字段（从第一个要素推断）
 	if len(features) > 0 && len(features[0].Attributes) > 0 {
 		for attrName := range features[0].Attributes {
@@ -103,42 +115,85 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 			C.free(unsafe.Pointer(fieldName))
 		}
 	}
-
 	featureDefn := C.OGR_L_GetLayerDefn(layer)
-
 	// 添加要素
-	for _, feat := range features {
+	successCount := 0
+	failCount := 0
+	for i, feat := range features {
 		feature := C.OGR_F_Create(featureDefn)
-
-		// 设置几何
+		// 设置几何字段 - 确保类型匹配
 		if len(feat.WKB) > 0 {
-			geom := C.OGR_G_CreateGeometry(C.wkbUnknown)
-			if geom != nil {
-				cWkb := C.CBytes(feat.WKB)
-				result := C.OGR_G_ImportFromWkb(geom, cWkb, C.int(len(feat.WKB)))
-				C.free(cWkb)
-
-				if result == C.OGRERR_NONE {
-					C.OGR_F_SetGeometry(feature, geom)
+			var geom C.OGRGeometryH
+			cWkb := (*C.uchar)(C.CBytes(feat.WKB))
+			wkbSize := C.int(len(feat.WKB))
+			// 从WKB创建几何体
+			result := C.OGR_G_CreateFromWkb(
+				unsafe.Pointer(cWkb),
+				srs,
+				&geom,
+				wkbSize,
+			)
+			C.free(unsafe.Pointer(cWkb))
+			if result == C.OGRERR_NONE && geom != nil {
+				// 检查几何体是否为空
+				if C.OGR_G_IsEmpty(geom) == 0 {
+					// 检查几何类型并转换为Multi类型（如果需要）
+					currentGeomType := C.OGR_G_GetGeometryType(geom)
+					var finalGeom C.OGRGeometryH
+					if isMultiGeometryType(currentGeomType) {
+						// 已经是Multi类型
+						finalGeom = geom
+					} else {
+						// 转换为Multi类型
+						finalGeom = convertToMultiGeometry(geom, multiGeomType)
+					}
+					if finalGeom != nil {
+						setResult := C.OGR_F_SetGeometry(feature, finalGeom)
+						if setResult == C.OGRERR_NONE {
+							successCount++
+						} else {
+							failCount++
+							if i < 5 {
+								fmt.Printf("警告: 要素 %d 设置几何失败，错误码: %d\n", i, int(setResult))
+							}
+						}
+						// 如果创建了新的Multi几何，需要销毁它
+						if finalGeom != geom {
+							C.OGR_G_DestroyGeometry(finalGeom)
+						}
+					}
+				} else {
+					failCount++
+					if i < 5 {
+						fmt.Printf("警告: 要素 %d 的几何体为空\n", i)
+					}
 				}
 				C.OGR_G_DestroyGeometry(geom)
+			} else {
+				failCount++
+				if i < 5 {
+					fmt.Printf("警告: 要素 %d WKB导入失败，错误码: %d\n", i, int(result))
+				}
 			}
 		}
-
 		// 设置属性
 		for attrName, attrValue := range feat.Attributes {
-			fieldIndex := C.OGR_F_GetFieldIndex(feature, C.CString(attrName))
+			cAttrName := C.CString(attrName)
+			fieldIndex := C.OGR_F_GetFieldIndex(feature, cAttrName)
 			if fieldIndex >= 0 {
 				cValue := C.CString(attrValue)
 				C.OGR_F_SetFieldString(feature, fieldIndex, cValue)
 				C.free(unsafe.Pointer(cValue))
 			}
+			C.free(unsafe.Pointer(cAttrName))
 		}
-
 		C.OGR_L_CreateFeature(layer, feature)
 		C.OGR_F_Destroy(feature)
 	}
-
+	fmt.Printf("\n几何体导入统计:\n")
+	fmt.Printf("  成功: %d\n", successCount)
+	fmt.Printf("  失败: %d\n", failCount)
+	fmt.Printf("  总计: %d\n", len(features))
 	return &GDALLayer{
 		layer:   layer,
 		dataset: ds,
