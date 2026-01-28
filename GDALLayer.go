@@ -22,6 +22,7 @@ package Gogeo
 import "C"
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"unsafe"
 )
@@ -419,21 +420,9 @@ func (gl *GDALLayer) cleanup() {
 }
 
 // Close 手动关闭资源
-func (layer *GDALLayer) Close() {
-	if layer == nil {
-		return
-	}
-	// 清除任何过滤器
-	if layer.layer != nil {
-		C.OGR_L_SetAttributeFilter(layer.layer, nil)
-		C.OGR_L_ResetReading(layer.layer)
-	}
-	// 销毁数据源（会自动销毁图层）
-	if layer.dataset != nil {
-		C.OGR_DS_Destroy(layer.dataset)
-		layer.dataset = nil
-		layer.layer = nil
-	}
+func (gl *GDALLayer) Close() {
+	gl.cleanup()
+	runtime.SetFinalizer(gl, nil)
 }
 
 // CreateEmptyFeature 创建空要素

@@ -242,11 +242,6 @@ func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeatur
 		}
 	}
 
-	fmt.Printf("\n几何体导入统计:\n")
-	fmt.Printf("  成功: %d\n", successCount)
-	fmt.Printf("  失败: %d\n", failCount)
-	fmt.Printf("  总计: %d\n", len(features))
-
 	return &GDALLayer{
 		layer:   layer,
 		dataset: ds,
