@@ -15,12 +15,6 @@ import (
 	"unsafe"
 )
 
-// 用于生成唯一ID
-var (
-	tileCounter uint64
-	gdalMutex   sync.Mutex // GDAL 全局锁
-)
-
 // ImageProcessor GDAL图像处理器
 type ImageProcessor struct {
 	canvasDS    C.GDALDatasetH

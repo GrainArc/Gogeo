@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 	"unsafe"
 )
 
@@ -32,6 +33,13 @@ type GDALLayer struct {
 	dataset C.OGRDataSourceH
 	driver  C.OGRSFDriverH
 }
+
+// 用于生成唯一ID
+var (
+	tileCounter uint64
+	gdalMutex   sync.Mutex // GDAL 全局锁
+	gdalSem     = make(chan struct{}, 1)
+)
 
 // GetFeatureCount 获取要素数量
 func (gl *GDALLayer) GetFeatureCount() int {
@@ -412,12 +420,26 @@ func (gl *GDALLayer) IterateFeatures(callback func(feature C.OGRFeatureH)) {
 }
 
 func (gl *GDALLayer) cleanup() {
+
+	// 检查dataset是否已释放，避免重复清理
 	if gl.dataset != nil {
+		// 调用C函数释放OGR数据源
 		C.OGR_DS_Destroy(gl.dataset)
+		// 清空指针防止悬垂指针
 		gl.dataset = nil
 	}
-	gl.layer = nil
-	gl.driver = nil
+
+	// 检查layer是否已释放，避免重复清理
+	if gl.layer != nil {
+		// 注意：OGR_Layer由OGR_DS_Destroy自动释放，这里只需置nil
+		gl.layer = nil
+	}
+
+	// 检查driver是否已释放，避免重复清理
+	if gl.driver != nil {
+		// 注意：driver由OGR内部管理，这里只需置nil
+		gl.driver = nil
+	}
 }
 
 func (gl *GDALLayer) Close() {

@@ -2,13 +2,11 @@ package Gogeo
 
 /*
 #include "osgeo_utils.h"
+#include "osgeo_rasterize.h"
 */
 import "C"
 import (
-	"bytes"
 	"fmt"
-	"image"
-	"image/png"
 	"math"
 	"regexp"
 	"strconv"
@@ -63,8 +61,6 @@ func NewVectorTileGenerator(config VectorTileConfig) *VectorTileGenerator {
 }
 
 func (gen *VectorTileGenerator) CreateVectorLayerFromWKB(features []VectorFeature, srid int, geomType C.OGRwkbGeometryType) (*GDALLayer, error) {
-	gdalMutex.Lock()
-	defer gdalMutex.Unlock()
 
 	if len(features) == 0 {
 		return nil, fmt.Errorf("要素列表为空")
@@ -352,13 +348,15 @@ type VectorFeature struct {
 	Attributes map[string]string // 属性字段
 }
 
+// RasterizeVectorLayer 栅格化矢量图层
 func (gen *VectorTileGenerator) RasterizeVectorLayer(GDALLayer *GDALLayer, bounds VectorTileBounds) ([]byte, error) {
-	gdalMutex.Lock()
-	defer gdalMutex.Unlock()
-	defer GDALLayer.Close()
+	if GDALLayer == nil || GDALLayer.layer == nil {
+		return nil, fmt.Errorf("无效的GDAL图层")
+	}
 
 	tileSize := gen.config.TileSize
 
+	// 获取MEM驱动
 	memDriverName := C.CString("MEM")
 	defer C.free(unsafe.Pointer(memDriverName))
 
@@ -367,228 +365,189 @@ func (gen *VectorTileGenerator) RasterizeVectorLayer(GDALLayer *GDALLayer, bound
 		return nil, fmt.Errorf("无法获取MEM驱动")
 	}
 
-	pixelWidth := (bounds.MaxLon - bounds.MinLon) / float64(tileSize)
-	pixelHeight := (bounds.MaxLat - bounds.MinLat) / float64(tileSize)
+	// 创建栅格数据集
+	cBounds := C.VectorTileBounds{
+		minLon: C.double(bounds.MinLon),
+		minLat: C.double(bounds.MinLat),
+		maxLon: C.double(bounds.MaxLon),
+		maxLat: C.double(bounds.MaxLat),
+	}
 
-	rasterName := C.CString("")
-	defer C.free(unsafe.Pointer(rasterName))
-
-	rasterDS := C.GDALCreate(memDriver, rasterName, C.int(tileSize), C.int(tileSize), 4, C.GDT_Byte, nil)
+	var pixelWidth, pixelHeight C.double
+	rasterDS := C.CreateRasterDatasetC(memDriver, C.int(tileSize), cBounds, &pixelWidth, &pixelHeight)
 	if rasterDS == nil {
 		return nil, fmt.Errorf("创建栅格数据集失败")
 	}
 	defer C.GDALClose(rasterDS)
 
-	// **新增：初始化所有波段为透明（0）**
-	for band := 1; band <= 4; band++ {
-		rasterBand := C.GDALGetRasterBand(rasterDS, C.int(band))
-		if rasterBand != nil {
-			buffer := make([]byte, tileSize*tileSize)
-			C.GDALRasterIO(
-				rasterBand,
-				C.GF_Write,
-				0, 0,
-				C.int(tileSize), C.int(tileSize),
-				unsafe.Pointer(&buffer[0]),
-				C.int(tileSize), C.int(tileSize),
-				C.GDT_Byte,
-				0, 0,
-			)
-		}
-	}
+	// 初始化波段为透明
+	C.InitializeRasterBandsC(rasterDS, C.int(tileSize))
 
-	geoTransform := []C.double{
-		C.double(bounds.MinLon),
-		C.double(pixelWidth),
-		0,
-		C.double(bounds.MaxLat),
-		0,
-		C.double(-pixelHeight),
-	}
-	C.GDALSetGeoTransform(rasterDS, (*C.double)(unsafe.Pointer(&geoTransform[0])))
+	// 设置地理变换和投影
+	C.SetGeoTransformAndProjectionC(rasterDS, cBounds, pixelWidth, pixelHeight)
 
-	srs := C.OSRNewSpatialReference(nil)
-	if srs != nil {
-		C.OSRImportFromEPSG(srs, 4326)
-		var wkt *C.char
-		if C.OSRExportToWkt(srs, &wkt) == C.OGRERR_NONE && wkt != nil {
-			C.GDALSetProjection(rasterDS, wkt)
-			C.CPLFree(unsafe.Pointer(wkt))
-		}
-		C.OSRDestroySpatialReference(srs)
-	}
-
-	if err := gen.rasterizeWithColors(rasterDS, GDALLayer); err != nil {
+	// 栅格化
+	if err := gen.rasterizeWithColorsC(rasterDS, GDALLayer, C.int(tileSize)); err != nil {
 		return nil, err
 	}
 
-	return gen.rasterToPNG(rasterDS, tileSize)
+	// 转换为PNG
+	return gen.rasterToPNGC(rasterDS, tileSize)
 }
 
-// rasterizeWithColors 根据颜色配置栅格化
-func (gen *VectorTileGenerator) rasterizeWithColors(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer) error {
-	// 在栅格化前重置图层
+// rasterizeWithColorsC 根据颜色配置栅格化（C实现）
+func (gen *VectorTileGenerator) rasterizeWithColorsC(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, tileSize C.int) error {
 	defer C.OGR_L_ResetReading(GDALLayer.layer)
 	defer C.OGR_L_SetAttributeFilter(GDALLayer.layer, nil)
 
 	if len(gen.config.ColorMap) == 0 {
-		return gen.rasterizeSingleColor(rasterDS, GDALLayer, RGBA{128, 128, 128, int(gen.config.Opacity * 255)})
+		rgb := ParseColor("#808080")
+		rgb.A = int(gen.config.Opacity * 255)
+		cColor := C.RGBA{
+			r: C.int(rgb.R),
+			g: C.int(rgb.G),
+			b: C.int(rgb.B),
+			a: C.int(rgb.A),
+		}
+		err := C.RasterizeSingleColorC(rasterDS, GDALLayer.layer, cColor, tileSize)
+		if err != 0 {
+			return fmt.Errorf("单色栅格化失败，错误码: %d", int(err))
+		}
+		return nil
 	}
 
 	rule := gen.config.ColorMap[0]
 
+	// 单一颜色模式
 	if rule.AttributeName == "默认" && rule.AttributeValue == "默认" {
 		rgb := ParseColor(rule.Color)
 		rgb.A = int(gen.config.Opacity * 255)
-		return gen.rasterizeSingleColor(rasterDS, GDALLayer, rgb)
+		cColor := C.RGBA{
+			r: C.int(rgb.R),
+			g: C.int(rgb.G),
+			b: C.int(rgb.B),
+			a: C.int(rgb.A),
+		}
+		err := C.RasterizeSingleColorC(rasterDS, GDALLayer.layer, cColor, tileSize)
+		if err != 0 {
+			return fmt.Errorf("单色栅格化失败，错误码: %d", int(err))
+		}
+		return nil
 	}
 
+	// 按属性值颜色映射
 	if len(rule.ColorValues) > 0 {
-		return gen.rasterizeByAttribute(rasterDS, GDALLayer, rule.AttributeName, rule.ColorValues)
+		return gen.rasterizeByAttributeC(rasterDS, GDALLayer, rule.AttributeName, rule.ColorValues, tileSize)
 	}
 
+	// 单一颜色
 	rgb := ParseColor(rule.Color)
 	rgb.A = int(gen.config.Opacity * 255)
-	return gen.rasterizeSingleColor(rasterDS, GDALLayer, rgb)
+	cColor := C.RGBA{
+		r: C.int(rgb.R),
+		g: C.int(rgb.G),
+		b: C.int(rgb.B),
+		a: C.int(rgb.A),
+	}
+	err := C.RasterizeSingleColorC(rasterDS, GDALLayer.layer, cColor, tileSize)
+	if err != 0 {
+		return fmt.Errorf("单色栅格化失败，错误码: %d", int(err))
+	}
+	return nil
 }
 
-func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, color RGBA) error {
-	if rasterDS == nil || GDALLayer == nil || GDALLayer.layer == nil {
-		return fmt.Errorf("无效的输入参数")
+// rasterizeByAttributeC 按属性栅格化（C实现）
+func (gen *VectorTileGenerator) rasterizeByAttributeC(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, attName string, colorValues map[string]string, tileSize C.int) error {
+	gdalMutex.Lock()
+	defer gdalMutex.Unlock()
+
+	// 构建属性值和颜色数组
+	attrValues := make([]string, 0, len(colorValues))
+	colors := make([]RGBA, 0, len(colorValues))
+
+	for attrValue, colorStr := range colorValues {
+		attrValues = append(attrValues, attrValue)
+		rgb := ParseColor(colorStr)
+		rgb.A = int(gen.config.Opacity * 255)
+		colors = append(colors, rgb)
 	}
 
-	// 重置图层读取
-	C.OGR_L_ResetReading(GDALLayer.layer)
-	defer C.OGR_L_ResetReading(GDALLayer.layer)
+	// 转换为C数组
+	cAttrValues := make([]*C.char, len(attrValues))
+	cColors := make([]C.RGBA, len(colors))
 
-	burnValues := []C.double{C.double(color.R), C.double(color.G), C.double(color.B), C.double(color.A)}
-	bands := []C.int{1, 2, 3, 4}
+	for i, val := range attrValues {
+		cAttrValues[i] = C.CString(val)
+		defer C.free(unsafe.Pointer(cAttrValues[i]))
+	}
 
-	optionKey := C.CString("ALL_TOUCHED")
-	optionValue := C.CString("TRUE")
-	defer C.free(unsafe.Pointer(optionKey))
-	defer C.free(unsafe.Pointer(optionValue))
+	for i, rgb := range colors {
+		cColors[i] = C.RGBA{
+			r: C.int(rgb.R),
+			g: C.int(rgb.G),
+			b: C.int(rgb.B),
+			a: C.int(rgb.A),
+		}
+	}
 
-	options := C.CSLSetNameValue(nil, optionKey, optionValue)
-	defer C.CSLDestroy(options)
+	cAttName := C.CString(attName)
+	defer C.free(unsafe.Pointer(cAttName))
 
-	err := C.GDALRasterizeLayers(
+	// 调用C函数
+	err := C.RasterizeByAttributeC(
 		rasterDS,
-		4,
-		(*C.int)(unsafe.Pointer(&bands[0])),
-		1,
-		&GDALLayer.layer,
-		nil,
-		nil,
-		(*C.double)(unsafe.Pointer(&burnValues[0])),
-		options,
-		nil,
-		nil,
+		GDALLayer.layer,
+		cAttName,
+		C.int(len(attrValues)),
+		(**C.char)(unsafe.Pointer(&cAttrValues[0])),
+		(*C.RGBA)(unsafe.Pointer(&cColors[0])),
+		tileSize,
 	)
 
 	if err != 0 {
-		return fmt.Errorf("栅格化失败，错误码: %d", int(err))
+		return fmt.Errorf("按属性栅格化失败，错误码: %d", int(err))
 	}
 
 	return nil
 }
 
-func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, attName string, colorValues map[string]string) error {
-	if rasterDS == nil || GDALLayer == nil || GDALLayer.layer == nil {
-		return fmt.Errorf("无效的输入参数")
-	}
-
-	for attrValue, colorStr := range colorValues {
-		// 重置读取游标
-		C.OGR_L_ResetReading(GDALLayer.layer)
-
-		// 设置属性过滤器
-		whereClause := fmt.Sprintf("%s = '%s'", attName, strings.ReplaceAll(attrValue, "'", "''"))
-		cWhereClause := C.CString(whereClause)
-		C.OGR_L_SetAttributeFilter(GDALLayer.layer, cWhereClause)
-		C.free(unsafe.Pointer(cWhereClause))
-
-		// 解析颜色
-		rgb := ParseColor(colorStr)
-		rgb.A = int(gen.config.Opacity * 255)
-
-		// 栅格化当前过滤的要素
-		burnValues := []C.double{C.double(rgb.R), C.double(rgb.G), C.double(rgb.B), C.double(rgb.A)}
-		bands := []C.int{1, 2, 3, 4}
-
-		optionKey := C.CString("ALL_TOUCHED")
-		optionValue := C.CString("TRUE")
-		defer C.free(unsafe.Pointer(optionKey))
-		defer C.free(unsafe.Pointer(optionValue))
-
-		options := C.CSLSetNameValue(nil, optionKey, optionValue)
-		defer C.CSLDestroy(options)
-
-		C.GDALRasterizeLayers(
-			rasterDS,
-			4,
-			(*C.int)(unsafe.Pointer(&bands[0])),
-			1,
-			&GDALLayer.layer,
-			nil,
-			nil,
-			(*C.double)(unsafe.Pointer(&burnValues[0])),
-			options,
-			nil,
-			nil,
-		)
-	}
-
-	// 清除过滤器并重置读取
-	C.OGR_L_SetAttributeFilter(GDALLayer.layer, nil)
-	C.OGR_L_ResetReading(GDALLayer.layer)
-
-	return nil
-}
-
-// rasterToPNG 将栅格转换为PNG
-func (gen *VectorTileGenerator) rasterToPNG(rasterDS C.GDALDatasetH, tileSize int) ([]byte, error) {
+func (gen *VectorTileGenerator) rasterToPNGC(rasterDS C.GDALDatasetH, tileSize int) ([]byte, error) {
 	if rasterDS == nil {
 		return nil, fmt.Errorf("无效的栅格数据集")
 	}
 
-	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
-
-	for band := 1; band <= 4; band++ {
-		rasterBand := C.GDALGetRasterBand(rasterDS, C.int(band))
-		if rasterBand == nil {
-			return nil, fmt.Errorf("获取波段%d失败", band)
-		}
-
-		buffer := make([]byte, tileSize*tileSize)
-		err := C.GDALRasterIO(
-			rasterBand,
-			C.GF_Read,
-			0, 0,
-			C.int(tileSize), C.int(tileSize),
-			unsafe.Pointer(&buffer[0]),
-			C.int(tileSize), C.int(tileSize),
-			C.GDT_Byte,
-			0, 0,
-		)
-
-		if err != 0 {
-			return nil, fmt.Errorf("读取波段%d失败", band)
-		}
-
-		// 填充到图像
-		for i := 0; i < tileSize*tileSize; i++ {
-			img.Pix[i*4+band-1] = buffer[i]
-		}
+	var pngSize C.int
+	pngData := C.RasterToPNGC(rasterDS, C.int(tileSize), &pngSize)
+	if pngData == nil {
+		return nil, fmt.Errorf("PNG编码失败")
 	}
+	defer C.CPLFree(pngData)
 
-	// 编码为PNG
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return nil, fmt.Errorf("PNG编码失败: %v", err)
+	// 将C数据转换为Go字节切片
+	result := C.GoBytes(pngData, pngSize)
+	return result, nil
+}
+
+func (gen *VectorTileGenerator) rasterizeSingleColor(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, color RGBA) error {
+	cColor := C.RGBA{
+		r: C.int(color.R),
+		g: C.int(color.G),
+		b: C.int(color.B),
+		a: C.int(color.A),
 	}
+	err := C.RasterizeSingleColorC(rasterDS, GDALLayer.layer, cColor, C.int(gen.config.TileSize))
+	if err != 0 {
+		return fmt.Errorf("栅格化失败，错误码: %d", int(err))
+	}
+	return nil
+}
 
-	return buf.Bytes(), nil
+func (gen *VectorTileGenerator) rasterizeByAttribute(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, attName string, colorValues map[string]string) error {
+	return gen.rasterizeByAttributeC(rasterDS, GDALLayer, attName, colorValues, C.int(gen.config.TileSize))
+}
+
+func (gen *VectorTileGenerator) rasterToPNG(rasterDS C.GDALDatasetH, tileSize int) ([]byte, error) {
+	return gen.rasterToPNGC(rasterDS, tileSize)
 }
 
 // RGBA 颜色结构
