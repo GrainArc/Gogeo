@@ -115,6 +115,42 @@ void cleanupVsimem(const char* path);
 int readTileDataFast(GDALDatasetH dataset,
                      double minX, double minY, double maxX, double maxY,
                      int tileSize, unsigned char* buffer);
+// 颜色结构体
+typedef struct {
+    unsigned char r;
+    unsigned char g;
+    unsigned char b;
+    unsigned char a;
+} RGBAColor;
+
+// 颜色映射项
+typedef struct {
+    char attributeValue[256];
+    RGBAColor color;
+} ColorMapItem;
+
+// 解析颜色字符串（支持 hex, rgb, rgba）
+RGBAColor parseColorString(const char* colorStr, double opacity);
+
+// 单色栅格化矢量图层
+ImageBuffer* rasterizeVectorLayerSingleColor(
+    OGRLayerH layer,
+    double minX, double minY, double maxX, double maxY,
+    int tileSize,
+    RGBAColor color
+);
+
+// 按属性分类栅格化矢量图层
+ImageBuffer* rasterizeVectorLayerByAttribute(
+    OGRLayerH layer,
+    double minX, double minY, double maxX, double maxY,
+    int tileSize,
+    const char* attributeName,
+    ColorMapItem* colorMap,
+    int colorMapSize,
+    double opacity
+);
+
 
 #ifdef __cplusplus
 }
