@@ -115,42 +115,31 @@ void cleanupVsimem(const char* path);
 int readTileDataFast(GDALDatasetH dataset,
                      double minX, double minY, double maxX, double maxY,
                      int tileSize, unsigned char* buffer);
-// 颜色结构体
+// 矢量栅格化相关结构和函数
 typedef struct {
-    unsigned char r;
-    unsigned char g;
-    unsigned char b;
-    unsigned char a;
-} RGBAColor;
+    unsigned char* data;
+    int size;
+} ImageBuffer;
 
-// 颜色映射项
-typedef struct {
-    char attributeValue[256];
-    RGBAColor color;
-} ColorMapItem;
+// 创建栅格数据集
+GDALDatasetH createRasterDataset(int width, int height, int bands,
+                                  double minX, double minY, double maxX, double maxY,
+                                  int epsg);
 
-// 解析颜色字符串（支持 hex, rgb, rgba）
-RGBAColor parseColorString(const char* colorStr, double opacity);
+// 单色栅格化
+int rasterizeLayerWithColor(GDALDatasetH rasterDS, OGRLayerH layer,
+                             int r, int g, int b, int a);
 
-// 单色栅格化矢量图层
-ImageBuffer* rasterizeVectorLayerSingleColor(
-    OGRLayerH layer,
-    double minX, double minY, double maxX, double maxY,
-    int tileSize,
-    RGBAColor color
-);
+// 按属性栅格化
+int rasterizeLayerByAttribute(GDALDatasetH rasterDS, OGRLayerH layer,
+                               const char* attrName, const char* attrValue,
+                               int r, int g, int b, int a);
 
-// 按属性分类栅格化矢量图层
-ImageBuffer* rasterizeVectorLayerByAttribute(
-    OGRLayerH layer,
-    double minX, double minY, double maxX, double maxY,
-    int tileSize,
-    const char* attributeName,
-    ColorMapItem* colorMap,
-    int colorMapSize,
-    double opacity
-);
+// 转换为PNG
+ImageBuffer* rasterDatasetToPNG(GDALDatasetH rasterDS);
 
+// 释放ImageBuffer
+void freeImageBuffer(ImageBuffer* buffer);
 
 #ifdef __cplusplus
 }

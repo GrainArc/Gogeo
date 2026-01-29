@@ -347,145 +347,146 @@ type VectorFeature struct {
 	Attributes map[string]string // 属性字段
 }
 
-// RasterizeVectorLayer 栅格化矢量图层（C实现版本）
-// 自动根据配置选择单色或按属性分类栅格化
-func (gen *VectorTileGenerator) RasterizeVectorLayer(gdalLayer *GDALLayer, bounds VectorTileBounds) ([]byte, error) {
-	if gdalLayer == nil || gdalLayer.layer == nil {
-		return nil, fmt.Errorf("无效的图层")
+func (gen *VectorTileGenerator) RasterizeVectorLayer(GDALLayer *GDALLayer, bounds VectorTileBounds) ([]byte, error) {
+	tileSize := gen.config.TileSize
+
+	// 调用C函数创建栅格数据集
+	rasterDS := C.createRasterDataset(
+		C.int(tileSize),
+		C.int(tileSize),
+		4, // RGBA
+		C.double(bounds.MinLon),
+		C.double(bounds.MinLat),
+		C.double(bounds.MaxLon),
+		C.double(bounds.MaxLat),
+		4326, // EPSG:4326
+	)
+	if rasterDS == nil {
+		return nil, fmt.Errorf("创建栅格数据集失败")
+	}
+	defer C.GDALClose(rasterDS)
+
+	// 根据颜色配置栅格化
+	if err := gen.rasterizeWithColorsC(rasterDS, GDALLayer); err != nil {
+		return nil, err
 	}
 
-	// 默认颜色和透明度
-	defaultColor := "#808080" // 灰色
-	opacity := gen.config.Opacity
-	if opacity <= 0 {
-		opacity = 1.0
-	}
-	if opacity > 1.0 {
-		opacity = 1.0
-	}
+	// 转换为PNG
+	return gen.rasterToPNGC(rasterDS)
+}
 
-	// 检查是否有颜色配置
+// 使用C函数进行栅格化
+func (gen *VectorTileGenerator) rasterizeWithColorsC(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer) error {
+	// 重置图层
+	C.OGR_L_ResetReading(GDALLayer.layer)
+	defer C.OGR_L_ResetReading(GDALLayer.layer)
+	defer C.OGR_L_SetAttributeFilter(GDALLayer.layer, nil)
+
+	// 如果没有颜色配置，使用默认灰色
 	if len(gen.config.ColorMap) == 0 {
-		// 没有配置，使用默认单色
-		return gen.rasterizeSingleColorC(gdalLayer, bounds, defaultColor, opacity)
+		result := C.rasterizeLayerWithColor(
+			rasterDS,
+			GDALLayer.layer,
+			128, 128, 128,
+			C.int(gen.config.Opacity*255),
+		)
+		if result != 0 {
+			return fmt.Errorf("栅格化失败，错误码: %d", int(result))
+		}
+		return nil
 	}
 
 	rule := gen.config.ColorMap[0]
 
-	// 判断是否使用单色模式
-	if rule.AttributeName == "默认" || rule.AttributeName == "" {
-		// 单色模式
-		color := defaultColor
-		if rule.Color != "" {
-			color = rule.Color
+	// 单一颜色模式
+	if rule.AttributeName == "默认" && rule.AttributeValue == "默认" {
+		rgb := ParseColor(rule.Color)
+		result := C.rasterizeLayerWithColor(
+			rasterDS,
+			GDALLayer.layer,
+			C.int(rgb.R), C.int(rgb.G), C.int(rgb.B),
+			C.int(gen.config.Opacity*255),
+		)
+		if result != 0 {
+			return fmt.Errorf("栅格化失败，错误码: %d", int(result))
 		}
-		return gen.rasterizeSingleColorC(gdalLayer, bounds, color, opacity)
+		return nil
 	}
 
-	// 检查是否有颜色值映射
-	if len(rule.ColorValues) == 0 {
-		// 没有颜色映射，使用单色
-		color := defaultColor
-		if rule.Color != "" {
-			color = rule.Color
-		}
-		return gen.rasterizeSingleColorC(gdalLayer, bounds, color, opacity)
+	// 按属性值分类渲染
+	if len(rule.ColorValues) > 0 {
+		return gen.rasterizeByAttributeC(rasterDS, GDALLayer, rule.AttributeName, rule.ColorValues)
 	}
 
-	// 按属性分类栅格化
-	return gen.rasterizeByAttributeC(gdalLayer, bounds, rule.AttributeName, rule.ColorValues, opacity)
-}
-
-// rasterizeSingleColorC 单色栅格化（C实现）
-func (gen *VectorTileGenerator) rasterizeSingleColorC(gdalLayer *GDALLayer, bounds VectorTileBounds, colorStr string, opacity float64) ([]byte, error) {
-	// 解析颜色
-	cColorStr := C.CString(colorStr)
-	defer C.free(unsafe.Pointer(cColorStr))
-
-	color := C.parseColorString(cColorStr, C.double(opacity))
-
-	// 调用C函数栅格化
-	buffer := C.rasterizeVectorLayerSingleColor(
-		gdalLayer.layer,
-		C.double(bounds.MinLon),
-		C.double(bounds.MinLat),
-		C.double(bounds.MaxLon),
-		C.double(bounds.MaxLat),
-		C.int(gen.config.TileSize),
-		color,
+	// 默认使用规则中的颜色
+	rgb := ParseColor(rule.Color)
+	result := C.rasterizeLayerWithColor(
+		rasterDS,
+		GDALLayer.layer,
+		C.int(rgb.R), C.int(rgb.G), C.int(rgb.B),
+		C.int(gen.config.Opacity*255),
 	)
-
-	if buffer == nil {
-		return nil, fmt.Errorf("单色栅格化失败")
+	if result != 0 {
+		return fmt.Errorf("栅格化失败，错误码: %d", int(result))
 	}
-	defer C.freeImageBuffer(buffer)
-
-	// 转换为Go字节切片
-	data := C.GoBytes(unsafe.Pointer(buffer.data), C.int(buffer.size))
-
-	if len(data) == 0 {
-		return nil, fmt.Errorf("栅格化结果为空")
-	}
-
-	return data, nil
+	return nil
 }
 
-// rasterizeByAttributeC 按属性分类栅格化（C实现）
-func (gen *VectorTileGenerator) rasterizeByAttributeC(gdalLayer *GDALLayer, bounds VectorTileBounds, attributeName string, colorValues map[string]string, opacity float64) ([]byte, error) {
-	if len(colorValues) == 0 {
-		return nil, fmt.Errorf("颜色映射为空")
-	}
+// 按属性值栅格化（C版本）
+func (gen *VectorTileGenerator) rasterizeByAttributeC(rasterDS C.GDALDatasetH, GDALLayer *GDALLayer, attrName string, colorValues map[string]string) error {
+	gdalMutex.Lock()
+	defer gdalMutex.Unlock()
 
-	// 构建颜色映射数组
-	colorMapSize := len(colorValues)
-	colorMap := make([]C.ColorMapItem, colorMapSize)
-
-	i := 0
 	for attrValue, colorStr := range colorValues {
-		// 设置属性值
+		rgb := ParseColor(colorStr)
+		alpha := int(gen.config.Opacity * 255)
+
+		cAttrName := C.CString(attrName)
 		cAttrValue := C.CString(attrValue)
-		C.strncpy(&colorMap[i].attributeValue[0], cAttrValue, 255)
+
+		result := C.rasterizeLayerByAttribute(
+			rasterDS,
+			GDALLayer.layer,
+			cAttrName,
+			cAttrValue,
+			C.int(rgb.R), C.int(rgb.G), C.int(rgb.B), C.int(alpha),
+		)
+
+		C.free(unsafe.Pointer(cAttrName))
 		C.free(unsafe.Pointer(cAttrValue))
 
-		// 解析颜色
-		cColorStr := C.CString(colorStr)
-		colorMap[i].color = C.parseColorString(cColorStr, C.double(opacity))
-		C.free(unsafe.Pointer(cColorStr))
-
-		i++
+		if result != 0 {
+			return fmt.Errorf("按属性栅格化失败，属性=%s, 值=%s, 错误码=%d", attrName, attrValue, int(result))
+		}
 	}
 
-	// 属性名称
-	cAttrName := C.CString(attributeName)
-	defer C.free(unsafe.Pointer(cAttrName))
+	// 清除过滤器
+	C.OGR_L_SetAttributeFilter(GDALLayer.layer, nil)
+	C.OGR_L_ResetReading(GDALLayer.layer)
 
-	// 调用C函数
-	buffer := C.rasterizeVectorLayerByAttribute(
-		gdalLayer.layer,
-		C.double(bounds.MinLon),
-		C.double(bounds.MinLat),
-		C.double(bounds.MaxLon),
-		C.double(bounds.MaxLat),
-		C.int(gen.config.TileSize),
-		cAttrName,
-		&colorMap[0],
-		C.int(colorMapSize),
-		C.double(opacity),
-	)
+	return nil
+}
 
-	if buffer == nil {
-		return nil, fmt.Errorf("按属性栅格化失败")
-	}
-	defer C.freeImageBuffer(buffer)
-
-	// 转换为Go字节切片
-	data := C.GoBytes(unsafe.Pointer(buffer.data), C.int(buffer.size))
-
-	if len(data) == 0 {
-		return nil, fmt.Errorf("栅格化结果为空")
+// 使用C函数将栅格转换为PNG
+func (gen *VectorTileGenerator) rasterToPNGC(rasterDS C.GDALDatasetH) ([]byte, error) {
+	if rasterDS == nil {
+		return nil, fmt.Errorf("无效的栅格数据集")
 	}
 
-	return data, nil
+	// 调用C函数转换为PNG
+	imageBuffer := C.rasterDatasetToPNG(rasterDS)
+	if imageBuffer == nil {
+		return nil, fmt.Errorf("PNG转换失败")
+	}
+	defer C.freeImageBuffer(imageBuffer)
+
+	// 复制数据到Go切片
+	if imageBuffer.size <= 0 || imageBuffer.data == nil {
+		return nil, fmt.Errorf("PNG数据为空")
+	}
+
+	pngData := C.GoBytes(unsafe.Pointer(imageBuffer.data), C.int(imageBuffer.size))
+	return pngData, nil
 }
 
 // RGBA 颜色结构

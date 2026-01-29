@@ -2012,122 +2012,47 @@ int readTileDataFast(GDALDatasetH dataset,
     return bandCount;
 }
 
-// 解析十六进制颜色
-static RGBAColor parseHexColor(const char* hex) {
-    RGBAColor color = {128, 128, 128, 255};
-
-    // 移除 # 前缀
-    if (hex[0] == '#') hex++;
-
-    int len = strlen(hex);
-    if (len == 3) {
-        // #RGB -> #RRGGBB
-        char expanded[7];
-        expanded[0] = expanded[1] = hex[0];
-        expanded[2] = expanded[3] = hex[1];
-        expanded[4] = expanded[5] = hex[2];
-        expanded[6] = '\0';
-        hex = expanded;
-        len = 6;
-    }
-
-    if (len == 6) {
-        unsigned int r, g, b;
-        if (sscanf(hex, "%02x%02x%02x", &r, &g, &b) == 3) {
-            color.r = (unsigned char)r;
-            color.g = (unsigned char)g;
-            color.b = (unsigned char)b;
-        }
-    }
-
-    return color;
-}
-
-// 解析RGB/RGBA颜色
-static RGBAColor parseRGBColor(const char* colorStr) {
-    RGBAColor color = {128, 128, 128, 255};
-    int r, g, b;
-    float a = 1.0f;
-
-    // 尝试解析 rgba(r, g, b, a)
-    if (sscanf(colorStr, "rgba(%d,%d,%d,%f)", &r, &g, &b, &a) == 4 ||
-        sscanf(colorStr, "rgba( %d , %d , %d , %f )", &r, &g, &b, &a) == 4) {
-        color.r = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
-        color.g = (unsigned char)(g < 0 ? 0 : (g > 255 ? 255 : g));
-        color.b = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
-        color.a = (unsigned char)(a <= 1.0f ? (a * 255) : (a > 255 ? 255 : a));
-    }
-    // 尝试解析 rgb(r, g, b)
-    else if (sscanf(colorStr, "rgb(%d,%d,%d)", &r, &g, &b) == 3 ||
-             sscanf(colorStr, "rgb( %d , %d , %d )", &r, &g, &b) == 3) {
-        color.r = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
-        color.g = (unsigned char)(g < 0 ? 0 : (g > 255 ? 255 : g));
-        color.b = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
-    }
-
-    return color;
-}
-
-// 解析颜色字符串（支持 hex, rgb, rgba）
-RGBAColor parseColorString(const char* colorStr, double opacity) {
-    RGBAColor color = {128, 128, 128, 255};
-
-    if (colorStr == NULL || strlen(colorStr) == 0) {
-        return color;
-    }
-
-    // 转换为小写进行比较
-    char lowerStr[256];
-    strncpy(lowerStr, colorStr, sizeof(lowerStr) - 1);
-    lowerStr[sizeof(lowerStr) - 1] = '\0';
-    for (int i = 0; lowerStr[i]; i++) {
-        lowerStr[i] = tolower(lowerStr[i]);
-    }
-
-    // 判断颜色格式
-    if (lowerStr[0] == '#') {
-        color = parseHexColor(colorStr);
-    } else if (strncmp(lowerStr, "rgba", 4) == 0) {
-        color = parseRGBColor(colorStr);
-    } else if (strncmp(lowerStr, "rgb", 3) == 0) {
-        color = parseRGBColor(colorStr);
-    }
-
-    // 应用透明度
-    if (opacity >= 0.0 && opacity <= 1.0) {
-        color.a = (unsigned char)(opacity * 255);
-    }
-
-    return color;
-}
-
-// 单色栅格化矢量图层
-ImageBuffer* rasterizeVectorLayerSingleColor(
-    OGRLayerH layer,
-    double minX, double minY, double maxX, double maxY,
-    int tileSize,
-    RGBAColor color)
-{
-    if (layer == NULL || tileSize <= 0) {
+// 创建栅格数据集用于矢量栅格化
+GDALDatasetH createRasterDataset(int width, int height, int bands,
+                                  double minX, double minY, double maxX, double maxY,
+                                  int epsg) {
+    if (width <= 0 || height <= 0 || bands <= 0) {
         return NULL;
     }
 
-    // 创建内存栅格数据集（RGBA 4通道）
+    // 获取MEM驱动
     GDALDriverH memDriver = GDALGetDriverByName("MEM");
     if (memDriver == NULL) {
-        fprintf(stderr, "MEM driver not available\n");
+        fprintf(stderr, "Failed to get MEM driver\n");
         return NULL;
     }
 
-    GDALDatasetH rasterDS = GDALCreate(memDriver, "", tileSize, tileSize, 4, GDT_Byte, NULL);
+    // 创建栅格数据集
+    GDALDatasetH rasterDS = GDALCreate(memDriver, "", width, height, bands, GDT_Byte, NULL);
     if (rasterDS == NULL) {
         fprintf(stderr, "Failed to create raster dataset\n");
         return NULL;
     }
 
+    // 初始化所有波段为0（透明）
+    unsigned char* zeroBuffer = (unsigned char*)calloc(width * height, sizeof(unsigned char));
+    if (zeroBuffer == NULL) {
+        GDALClose(rasterDS);
+        return NULL;
+    }
+
+    for (int b = 1; b <= bands; b++) {
+        GDALRasterBandH band = GDALGetRasterBand(rasterDS, b);
+        if (band != NULL) {
+            GDALRasterIO(band, GF_Write, 0, 0, width, height,
+                        zeroBuffer, width, height, GDT_Byte, 0, 0);
+        }
+    }
+    free(zeroBuffer);
+
     // 设置地理变换
-    double pixelWidth = (maxX - minX) / tileSize;
-    double pixelHeight = (maxY - minY) / tileSize;
+    double pixelWidth = (maxX - minX) / (double)width;
+    double pixelHeight = (maxY - minY) / (double)height;
 
     double geoTransform[6] = {
         minX,           // 左上角X
@@ -2135,177 +2060,130 @@ ImageBuffer* rasterizeVectorLayerSingleColor(
         0.0,            // 旋转
         maxY,           // 左上角Y
         0.0,            // 旋转
-        -pixelHeight    // Y方向像素大小（负值）
+        -pixelHeight    // Y方向像素大小（负值，Y轴向下）
     };
+
     GDALSetGeoTransform(rasterDS, geoTransform);
 
-    // 设置空间参考（Web Mercator）
-    OGRSpatialReferenceH srs = OSRNewSpatialReference(NULL);
-    if (srs != NULL) {
-        OSRImportFromEPSG(srs, 4326);
-        char* wkt = NULL;
-        if (OSRExportToWkt(srs, &wkt) == OGRERR_NONE && wkt != NULL) {
-            GDALSetProjection(rasterDS, wkt);
-            CPLFree(wkt);
-        }
-        OSRDestroySpatialReference(srs);
-    }
-
-    // 初始化所有波段为0（透明）
-    unsigned char* zeroBuffer = (unsigned char*)calloc(tileSize * tileSize, sizeof(unsigned char));
-    if (zeroBuffer == NULL) {
-        GDALClose(rasterDS);
-        return NULL;
-    }
-
-    for (int b = 1; b <= 4; b++) {
-        GDALRasterBandH band = GDALGetRasterBand(rasterDS, b);
-        if (band != NULL) {
-            GDALRasterIO(band, GF_Write, 0, 0, tileSize, tileSize,
-                        zeroBuffer, tileSize, tileSize, GDT_Byte, 0, 0);
+    // 设置空间参考
+    if (epsg > 0) {
+        OGRSpatialReferenceH srs = OSRNewSpatialReference(NULL);
+        if (srs != NULL) {
+            if (OSRImportFromEPSG(srs, epsg) == OGRERR_NONE) {
+                char* wkt = NULL;
+                if (OSRExportToWkt(srs, &wkt) == OGRERR_NONE && wkt != NULL) {
+                    GDALSetProjection(rasterDS, wkt);
+                    CPLFree(wkt);
+                }
+            }
+            OSRDestroySpatialReference(srs);
         }
     }
-    free(zeroBuffer);
+
+    return rasterDS;
+}
+
+// 使用单一颜色栅格化图层
+int rasterizeLayerWithColor(GDALDatasetH rasterDS, OGRLayerH layer,
+                             int r, int g, int b, int a) {
+    if (rasterDS == NULL || layer == NULL) {
+        return -1;
+    }
 
     // 重置图层读取
     OGR_L_ResetReading(layer);
 
     // 设置栅格化参数
-    int bandList[4] = {1, 2, 3, 4};
-    double burnValues[4] = {
-        (double)color.r,
-        (double)color.g,
-        (double)color.b,
-        (double)color.a
-    };
+    double burnValues[4] = {(double)r, (double)g, (double)b, (double)a};
+    int bands[4] = {1, 2, 3, 4};
 
+    // 设置选项
     char** options = NULL;
     options = CSLSetNameValue(options, "ALL_TOUCHED", "TRUE");
 
     // 执行栅格化
     CPLErr err = GDALRasterizeLayers(
         rasterDS,
-        4,              // 波段数
-        bandList,       // 波段列表
-        1,              // 图层数
-        &layer,         // 图层数组
-        NULL,           // 变换函数
-        NULL,           // 变换参数
-        burnValues,     // 烧录值
-        options,        // 选项
-        NULL,           // 进度回调
-        NULL            // 进度数据
+        4,                  // 波段数
+        bands,              // 波段列表
+        1,                  // 图层数
+        &layer,             // 图层列表
+        NULL,               // 变换函数
+        NULL,               // 变换参数
+        burnValues,         // 烧录值
+        options,            // 选项
+        NULL,               // 进度回调
+        NULL                // 进度参数
     );
 
     CSLDestroy(options);
+    OGR_L_ResetReading(layer);
 
-    if (err != CE_None) {
-        fprintf(stderr, "Rasterization failed\n");
-        GDALClose(rasterDS);
-        return NULL;
-    }
-
-    // 转换为PNG并返回
-    ImageBuffer* result = writeImageToMemory(rasterDS, "PNG", 6);
-    GDALClose(rasterDS);
-
-    return result;
+    return (err == CE_None) ? 0 : -1;
 }
 
-// 按属性分类栅格化矢量图层
-ImageBuffer* rasterizeVectorLayerByAttribute(
-    OGRLayerH layer,
-    double minX, double minY, double maxX, double maxY,
-    int tileSize,
-    const char* attributeName,
-    ColorMapItem* colorMap,
-    int colorMapSize,
-    double opacity)
-{
-    if (layer == NULL || attributeName == NULL || colorMap == NULL ||
-        colorMapSize <= 0 || tileSize <= 0) {
-        return NULL;
+// 按属性值栅格化图层
+int rasterizeLayerByAttribute(GDALDatasetH rasterDS, OGRLayerH layer,
+                               const char* attrName, const char* attrValue,
+                               int r, int g, int b, int a) {
+    if (rasterDS == NULL || layer == NULL || attrName == NULL || attrValue == NULL) {
+        return -1;
     }
 
-    // 创建内存栅格数据集
-    GDALDriverH memDriver = GDALGetDriverByName("MEM");
-    if (memDriver == NULL) {
-        return NULL;
-    }
+    // 重置图层读取
+    OGR_L_ResetReading(layer);
 
-    GDALDatasetH rasterDS = GDALCreate(memDriver, "", tileSize, tileSize, 4, GDT_Byte, NULL);
-    if (rasterDS == NULL) {
-        return NULL;
-    }
+    // 构建WHERE子句（转义单引号）
+    char whereClause[1024];
+    char escapedValue[512];
+    const char* src = attrValue;
+    char* dst = escapedValue;
+    int dstLen = 0;
 
-    // 设置地理变换
-    double pixelWidth = (maxX - minX) / tileSize;
-    double pixelHeight = (maxY - minY) / tileSize;
-
-    double geoTransform[6] = {
-        minX, pixelWidth, 0.0,
-        maxY, 0.0, -pixelHeight
-    };
-    GDALSetGeoTransform(rasterDS, geoTransform);
-
-    // 设置空间参考
-    OGRSpatialReferenceH srs = OSRNewSpatialReference(NULL);
-    if (srs != NULL) {
-        OSRImportFromEPSG(srs, 4326);
-        char* wkt = NULL;
-        if (OSRExportToWkt(srs, &wkt) == OGRERR_NONE && wkt != NULL) {
-            GDALSetProjection(rasterDS, wkt);
-            CPLFree(wkt);
+    // 转义单引号
+    while (*src && dstLen < 510) {
+        if (*src == '\'') {
+            *dst++ = '\'';
+            *dst++ = '\'';
+            dstLen += 2;
+        } else {
+            *dst++ = *src;
+            dstLen++;
         }
-        OSRDestroySpatialReference(srs);
+        src++;
+    }
+    *dst = '\0';
+
+    snprintf(whereClause, sizeof(whereClause), "%s = '%s'", attrName, escapedValue);
+
+    // 设置属性过滤器
+    OGRErr filterErr = OGR_L_SetAttributeFilter(layer, whereClause);
+    if (filterErr != OGRERR_NONE) {
+        return -2;
     }
 
-    // 初始化为透明
-    unsigned char* zeroBuffer = (unsigned char*)calloc(tileSize * tileSize, sizeof(unsigned char));
-    if (zeroBuffer != NULL) {
-        for (int b = 1; b <= 4; b++) {
-            GDALRasterBandH band = GDALGetRasterBand(rasterDS, b);
-            if (band != NULL) {
-                GDALRasterIO(band, GF_Write, 0, 0, tileSize, tileSize,
-                            zeroBuffer, tileSize, tileSize, GDT_Byte, 0, 0);
-            }
-        }
-        free(zeroBuffer);
-    }
+    // 设置栅格化参数
+    double burnValues[4] = {(double)r, (double)g, (double)b, (double)a};
+    int bands[4] = {1, 2, 3, 4};
 
-    // 遍历颜色映射，逐个栅格化
-    int bandList[4] = {1, 2, 3, 4};
-    char** options = CSLSetNameValue(NULL, "ALL_TOUCHED", "TRUE");
+    // 设置选项
+    char** options = NULL;
+    options = CSLSetNameValue(options, "ALL_TOUCHED", "TRUE");
 
-    for (int i = 0; i < colorMapSize; i++) {
-        // 重置图层读取
-        OGR_L_ResetReading(layer);
-
-        // 设置属性过滤器
-        char whereClause[512];
-        snprintf(whereClause, sizeof(whereClause), "%s = '%s'",
-                attributeName, colorMap[i].attributeValue);
-        OGR_L_SetAttributeFilter(layer, whereClause);
-
-        // 应用透明度
-        RGBAColor color = colorMap[i].color;
-        if (opacity >= 0.0 && opacity <= 1.0) {
-            color.a = (unsigned char)(opacity * 255);
-        }
-
-        double burnValues[4] = {
-            (double)color.r,
-            (double)color.g,
-            (double)color.b,
-            (double)color.a
-        };
-
-        // 栅格化当前过滤的要素
-        GDALRasterizeLayers(
-            rasterDS, 4, bandList, 1, &layer,
-            NULL, NULL, burnValues, options, NULL, NULL
-        );
-    }
+    // 执行栅格化
+    CPLErr err = GDALRasterizeLayers(
+        rasterDS,
+        4,
+        bands,
+        1,
+        &layer,
+        NULL,
+        NULL,
+        burnValues,
+        options,
+        NULL,
+        NULL
+    );
 
     CSLDestroy(options);
 
@@ -2313,9 +2191,23 @@ ImageBuffer* rasterizeVectorLayerByAttribute(
     OGR_L_SetAttributeFilter(layer, NULL);
     OGR_L_ResetReading(layer);
 
-    // 转换为PNG
-    ImageBuffer* result = writeImageToMemory(rasterDS, "PNG", 6);
-    GDALClose(rasterDS);
+    return (err == CE_None) ? 0 : -1;
+}
 
-    return result;
+// 将栅格数据集转换为PNG缓冲区
+ImageBuffer* rasterDatasetToPNG(GDALDatasetH rasterDS) {
+    if (rasterDS == NULL) {
+        return NULL;
+    }
+
+    int width = GDALGetRasterXSize(rasterDS);
+    int height = GDALGetRasterYSize(rasterDS);
+    int bandCount = GDALGetRasterCount(rasterDS);
+
+    if (width <= 0 || height <= 0 || bandCount < 3) {
+        return NULL;
+    }
+
+    // 使用GDAL的PNG驱动导出
+    return writeImageToMemory(rasterDS, "PNG", 90);
 }
