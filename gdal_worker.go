@@ -52,13 +52,7 @@ var (
 func GetGDALWorkerPool() *GDALWorkerPool {
 	globalPoolOnce.Do(func() {
 		// 工作者数量 = CPU核心数，每个工作者串行执行GDAL操作
-		workerCount := runtime.NumCPU()
-		if workerCount < 2 {
-			workerCount = 2
-		}
-		if workerCount > 8 {
-			workerCount = 8 // 限制最大工作者数
-		}
+		workerCount := 1
 
 		ctx, cancel := context.WithCancel(context.Background())
 		globalPool = &GDALWorkerPool{
