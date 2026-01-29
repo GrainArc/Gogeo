@@ -411,18 +411,19 @@ func (gl *GDALLayer) IterateFeatures(callback func(feature C.OGRFeatureH)) {
 	}
 }
 
-// cleanup 清理资源
 func (gl *GDALLayer) cleanup() {
 	if gl.dataset != nil {
 		C.OGR_DS_Destroy(gl.dataset)
 		gl.dataset = nil
 	}
+	gl.layer = nil
+	gl.driver = nil
 }
 
-// Close 手动关闭资源
 func (gl *GDALLayer) Close() {
-	gl.cleanup()
+	// 先取消finalizer，再清理
 	runtime.SetFinalizer(gl, nil)
+	gl.cleanup()
 }
 
 // CreateEmptyFeature 创建空要素
