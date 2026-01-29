@@ -115,11 +115,7 @@ void cleanupVsimem(const char* path);
 int readTileDataFast(GDALDatasetH dataset,
                      double minX, double minY, double maxX, double maxY,
                      int tileSize, unsigned char* buffer);
-// 矢量栅格化相关结构和函数
-typedef struct {
-    unsigned char* data;
-    int size;
-} ImageBuffer;
+
 
 // 创建栅格数据集
 GDALDatasetH createRasterDataset(int width, int height, int bands,

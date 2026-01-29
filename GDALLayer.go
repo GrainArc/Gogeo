@@ -22,7 +22,6 @@ package Gogeo
 import "C"
 import (
 	"fmt"
-	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
@@ -32,13 +31,14 @@ type GDALLayer struct {
 	layer   C.OGRLayerH
 	dataset C.OGRDataSourceH
 	driver  C.OGRSFDriverH
+	mu      sync.Mutex
 }
 
 // 用于生成唯一ID
 var (
 	tileCounter uint64
 	gdalMutex   sync.Mutex // GDAL 全局锁
-	gdalSem     = make(chan struct{}, 1)
+
 )
 
 // GetFeatureCount 获取要素数量
@@ -442,10 +442,15 @@ func (gl *GDALLayer) cleanup() {
 	}
 }
 
-func (gl *GDALLayer) Close() {
-	// 先取消finalizer，再清理
-	runtime.SetFinalizer(gl, nil)
-	gl.cleanup()
+func (l *GDALLayer) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.dataset != nil {
+		C.OGR_DS_Destroy(l.dataset)
+		l.dataset = nil
+		l.layer = nil
+	}
 }
 
 // CreateEmptyFeature 创建空要素
