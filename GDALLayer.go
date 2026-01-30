@@ -22,8 +22,8 @@ package Gogeo
 import "C"
 import (
 	"fmt"
+	"runtime"
 	"strings"
-	"sync"
 	"unsafe"
 )
 
@@ -31,15 +31,7 @@ type GDALLayer struct {
 	layer   C.OGRLayerH
 	dataset C.OGRDataSourceH
 	driver  C.OGRSFDriverH
-	mu      sync.Mutex
 }
-
-// 用于生成唯一ID
-var (
-	tileCounter uint64
-	gdalMutex   sync.Mutex // GDAL 全局锁
-
-)
 
 // GetFeatureCount 获取要素数量
 func (gl *GDALLayer) GetFeatureCount() int {
@@ -419,38 +411,18 @@ func (gl *GDALLayer) IterateFeatures(callback func(feature C.OGRFeatureH)) {
 	}
 }
 
+// cleanup 清理资源
 func (gl *GDALLayer) cleanup() {
-
-	// 检查dataset是否已释放，避免重复清理
 	if gl.dataset != nil {
-		// 调用C函数释放OGR数据源
 		C.OGR_DS_Destroy(gl.dataset)
-		// 清空指针防止悬垂指针
 		gl.dataset = nil
-	}
-
-	// 检查layer是否已释放，避免重复清理
-	if gl.layer != nil {
-		// 注意：OGR_Layer由OGR_DS_Destroy自动释放，这里只需置nil
-		gl.layer = nil
-	}
-
-	// 检查driver是否已释放，避免重复清理
-	if gl.driver != nil {
-		// 注意：driver由OGR内部管理，这里只需置nil
-		gl.driver = nil
 	}
 }
 
-func (l *GDALLayer) Close() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if l.dataset != nil {
-		C.OGR_DS_Destroy(l.dataset)
-		l.dataset = nil
-		l.layer = nil
-	}
+// Close 手动关闭资源
+func (gl *GDALLayer) Close() {
+	gl.cleanup()
+	runtime.SetFinalizer(gl, nil)
 }
 
 // CreateEmptyFeature 创建空要素

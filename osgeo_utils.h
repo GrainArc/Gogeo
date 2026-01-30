@@ -116,27 +116,6 @@ int readTileDataFast(GDALDatasetH dataset,
                      double minX, double minY, double maxX, double maxY,
                      int tileSize, unsigned char* buffer);
 
-
-// 创建栅格数据集
-GDALDatasetH createRasterDataset(int width, int height, int bands,
-                                  double minX, double minY, double maxX, double maxY,
-                                  int epsg);
-
-// 单色栅格化
-int rasterizeLayerWithColor(GDALDatasetH rasterDS, OGRLayerH layer,
-                             int r, int g, int b, int a);
-
-// 按属性栅格化
-int rasterizeLayerByAttribute(GDALDatasetH rasterDS, OGRLayerH layer,
-                               const char* attrName, const char* attrValue,
-                               int r, int g, int b, int a);
-
-// 转换为PNG
-ImageBuffer* rasterDatasetToPNG(GDALDatasetH rasterDS);
-
-// 释放ImageBuffer
-void freeImageBuffer(ImageBuffer* buffer);
-
 #ifdef __cplusplus
 }
 #endif

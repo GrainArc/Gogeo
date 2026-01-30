@@ -1471,25 +1471,7 @@ func processSingleTileFromPG(db *gorm.DB, tableName string, tile *TileInfo, outp
 
 	return nil
 }
-
 func getTableGeometryType(db *gorm.DB, tableName string) (C.OGRwkbGeometryType, error) {
-	var result struct {
-		Type string `gorm:"column:type"`
-	}
-
-	err := db.Raw(`
-        SELECT type 
-        FROM geometry_columns 
-        WHERE f_table_name = ? AND f_geometry_column = 'geom'
-    `, tableName).Scan(&result).Error
-
-	if err != nil {
-		return C.wkbUnknown, err
-	}
-
-	return mapGeometryColumnTypeToOGR(result.Type), nil
-}
-func GetTableGeometryType(db *gorm.DB, tableName string) (C.OGRwkbGeometryType, error) {
 	var result struct {
 		Type string `gorm:"column:type"`
 	}
