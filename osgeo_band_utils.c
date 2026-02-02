@@ -214,31 +214,75 @@ void freeBandInfo(BandInfo* info) {
 }
 
 // ==================== 波段操作函数 ====================
+// osgeo_utils.c - 修复 addBandToDataset 函数
 
 GDALDatasetH addBandToDataset(GDALDatasetH hDS, BandDataType dataType,
                                ColorInterpretation colorInterp, double noDataValue) {
     if (hDS == NULL) return NULL;
+
     int width = GDALGetRasterXSize(hDS);
     int height = GDALGetRasterYSize(hDS);
     int bandCount = GDALGetRasterCount(hDS);
-    GDALDataType gdalType = bandDataTypeToGDAL(dataType);
-    // 保存原有波段的颜色解释
-    GDALColorInterp* oldColorInterps = (GDALColorInterp*)CPLMalloc(sizeof(GDALColorInterp) * bandCount);
-    for (int i = 0; i < bandCount; i++) {
-        GDALRasterBandH band = GDALGetRasterBand(hDS, i + 1);
-        oldColorInterps[i] = GDALGetRasterColorInterpretation(band);
+    GDALDataType gdalNewBandType = bandDataTypeToGDAL(dataType);
+
+    // 获取原始数据集第一个波段的数据类型作为基础类型
+    GDALDataType baseType = GDT_Byte;
+    if (bandCount > 0) {
+        baseType = GDALGetRasterDataType(GDALGetRasterBand(hDS, 1));
     }
+
+    // 【关键】先收集所有源波段的颜色解释信息
+    GDALColorInterp* srcColorInterps = NULL;
+    GDALColorTableH* srcColorTables = NULL;
+    double* srcNoDataValues = NULL;
+    int* srcHasNoData = NULL;
+
+    if (bandCount > 0) {
+        srcColorInterps = (GDALColorInterp*)CPLMalloc(sizeof(GDALColorInterp) * bandCount);
+        srcColorTables = (GDALColorTableH*)CPLMalloc(sizeof(GDALColorTableH) * bandCount);
+        srcNoDataValues = (double*)CPLMalloc(sizeof(double) * bandCount);
+        srcHasNoData = (int*)CPLMalloc(sizeof(int) * bandCount);
+
+        for (int i = 0; i < bandCount; i++) {
+            GDALRasterBandH srcBand = GDALGetRasterBand(hDS, i + 1);
+            srcColorInterps[i] = GDALGetRasterColorInterpretation(srcBand);
+            srcColorTables[i] = GDALGetRasterColorTable(srcBand);
+            if (srcColorTables[i] != NULL) {
+                srcColorTables[i] = GDALCloneColorTable(srcColorTables[i]);
+            }
+            srcNoDataValues[i] = GDALGetRasterNoDataValue(srcBand, &srcHasNoData[i]);
+        }
+    }
+
     // 创建新的内存数据集
     GDALDriverH hDriver = GDALGetDriverByName("MEM");
     if (hDriver == NULL) {
-        CPLFree(oldColorInterps);
+        if (srcColorInterps) CPLFree(srcColorInterps);
+        if (srcColorTables) {
+            for (int i = 0; i < bandCount; i++) {
+                if (srcColorTables[i]) GDALDestroyColorTable(srcColorTables[i]);
+            }
+            CPLFree(srcColorTables);
+        }
+        if (srcNoDataValues) CPLFree(srcNoDataValues);
+        if (srcHasNoData) CPLFree(srcHasNoData);
         return NULL;
     }
-    GDALDatasetH hNewDS = GDALCreate(hDriver, "", width, height, bandCount + 1, gdalType, NULL);
+
+    GDALDatasetH hNewDS = GDALCreate(hDriver, "", width, height, bandCount + 1, baseType, NULL);
     if (hNewDS == NULL) {
-        CPLFree(oldColorInterps);
+        if (srcColorInterps) CPLFree(srcColorInterps);
+        if (srcColorTables) {
+            for (int i = 0; i < bandCount; i++) {
+                if (srcColorTables[i]) GDALDestroyColorTable(srcColorTables[i]);
+            }
+            CPLFree(srcColorTables);
+        }
+        if (srcNoDataValues) CPLFree(srcNoDataValues);
+        if (srcHasNoData) CPLFree(srcHasNoData);
         return NULL;
     }
+
     // 复制地理变换和投影
     double geoTransform[6];
     if (GDALGetGeoTransform(hDS, geoTransform) == CE_None) {
@@ -248,141 +292,144 @@ GDALDatasetH addBandToDataset(GDALDatasetH hDS, BandDataType dataType,
     if (projection != NULL && strlen(projection) > 0) {
         GDALSetProjection(hNewDS, projection);
     }
-    // 复制现有波段
+
+    // 复制现有波段数据和所有属性
     for (int i = 1; i <= bandCount; i++) {
         GDALRasterBandH srcBand = GDALGetRasterBand(hDS, i);
         GDALRasterBandH dstBand = GDALGetRasterBand(hNewDS, i);
-        // 复制数据
-        void* buffer = CPLMalloc(width * height * GDALGetDataTypeSizeBytes(GDALGetRasterDataType(srcBand)));
-        GDALRasterIO(srcBand, GF_Read, 0, 0, width, height, buffer, width, height,
-                     GDALGetRasterDataType(srcBand), 0, 0);
-        GDALRasterIO(dstBand, GF_Write, 0, 0, width, height, buffer, width, height,
-                     GDALGetRasterDataType(srcBand), 0, 0);
-        CPLFree(buffer);
-        // 强制恢复颜色解释
-        GDALSetRasterColorInterpretation(dstBand, oldColorInterps[i-1]);
-        // 复制NoData
-        int hasNoData = 0;
-        double srcNoData = GDALGetRasterNoDataValue(srcBand, &hasNoData);
-        if (hasNoData) {
-            GDALSetRasterNoDataValue(dstBand, srcNoData);
-        }
-        // 复制调色板
-        GDALColorTableH srcColorTable = GDALGetRasterColorTable(srcBand);
-        if (srcColorTable != NULL) {
-            GDALSetRasterColorTable(dstBand, GDALCloneColorTable(srcColorTable));
-        }
-    }
-    // 设置新波段
-    GDALRasterBandH newBand = GDALGetRasterBand(hNewDS, bandCount + 1);
-    GDALSetRasterColorInterpretation(newBand, colorInterpToGDAL(colorInterp));
-    GDALSetRasterNoDataValue(newBand, noDataValue);
-    // 初始化新波段为NoData值
-    int typeSize = GDALGetDataTypeSizeBytes(gdalType);
-    void* initBuffer = CPLMalloc(width * height * typeSize);
-    memset(initBuffer, 0, width * height * typeSize);
-    switch (gdalType) {
-        case GDT_Byte:
-            memset(initBuffer, (unsigned char)noDataValue, width * height);
-            break;
-        case GDT_UInt16:
-            for (int i = 0; i < width * height; i++) {
-                ((unsigned short*)initBuffer)[i] = (unsigned short)noDataValue;
-            }
-            break;
-        case GDT_Int16:
-            for (int i = 0; i < width * height; i++) {
-                ((short*)initBuffer)[i] = (short)noDataValue;
-            }
-            break;
-        case GDT_Float32:
-            for (int i = 0; i < width * height; i++) {
-                ((float*)initBuffer)[i] = (float)noDataValue;
-            }
-            break;
-        case GDT_Float64:
-            for (int i = 0; i < width * height; i++) {
-                ((double*)initBuffer)[i] = noDataValue;
-            }
-            break;
-        default:
-            memset(initBuffer, 0, width * height * typeSize);
-    }
-    GDALRasterIO(newBand, GF_Write, 0, 0, width, height, initBuffer, width, height, gdalType, 0, 0);
-    CPLFree(initBuffer);
-    CPLFree(oldColorInterps);
-    return hNewDS;
-}
-
-GDALDatasetH removeBandFromDataset(GDALDatasetH hDS, int bandIndex) {
-    if (hDS == NULL) return NULL;
-
-    int bandCount = GDALGetRasterCount(hDS);
-    if (bandIndex < 1 || bandIndex > bandCount || bandCount <= 1) {
-        return NULL;
-    }
-
-    int width = GDALGetRasterXSize(hDS);
-    int height = GDALGetRasterYSize(hDS);
-
-    // 获取第一个保留波段的数据类型
-    int firstBand = (bandIndex == 1) ? 2 : 1;
-    GDALDataType dataType = GDALGetRasterDataType(GDALGetRasterBand(hDS, firstBand));
-
-    // 创建新数据集
-    GDALDriverH hDriver = GDALGetDriverByName("MEM");
-    if (hDriver == NULL) return NULL;
-
-    GDALDatasetH hNewDS = GDALCreate(hDriver, "", width, height, bandCount - 1, dataType, NULL);
-    if (hNewDS == NULL) return NULL;
-
-    // 复制地理变换和投影
-    double geoTransform[6];
-    if (GDALGetGeoTransform(hDS, geoTransform) == CE_None) {
-        GDALSetGeoTransform(hNewDS, geoTransform);
-    }
-
-    const char* projection = GDALGetProjectionRef(hDS);
-    if (projection != NULL && strlen(projection) > 0) {
-        GDALSetProjection(hNewDS, projection);
-    }
-
-    // 复制波段（跳过要删除的波段）
-    int dstBandIdx = 1;
-    for (int i = 1; i <= bandCount; i++) {
-        if (i == bandIndex) continue;
-
-        GDALRasterBandH srcBand = GDALGetRasterBand(hDS, i);
-        GDALRasterBandH dstBand = GDALGetRasterBand(hNewDS, dstBandIdx);
-
         GDALDataType srcType = GDALGetRasterDataType(srcBand);
         int typeSize = GDALGetDataTypeSizeBytes(srcType);
-        void* buffer = CPLMalloc(width * height * typeSize);
 
+        // 复制数据
+        void* buffer = CPLMalloc((size_t)width * (size_t)height * typeSize);
         GDALRasterIO(srcBand, GF_Read, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
         GDALRasterIO(dstBand, GF_Write, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
         CPLFree(buffer);
 
-        // 复制属性
-        GDALSetRasterColorInterpretation(dstBand, GDALGetRasterColorInterpretation(srcBand));
+        // 【关键】使用预先保存的颜色解释
+        GDALSetRasterColorInterpretation(dstBand, srcColorInterps[i-1]);
 
+        // 复制调色板
+        if (srcColorTables[i-1] != NULL) {
+            GDALSetRasterColorTable(dstBand, srcColorTables[i-1]);
+        }
+
+        // 复制NoData
+        if (srcHasNoData[i-1]) {
+            GDALSetRasterNoDataValue(dstBand, srcNoDataValues[i-1]);
+        }
+
+        // 复制描述
+        const char* desc = GDALGetDescription((GDALMajorObjectH)srcBand);
+        if (desc != NULL && strlen(desc) > 0) {
+            GDALSetDescription((GDALMajorObjectH)dstBand, desc);
+        }
+
+        // 复制元数据
+        char** metadata = GDALGetMetadata((GDALMajorObjectH)srcBand, NULL);
+        if (metadata != NULL) {
+            GDALSetMetadata((GDALMajorObjectH)dstBand, metadata, NULL);
+        }
+    }
+
+    // 清理临时存储
+    if (srcColorInterps) CPLFree(srcColorInterps);
+    if (srcColorTables) {
+        for (int i = 0; i < bandCount; i++) {
+            if (srcColorTables[i]) GDALDestroyColorTable(srcColorTables[i]);
+        }
+        CPLFree(srcColorTables);
+    }
+    if (srcNoDataValues) CPLFree(srcNoDataValues);
+    if (srcHasNoData) CPLFree(srcHasNoData);
+
+    // 设置新波段
+    GDALRasterBandH newBand = GDALGetRasterBand(hNewDS, bandCount + 1);
+    GDALSetRasterColorInterpretation(newBand, colorInterpToGDAL(colorInterp));
+    GDALSetRasterNoDataValue(newBand, noDataValue);
+
+    // 初始化新波段为NoData值
+    int newTypeSize = GDALGetDataTypeSizeBytes(gdalNewBandType);
+    size_t bufSize = (size_t)width * (size_t)height * newTypeSize;
+    void* initBuffer = CPLMalloc(bufSize);
+    memset(initBuffer, 0, bufSize);
+
+    // 对于Byte类型，填充noDataValue
+    if (gdalNewBandType == GDT_Byte) {
+        memset(initBuffer, (unsigned char)noDataValue, (size_t)width * (size_t)height);
+    }
+
+    GDALRasterIO(newBand, GF_Write, 0, 0, width, height, initBuffer, width, height, gdalNewBandType, 0, 0);
+    CPLFree(initBuffer);
+
+    return hNewDS;
+}
+
+
+GDALDatasetH removeBandFromDataset(GDALDatasetH hDS, int bandIndex) {
+    if (hDS == NULL) return NULL;
+    int bandCount = GDALGetRasterCount(hDS);
+    if (bandIndex < 1 || bandIndex > bandCount || bandCount <= 1) {
+        return NULL;
+    }
+    int width = GDALGetRasterXSize(hDS);
+    int height = GDALGetRasterYSize(hDS);
+    // 获取第一个保留波段的数据类型
+    int firstBand = (bandIndex == 1) ? 2 : 1;
+    GDALDataType dataType = GDALGetRasterDataType(GDALGetRasterBand(hDS, firstBand));
+    // 创建新数据集
+    GDALDriverH hDriver = GDALGetDriverByName("MEM");
+    if (hDriver == NULL) return NULL;
+    GDALDatasetH hNewDS = GDALCreate(hDriver, "", width, height, bandCount - 1, dataType, NULL);
+    if (hNewDS == NULL) return NULL;
+    // 复制地理变换和投影
+    double geoTransform[6];
+    if (GDALGetGeoTransform(hDS, geoTransform) == CE_None) {
+        GDALSetGeoTransform(hNewDS, geoTransform);
+    }
+    const char* projection = GDALGetProjectionRef(hDS);
+    if (projection != NULL && strlen(projection) > 0) {
+        GDALSetProjection(hNewDS, projection);
+    }
+    // 复制波段（跳过要删除的波段）
+    int dstBandIdx = 1;
+    for (int i = 1; i <= bandCount; i++) {
+        if (i == bandIndex) continue;
+        GDALRasterBandH srcBand = GDALGetRasterBand(hDS, i);
+        GDALRasterBandH dstBand = GDALGetRasterBand(hNewDS, dstBandIdx);
+        GDALDataType srcType = GDALGetRasterDataType(srcBand);
+        int typeSize = GDALGetDataTypeSizeBytes(srcType);
+        void* buffer = CPLMalloc(width * height * typeSize);
+        GDALRasterIO(srcBand, GF_Read, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
+        GDALRasterIO(dstBand, GF_Write, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
+        CPLFree(buffer);
+        // 【关键】复制颜色解释
+        GDALSetRasterColorInterpretation(dstBand, GDALGetRasterColorInterpretation(srcBand));
+        // 复制NoData
         int hasNoData = 0;
         double noData = GDALGetRasterNoDataValue(srcBand, &hasNoData);
         if (hasNoData) {
             GDALSetRasterNoDataValue(dstBand, noData);
         }
-
+        // 复制调色板
         GDALColorTableH colorTable = GDALGetRasterColorTable(srcBand);
         if (colorTable != NULL) {
             GDALSetRasterColorTable(dstBand, GDALCloneColorTable(colorTable));
         }
-
+        // 复制描述
+        const char* desc = GDALGetDescription(srcBand);
+        if (desc != NULL && strlen(desc) > 0) {
+            GDALSetDescription(dstBand, desc);
+        }
+        // 复制元数据
+        char** metadata = GDALGetMetadata(srcBand, NULL);
+        if (metadata != NULL) {
+            GDALSetMetadata(dstBand, metadata, NULL);
+        }
         dstBandIdx++;
     }
-
     return hNewDS;
 }
-
 int setBandColorInterpretation(GDALDatasetH hDS, int bandIndex, ColorInterpretation colorInterp) {
     if (hDS == NULL || bandIndex < 1 || bandIndex > GDALGetRasterCount(hDS)) {
         return 0;
@@ -451,125 +498,130 @@ int copyBandData(GDALDatasetH srcDS, int srcBandIdx, GDALDatasetH dstDS, int dst
     CPLFree(buffer);
     return (err1 == CE_None && err2 == CE_None) ? 1 : 0;
 }
-
 GDALDatasetH reorderBands(GDALDatasetH hDS, int* bandOrder, int newBandCount) {
     if (hDS == NULL || bandOrder == NULL || newBandCount <= 0) return NULL;
-
     int srcBandCount = GDALGetRasterCount(hDS);
     int width = GDALGetRasterXSize(hDS);
     int height = GDALGetRasterYSize(hDS);
-
     // 验证波段索引
     for (int i = 0; i < newBandCount; i++) {
         if (bandOrder[i] < 1 || bandOrder[i] > srcBandCount) {
             return NULL;
         }
     }
-
     GDALDataType dataType = GDALGetRasterDataType(GDALGetRasterBand(hDS, bandOrder[0]));
-
     GDALDriverH hDriver = GDALGetDriverByName("MEM");
     if (hDriver == NULL) return NULL;
-
     GDALDatasetH hNewDS = GDALCreate(hDriver, "", width, height, newBandCount, dataType, NULL);
     if (hNewDS == NULL) return NULL;
-
     // 复制地理信息
     double geoTransform[6];
     if (GDALGetGeoTransform(hDS, geoTransform) == CE_None) {
         GDALSetGeoTransform(hNewDS, geoTransform);
     }
-
     const char* projection = GDALGetProjectionRef(hDS);
     if (projection != NULL && strlen(projection) > 0) {
         GDALSetProjection(hNewDS, projection);
     }
-
     // 按新顺序复制波段
     for (int i = 0; i < newBandCount; i++) {
         GDALRasterBandH srcBand = GDALGetRasterBand(hDS, bandOrder[i]);
         GDALRasterBandH dstBand = GDALGetRasterBand(hNewDS, i + 1);
-
         GDALDataType srcType = GDALGetRasterDataType(srcBand);
         int typeSize = GDALGetDataTypeSizeBytes(srcType);
         void* buffer = CPLMalloc(width * height * typeSize);
-
         GDALRasterIO(srcBand, GF_Read, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
         GDALRasterIO(dstBand, GF_Write, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
         CPLFree(buffer);
-
+        // 【关键】复制颜色解释
         GDALSetRasterColorInterpretation(dstBand, GDALGetRasterColorInterpretation(srcBand));
-
+        // 复制NoData
         int hasNoData = 0;
         double noData = GDALGetRasterNoDataValue(srcBand, &hasNoData);
         if (hasNoData) {
             GDALSetRasterNoDataValue(dstBand, noData);
         }
-
+        // 复制调色板
         GDALColorTableH colorTable = GDALGetRasterColorTable(srcBand);
         if (colorTable != NULL) {
             GDALSetRasterColorTable(dstBand, GDALCloneColorTable(colorTable));
         }
+        // 复制描述
+        const char* desc = GDALGetDescription(srcBand);
+        if (desc != NULL && strlen(desc) > 0) {
+            GDALSetDescription(dstBand, desc);
+        }
+        // 复制元数据
+        char** metadata = GDALGetMetadata(srcBand, NULL);
+        if (metadata != NULL) {
+            GDALSetMetadata(dstBand, metadata, NULL);
+        }
     }
-
     return hNewDS;
 }
-
 GDALDatasetH convertBandDataType(GDALDatasetH hDS, int bandIndex, BandDataType newType) {
     if (hDS == NULL || bandIndex < 1 || bandIndex > GDALGetRasterCount(hDS)) {
         return NULL;
     }
-
     int width = GDALGetRasterXSize(hDS);
     int height = GDALGetRasterYSize(hDS);
     int bandCount = GDALGetRasterCount(hDS);
     GDALDataType gdalNewType = bandDataTypeToGDAL(newType);
-
+    // 使用第一个波段的数据类型作为基础（除非是要转换的波段）
+    GDALDataType baseType = (bandIndex == 1) ? gdalNewType :
+                            GDALGetRasterDataType(GDALGetRasterBand(hDS, 1));
     GDALDriverH hDriver = GDALGetDriverByName("MEM");
     if (hDriver == NULL) return NULL;
-
-    GDALDatasetH hNewDS = GDALCreate(hDriver, "", width, height, bandCount, gdalNewType, NULL);
+    GDALDatasetH hNewDS = GDALCreate(hDriver, "", width, height, bandCount, baseType, NULL);
     if (hNewDS == NULL) return NULL;
-
     // 复制地理信息
     double geoTransform[6];
     if (GDALGetGeoTransform(hDS, geoTransform) == CE_None) {
         GDALSetGeoTransform(hNewDS, geoTransform);
     }
-
     const char* projection = GDALGetProjectionRef(hDS);
     if (projection != NULL && strlen(projection) > 0) {
         GDALSetProjection(hNewDS, projection);
     }
-
     // 复制所有波段
     for (int i = 1; i <= bandCount; i++) {
         GDALRasterBandH srcBand = GDALGetRasterBand(hDS, i);
         GDALRasterBandH dstBand = GDALGetRasterBand(hNewDS, i);
-
         GDALDataType srcType = GDALGetRasterDataType(srcBand);
         GDALDataType dstType = (i == bandIndex) ? gdalNewType : srcType;
-
         // 使用double作为中间类型进行转换
         double* buffer = (double*)CPLMalloc(width * height * sizeof(double));
-
         GDALRasterIO(srcBand, GF_Read, 0, 0, width, height, buffer, width, height, GDT_Float64, 0, 0);
         GDALRasterIO(dstBand, GF_Write, 0, 0, width, height, buffer, width, height, GDT_Float64, 0, 0);
-
         CPLFree(buffer);
-
+        // 【关键】复制颜色解释
         GDALSetRasterColorInterpretation(dstBand, GDALGetRasterColorInterpretation(srcBand));
-
+        // 复制NoData
         int hasNoData = 0;
         double noData = GDALGetRasterNoDataValue(srcBand, &hasNoData);
         if (hasNoData) {
             GDALSetRasterNoDataValue(dstBand, noData);
         }
+        // 复制调色板（仅对非转换波段）
+        if (i != bandIndex) {
+            GDALColorTableH colorTable = GDALGetRasterColorTable(srcBand);
+            if (colorTable != NULL) {
+                GDALSetRasterColorTable(dstBand, GDALCloneColorTable(colorTable));
+            }
+        }
+        // 复制描述
+        const char* desc = GDALGetDescription(srcBand);
+        if (desc != NULL && strlen(desc) > 0) {
+            GDALSetDescription(dstBand, desc);
+        }
+        // 复制元数据
+        char** metadata = GDALGetMetadata(srcBand, NULL);
+        if (metadata != NULL) {
+            GDALSetMetadata(dstBand, metadata, NULL);
+        }
     }
-
     return hNewDS;
 }
-
 // ==================== 调色板操作函数 ====================
 
 PaletteInfo* getPaletteInfo(GDALDatasetH hDS, int bandIndex) {

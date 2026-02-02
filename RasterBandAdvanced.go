@@ -889,6 +889,8 @@ func (rd *RasterDataset) ExportBandToFile(bandIndex int, outputPath, format stri
 	return nil
 }
 
+// RasterBandAdvanced.go - 修复 ExportToFile 函数
+
 // ExportToFile 导出整个数据集到文件
 func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[string]string) error {
 	activeDS := rd.GetActiveDataset()
@@ -904,26 +906,55 @@ func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[str
 		return fmt.Errorf("unsupported format: %s", format)
 	}
 
-	// 构建选项
-	var cOptions **C.char
-	if len(options) > 0 {
-		optionStrings := make([]*C.char, 0, len(options)+1)
-		for k, v := range options {
-			optStr := C.CString(fmt.Sprintf("%s=%s", k, v))
-			defer C.free(unsafe.Pointer(optStr))
-			optionStrings = append(optionStrings, optStr)
-		}
-		optionStrings = append(optionStrings, nil)
-		cOptions = &optionStrings[0]
+	// 构建选项 - 添加 PHOTOMETRIC=RGB 确保颜色解释正确
+	finalOptions := make(map[string]string)
+	for k, v := range options {
+		finalOptions[k] = v
 	}
+
+	// 检查波段数，如果是3或4波段且没有调色板，添加PHOTOMETRIC选项
+	bandCount := C.GDALGetRasterCount(activeDS)
+	if bandCount >= 3 && format == "GTiff" {
+		if _, exists := finalOptions["PHOTOMETRIC"]; !exists {
+			// 检查是否有调色板
+			firstBand := C.GDALGetRasterBand(activeDS, 1)
+			colorTable := C.GDALGetRasterColorTable(firstBand)
+			if colorTable == nil {
+				finalOptions["PHOTOMETRIC"] = "RGB"
+			}
+		}
+	}
+
+	var cOptions **C.char
+	var optionPtrs []*C.char
+	if len(finalOptions) > 0 {
+		optionPtrs = make([]*C.char, 0, len(finalOptions)+1)
+		for k, v := range finalOptions {
+			optStr := C.CString(fmt.Sprintf("%s=%s", k, v))
+			optionPtrs = append(optionPtrs, optStr)
+		}
+		optionPtrs = append(optionPtrs, nil)
+		cOptions = &optionPtrs[0]
+	}
+	defer func() {
+		for _, ptr := range optionPtrs {
+			if ptr != nil {
+				C.free(unsafe.Pointer(ptr))
+			}
+		}
+	}()
 
 	cOutputPath := C.CString(outputPath)
 	defer C.free(unsafe.Pointer(cOutputPath))
 
-	outputDS := C.GDALCreateCopy(driver, cOutputPath, activeDS, 0, cOptions, nil, nil)
+	// 使用 GDALCreateCopy，它会自动处理颜色解释
+	outputDS := C.GDALCreateCopy(driver, cOutputPath, activeDS, C.int(0), cOptions, nil, nil)
 	if outputDS == nil {
-		return fmt.Errorf("failed to create output file")
+		errMsg := C.CPLGetLastErrorMsg()
+		return fmt.Errorf("failed to create output file: %s", C.GoString(errMsg))
 	}
+
+	C.GDALFlushCache(outputDS)
 	C.GDALClose(outputDS)
 
 	return nil
