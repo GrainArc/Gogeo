@@ -1,3 +1,4 @@
+// RasterReader.go
 package Gogeo
 
 /*

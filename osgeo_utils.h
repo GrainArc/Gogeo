@@ -115,6 +115,150 @@ void cleanupVsimem(const char* path);
 int readTileDataFast(GDALDatasetH dataset,
                      double minX, double minY, double maxX, double maxY,
                      int tileSize, unsigned char* buffer);
+// ==================== 波段/调色板管理 ====================
+
+// 数据类型枚举（与GDAL对应）
+typedef enum {
+    BAND_Gray8 = 0,
+    BAND_Gray16,
+    BAND_Red8,
+    BAND_Red16,
+    BAND_Green8,
+    BAND_Green16,
+    BAND_Blue8,
+    BAND_Blue16,
+    BAND_Alpha8,
+    BAND_Alpha16,
+    BAND_Int8,
+    BAND_Int16,
+    BAND_Int32,
+    BAND_Int64,
+    BAND_UInt8,
+    BAND_UInt16,
+    BAND_UInt32,
+    BAND_UInt64,
+    BAND_Real32,
+    BAND_Real64
+} BandDataType;
+
+// 颜色解释枚举
+typedef enum {
+    COLOR_Undefined = 0,
+    COLOR_Gray,
+    COLOR_Palette,
+    COLOR_Red,
+    COLOR_Green,
+    COLOR_Blue,
+    COLOR_Alpha,
+    COLOR_Hue,
+    COLOR_Saturation,
+    COLOR_Lightness,
+    COLOR_Cyan,
+    COLOR_Magenta,
+    COLOR_Yellow,
+    COLOR_Black
+} ColorInterpretation;
+
+// 调色板条目
+typedef struct {
+    short c1;  // Red or Gray
+    short c2;  // Green
+    short c3;  // Blue
+    short c4;  // Alpha
+} PaletteEntry;
+
+// 波段信息
+typedef struct {
+    int bandIndex;
+    GDALDataType dataType;
+    GDALColorInterp colorInterp;
+    double noDataValue;
+    int hasNoData;
+    double minValue;
+    double maxValue;
+    int hasStats;
+} BandInfo;
+
+// 调色板信息
+typedef struct {
+    int entryCount;
+    GDALPaletteInterp interpType;
+    PaletteEntry* entries;
+} PaletteInfo;
+
+// ==================== 波段操作函数 ====================
+
+// 获取波段信息
+BandInfo* getBandInfo(GDALDatasetH hDS, int bandIndex);
+
+// 获取所有波段信息
+BandInfo* getAllBandsInfo(GDALDatasetH hDS, int* bandCount);
+
+// 添加波段到数据集（返回新数据集）
+GDALDatasetH addBandToDataset(GDALDatasetH hDS, BandDataType dataType,
+                               ColorInterpretation colorInterp, double noDataValue);
+
+// 删除波段（返回新数据集）
+GDALDatasetH removeBandFromDataset(GDALDatasetH hDS, int bandIndex);
+
+// 修改波段颜色解释
+int setBandColorInterpretation(GDALDatasetH hDS, int bandIndex, ColorInterpretation colorInterp);
+
+// 修改波段NoData值
+int setBandNoDataValue(GDALDatasetH hDS, int bandIndex, double noDataValue);
+
+// 删除波段NoData值
+int deleteBandNoDataValue(GDALDatasetH hDS, int bandIndex);
+
+// 复制波段数据
+int copyBandData(GDALDatasetH srcDS, int srcBand, GDALDatasetH dstDS, int dstBand);
+
+// 重排波段顺序（返回新数据集）
+GDALDatasetH reorderBands(GDALDatasetH hDS, int* bandOrder, int bandCount);
+
+// 转换波段数据类型（返回新数据集）
+GDALDatasetH convertBandDataType(GDALDatasetH hDS, int bandIndex, BandDataType newType);
+
+// ==================== 调色板操作函数 ====================
+
+// 获取调色板信息
+PaletteInfo* getPaletteInfo(GDALDatasetH hDS, int bandIndex);
+
+// 释放调色板信息
+void freePaletteInfo(PaletteInfo* info);
+
+// 创建调色板
+GDALColorTableH createColorTable(GDALPaletteInterp interpType);
+
+// 添加调色板条目
+int addPaletteEntry(GDALColorTableH hTable, int index, short c1, short c2, short c3, short c4);
+
+// 设置波段调色板
+int setBandColorTable(GDALDatasetH hDS, int bandIndex, GDALColorTableH hTable);
+
+// 删除波段调色板
+int deleteBandColorTable(GDALDatasetH hDS, int bandIndex);
+
+// 修改调色板条目
+int modifyPaletteEntry(GDALDatasetH hDS, int bandIndex, int entryIndex,
+                       short c1, short c2, short c3, short c4);
+
+// 从调色板图像转换为RGB
+GDALDatasetH paletteToRGB(GDALDatasetH hDS);
+
+// 从RGB转换为调色板图像
+GDALDatasetH rgbToPalette(GDALDatasetH hDS, int colorCount);
+
+// 释放波段信息
+void freeBandInfo(BandInfo* info);
+
+// GDAL数据类型转换
+GDALDataType bandDataTypeToGDAL(BandDataType type);
+BandDataType gdalToBandDataType(GDALDataType type);
+
+// 颜色解释转换
+GDALColorInterp colorInterpToGDAL(ColorInterpretation interp);
+ColorInterpretation gdalToColorInterp(GDALColorInterp interp);
 
 #ifdef __cplusplus
 }

@@ -1,3 +1,4 @@
+// RasterClip.go
 package Gogeo
 
 /*
