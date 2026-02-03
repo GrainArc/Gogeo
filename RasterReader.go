@@ -446,3 +446,12 @@ func (rd *RasterDataset) getActiveDataset() C.GDALDatasetH {
 	}
 	return rd.dataset
 }
+
+func (rd *RasterDataset) GetWidth() int {
+	return rd.width
+}
+
+// GetHeight 获取数据集高度（像素）
+func (rd *RasterDataset) GetHeight() int {
+	return rd.height
+}

@@ -50,35 +50,32 @@ func (rd *RasterDataset) ReadBandData(bandIndex int) ([]float64, error) {
 
 // WriteBandData 写入波段数据
 func (rd *RasterDataset) WriteBandData(bandIndex int, data []float64) error {
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
 	}
-
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
-
 	expectedSize := rd.width * rd.height
 	if len(data) != expectedSize {
 		return fmt.Errorf("data size mismatch: expected %d, got %d", expectedSize, len(data))
 	}
-
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
-
 	err := C.GDALRasterIO(band, C.GF_Write,
 		0, 0, C.int(rd.width), C.int(rd.height),
 		unsafe.Pointer(&data[0]),
 		C.int(rd.width), C.int(rd.height),
 		C.GDT_Float64, 0, 0)
-
 	if err != C.CE_None {
 		return fmt.Errorf("failed to write band data")
 	}
-
 	return nil
 }
 
@@ -121,40 +118,35 @@ func (rd *RasterDataset) ReadBandDataRect(bandIndex, x, y, width, height int) ([
 
 // WriteBandDataRect 写入波段矩形区域数据
 func (rd *RasterDataset) WriteBandDataRect(bandIndex, x, y, width, height int, data []float64) error {
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
 	}
-
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
-
 	expectedSize := width * height
 	if len(data) != expectedSize {
 		return fmt.Errorf("data size mismatch: expected %d, got %d", expectedSize, len(data))
 	}
-
-	// 边界检查
 	if x < 0 || y < 0 || x+width > rd.width || y+height > rd.height {
 		return fmt.Errorf("rectangle out of bounds")
 	}
-
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
-
 	err := C.GDALRasterIO(band, C.GF_Write,
 		C.int(x), C.int(y), C.int(width), C.int(height),
 		unsafe.Pointer(&data[0]),
 		C.int(width), C.int(height),
 		C.GDT_Float64, 0, 0)
-
 	if err != C.CE_None {
 		return fmt.Errorf("failed to write band data")
 	}
-
 	return nil
 }
 
@@ -523,21 +515,21 @@ func (rd *RasterDataset) SplitBands() ([]*RasterDataset, error) {
 
 // ApplyMask 应用掩膜到波段
 func (rd *RasterDataset) ApplyMask(bandIndex int, mask []bool, noDataValue float64) error {
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
 	if len(mask) != rd.width*rd.height {
 		return fmt.Errorf("mask size mismatch: expected %d, got %d", rd.width*rd.height, len(mask))
 	}
-
 	data, err := rd.ReadBandData(bandIndex)
 	if err != nil {
 		return err
 	}
-
 	for i := 0; i < len(data); i++ {
 		if !mask[i] {
 			data[i] = noDataValue
 		}
 	}
-
 	return rd.WriteBandData(bandIndex, data)
 }
 
@@ -995,31 +987,28 @@ func colorInterpToString(interp int) string {
 
 // SetBandMetadata 设置波段元数据
 func (rd *RasterDataset) SetBandMetadata(bandIndex int, key, value string) error {
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
 	}
-
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
-
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
-
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
-
 	cValue := C.CString(value)
 	defer C.free(unsafe.Pointer(cValue))
-
 	err := C.GDALSetMetadataItem(C.GDALMajorObjectH(band), cKey, cValue, nil)
 	if err != C.CE_None {
 		return fmt.Errorf("failed to set metadata")
 	}
-
 	return nil
 }
 
@@ -1119,25 +1108,24 @@ func (rd *RasterDataset) SetBandScale(bandIndex int, scale float64) error {
 
 // SetBandOffset 设置波段偏移量
 func (rd *RasterDataset) SetBandOffset(bandIndex int, offset float64) error {
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
 	}
-
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
-
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
-
 	err := C.GDALSetRasterOffset(band, C.double(offset))
 	if err != C.CE_None {
 		return fmt.Errorf("failed to set offset")
 	}
-
 	return nil
 }
 
@@ -1189,28 +1177,26 @@ func (rd *RasterDataset) GetBandOffset(bandIndex int) (float64, error) {
 
 // SetBandUnitType 设置波段单位类型
 func (rd *RasterDataset) SetBandUnitType(bandIndex int, unitType string) error {
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
 	}
-
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
-
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
-
 	cUnitType := C.CString(unitType)
 	defer C.free(unsafe.Pointer(cUnitType))
-
 	err := C.GDALSetRasterUnitType(band, cUnitType)
 	if err != C.CE_None {
 		return fmt.Errorf("failed to set unit type")
 	}
-
 	return nil
 }
 
@@ -1240,25 +1226,23 @@ func (rd *RasterDataset) GetBandUnitType(bandIndex int) (string, error) {
 
 // SetBandDescription 设置波段描述
 func (rd *RasterDataset) SetBandDescription(bandIndex int, description string) error {
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
 	}
-
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
-
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
-
 	cDesc := C.CString(description)
 	defer C.free(unsafe.Pointer(cDesc))
-
 	C.GDALSetDescription(C.GDALMajorObjectH(band), cDesc)
-
 	return nil
 }
 
