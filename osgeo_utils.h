@@ -297,6 +297,59 @@ double* calculateBlock(BlockCalculator* bc, int blockX, int blockY,
 double* calculateNDVI(GDALDatasetH hDS, int nirBand, int redBand, int* outSize);
 double* calculateNDWI(GDALDatasetH hDS, int greenBand, int nirBand, int* outSize);
 double* calculateEVI(GDALDatasetH hDS, int nirBand, int redBand, int blueBand, int* outSize);
+// ==================== 栅格镶嵌 ====================
+
+// 镶嵌选项
+typedef struct {
+    int forceBandMatch;      // 强制波段匹配（删除多余波段）
+    int resampleMethod;      // 重采样方法: 0=Nearest, 1=Bilinear, 2=Cubic, 3=CubicSpline, 4=Lanczos
+    double noDataValue;      // 输出NoData值
+    int hasNoData;           // 是否设置NoData
+    int numThreads;          // 并行线程数，0表示自动
+} MosaicOptions;
+
+// 镶嵌信息结构
+typedef struct {
+    double minX, minY, maxX, maxY;  // 输出范围
+    double resX, resY;               // 输出分辨率
+    int width, height;               // 输出尺寸
+    int bandCount;                   // 输出波段数
+    GDALDataType dataType;           // 输出数据类型
+    char projection[2048];           // 输出投影
+} MosaicInfo;
+
+// 数据集信息（用于镶嵌预处理）
+typedef struct {
+    GDALDatasetH dataset;
+    double geoTransform[6];
+    double minX, minY, maxX, maxY;
+    double resX, resY;
+    int width, height;
+    int bandCount;
+    GDALDataType dataType;
+    int needsReproject;
+    int needsResample;
+    GDALDatasetH warpedDS;  // 重投影/重采样后的数据集
+} MosaicInputInfo;
+
+// 计算镶嵌参数
+MosaicInfo* calculateMosaicInfo(GDALDatasetH* datasets, int datasetCount,
+                                 MosaicOptions* options, char* errorMsg);
+
+// 执行镶嵌
+GDALDatasetH mosaicDatasets(GDALDatasetH* datasets, int datasetCount,
+                            MosaicOptions* options, char* errorMsg);
+
+// 释放镶嵌信息
+void freeMosaicInfo(MosaicInfo* info);
+
+// 内部函数
+MosaicInputInfo* prepareMosaicInputs(GDALDatasetH* datasets, int datasetCount,
+                                      MosaicInfo* info, MosaicOptions* options,
+                                      char* errorMsg);
+void freeMosaicInputs(MosaicInputInfo* inputs, int count);
+int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS, MosaicInfo* info);
+GDALResampleAlg getResampleAlgorithm(int method);
 
 #ifdef __cplusplus
 }

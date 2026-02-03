@@ -2011,3 +2011,543 @@ int readTileDataFast(GDALDatasetH dataset,
 
     return bandCount;
 }
+
+// ==================== 栅格镶嵌实现 ====================
+
+GDALResampleAlg getResampleAlgorithm(int method) {
+    switch (method) {
+        case 0: return GRA_NearestNeighbour;
+        case 1: return GRA_Bilinear;
+        case 2: return GRA_Cubic;
+        case 3: return GRA_CubicSpline;
+        case 4: return GRA_Lanczos;
+        default: return GRA_Bilinear;
+    }
+}
+
+MosaicInfo* calculateMosaicInfo(GDALDatasetH* datasets, int datasetCount,
+                                 MosaicOptions* options, char* errorMsg) {
+    if (datasets == NULL || datasetCount <= 0) {
+        if (errorMsg) strcpy(errorMsg, "No datasets provided");
+        return NULL;
+    }
+
+    MosaicInfo* info = (MosaicInfo*)CPLMalloc(sizeof(MosaicInfo));
+    if (info == NULL) {
+        if (errorMsg) strcpy(errorMsg, "Memory allocation failed");
+        return NULL;
+    }
+    memset(info, 0, sizeof(MosaicInfo));
+
+    // 获取第一个数据集作为参考
+    GDALDatasetH refDS = datasets[0];
+    const char* refProj = GDALGetProjectionRef(refDS);
+    if (refProj && strlen(refProj) > 0) {
+        strncpy(info->projection, refProj, sizeof(info->projection) - 1);
+    }
+
+    // 获取参考数据集的波段信息
+    info->bandCount = GDALGetRasterCount(refDS);
+    GDALRasterBandH refBand = GDALGetRasterBand(refDS, 1);
+    info->dataType = GDALGetRasterDataType(refBand);
+
+    // 初始化范围和分辨率
+    double geoTransform[6];
+    if (GDALGetGeoTransform(refDS, geoTransform) != CE_None) {
+        if (errorMsg) strcpy(errorMsg, "Failed to get geotransform from reference dataset");
+        CPLFree(info);
+        return NULL;
+    }
+
+    int refWidth = GDALGetRasterXSize(refDS);
+    int refHeight = GDALGetRasterYSize(refDS);
+
+    info->minX = geoTransform[0];
+    info->maxY = geoTransform[3];
+    info->maxX = geoTransform[0] + refWidth * geoTransform[1];
+    info->minY = geoTransform[3] + refHeight * geoTransform[5];
+    info->resX = fabs(geoTransform[1]);
+    info->resY = fabs(geoTransform[5]);
+
+    // 创建参考坐标系
+    OGRSpatialReferenceH refSRS = OSRNewSpatialReference(refProj);
+
+    int minBandCount = info->bandCount;
+
+    // 遍历所有数据集，计算统一范围和最高分辨率
+    for (int i = 0; i < datasetCount; i++) {
+        GDALDatasetH ds = datasets[i];
+        int dsWidth = GDALGetRasterXSize(ds);
+        int dsHeight = GDALGetRasterYSize(ds);
+        int dsBandCount = GDALGetRasterCount(ds);
+
+        // 检查波段数
+        if (dsBandCount < minBandCount) {
+            minBandCount = dsBandCount;
+        }
+
+        if (!options->forceBandMatch && dsBandCount != info->bandCount) {
+            if (errorMsg) {
+                sprintf(errorMsg, "Band count mismatch: dataset %d has %d bands, expected %d. Use forceBandMatch option.",
+                        i, dsBandCount, info->bandCount);
+            }
+            OSRDestroySpatialReference(refSRS);
+            CPLFree(info);
+            return NULL;
+        }
+
+        // 检查数据类型
+        GDALRasterBandH band = GDALGetRasterBand(ds, 1);
+        GDALDataType dt = GDALGetRasterDataType(band);
+        if (dt != info->dataType) {
+            if (errorMsg) {
+                sprintf(errorMsg, "Data type mismatch: dataset %d has type %s, expected %s",
+                        i, GDALGetDataTypeName(dt), GDALGetDataTypeName(info->dataType));
+            }
+            OSRDestroySpatialReference(refSRS);
+            CPLFree(info);
+            return NULL;
+        }
+
+        // 获取地理变换
+        double dsGeoTransform[6];
+        if (GDALGetGeoTransform(ds, dsGeoTransform) != CE_None) {
+            continue;
+        }
+
+        // 获取当前数据集的投影
+        const char* dsProj = GDALGetProjectionRef(ds);
+        OGRSpatialReferenceH dsSRS = OSRNewSpatialReference(dsProj);
+
+        double dsMinX, dsMinY, dsMaxX, dsMaxY;
+        double dsResX = fabs(dsGeoTransform[1]);
+        double dsResY = fabs(dsGeoTransform[5]);
+
+        // 检查是否需要重投影
+        int needsReproject = 0;
+        if (dsSRS && refSRS) {
+            needsReproject = !OSRIsSame(dsSRS, refSRS);
+        }
+
+        if (needsReproject) {
+            // 创建坐标转换
+            OGRCoordinateTransformationH transform = OCTNewCoordinateTransformation(dsSRS, refSRS);
+            if (transform) {
+                // 转换四个角点
+                double corners[8] = {
+                    dsGeoTransform[0], dsGeoTransform[3],  // 左上
+                    dsGeoTransform[0] + dsWidth * dsGeoTransform[1], dsGeoTransform[3],  // 右上
+                    dsGeoTransform[0], dsGeoTransform[3] + dsHeight * dsGeoTransform[5],  // 左下
+                    dsGeoTransform[0] + dsWidth * dsGeoTransform[1], dsGeoTransform[3] + dsHeight * dsGeoTransform[5]  // 右下
+                };
+
+                dsMinX = dsMaxX = corners[0];
+                dsMinY = dsMaxY = corners[1];
+
+                for (int j = 0; j < 4; j++) {
+                    double x = corners[j * 2];
+                    double y = corners[j * 2 + 1];
+                    if (OCTTransform(transform, 1, &x, &y, NULL)) {
+                        if (x < dsMinX) dsMinX = x;
+                        if (x > dsMaxX) dsMaxX = x;
+                        if (y < dsMinY) dsMinY = y;
+                        if (y > dsMaxY) dsMaxY = y;
+                    }
+                }
+
+                // 估算重投影后的分辨率
+                double centerX = (corners[0] + corners[2]) / 2;
+                double centerY = (corners[1] + corners[5]) / 2;
+                double centerX2 = centerX + dsGeoTransform[1];
+                double centerY2 = centerY + dsGeoTransform[5];
+
+                OCTTransform(transform, 1, &centerX, &centerY, NULL);
+                OCTTransform(transform, 1, &centerX2, &centerY2, NULL);
+
+                dsResX = fabs(centerX2 - centerX);
+                dsResY = fabs(centerY2 - centerY);
+
+                OCTDestroyCoordinateTransformation(transform);
+            }
+        } else {
+            dsMinX = dsGeoTransform[0];
+            dsMaxY = dsGeoTransform[3];
+            dsMaxX = dsGeoTransform[0] + dsWidth * dsGeoTransform[1];
+            dsMinY = dsGeoTransform[3] + dsHeight * dsGeoTransform[5];
+        }
+
+        // 更新范围
+        if (dsMinX < info->minX) info->minX = dsMinX;
+        if (dsMinY < info->minY) info->minY = dsMinY;
+        if (dsMaxX > info->maxX) info->maxX = dsMaxX;
+        if (dsMaxY > info->maxY) info->maxY = dsMaxY;
+
+        // 更新分辨率（取最高分辨率，即最小值）
+        if (dsResX < info->resX) info->resX = dsResX;
+        if (dsResY < info->resY) info->resY = dsResY;
+
+        if (dsSRS) OSRDestroySpatialReference(dsSRS);
+    }
+
+    if (refSRS) OSRDestroySpatialReference(refSRS);
+
+    // 如果强制波段匹配，使用最小波段数
+    if (options->forceBandMatch) {
+        info->bandCount = minBandCount;
+    }
+
+    // 计算输出尺寸
+    info->width = (int)ceil((info->maxX - info->minX) / info->resX);
+    info->height = (int)ceil((info->maxY - info->minY) / info->resY);
+
+    // 限制最大尺寸
+    if (info->width > 10000000 || info->height > 10000000) {
+        if (errorMsg) strcpy(errorMsg, "Output dimensions too large (max 100000x100000)");
+        CPLFree(info);
+        return NULL;
+    }
+
+    return info;
+}
+
+void freeMosaicInfo(MosaicInfo* info) {
+    if (info) {
+        CPLFree(info);
+    }
+}
+
+MosaicInputInfo* prepareMosaicInputs(GDALDatasetH* datasets, int datasetCount,
+                                      MosaicInfo* info, MosaicOptions* options,
+                                      char* errorMsg) {
+    MosaicInputInfo* inputs = (MosaicInputInfo*)CPLCalloc(datasetCount, sizeof(MosaicInputInfo));
+    if (inputs == NULL) {
+        if (errorMsg) strcpy(errorMsg, "Memory allocation failed");
+        return NULL;
+    }
+
+    OGRSpatialReferenceH targetSRS = OSRNewSpatialReference(info->projection);
+
+    for (int i = 0; i < datasetCount; i++) {
+        GDALDatasetH ds = datasets[i];
+        MosaicInputInfo* input = &inputs[i];
+
+        input->dataset = ds;
+        input->width = GDALGetRasterXSize(ds);
+        input->height = GDALGetRasterYSize(ds);
+        input->bandCount = GDALGetRasterCount(ds);
+
+        GDALRasterBandH band = GDALGetRasterBand(ds, 1);
+        input->dataType = GDALGetRasterDataType(band);
+
+        GDALGetGeoTransform(ds, input->geoTransform);
+
+        input->minX = input->geoTransform[0];
+        input->maxY = input->geoTransform[3];
+        input->maxX = input->geoTransform[0] + input->width * input->geoTransform[1];
+        input->minY = input->geoTransform[3] + input->height * input->geoTransform[5];
+        input->resX = fabs(input->geoTransform[1]);
+        input->resY = fabs(input->geoTransform[5]);
+
+        // 检查是否需要重投影
+        const char* dsProj = GDALGetProjectionRef(ds);
+        OGRSpatialReferenceH dsSRS = OSRNewSpatialReference(dsProj);
+
+        input->needsReproject = 0;
+        if (dsSRS && targetSRS) {
+            input->needsReproject = !OSRIsSame(dsSRS, targetSRS);
+        }
+
+        // 检查分辨率差异（允许1%的误差）
+        input->needsResample = (fabs(input->resX - info->resX) / info->resX > 0.01) ||
+                               (fabs(input->resY - info->resY) / info->resY > 0.01);
+
+        input->warpedDS = NULL;
+
+        // 如果需要重投影或重采样
+        if (input->needsReproject || input->needsResample) {
+            // 设置重采样方法名称
+            const char* resampleName;
+            switch (options->resampleMethod) {
+                case 0: resampleName = "near"; break;
+                case 1: resampleName = "bilinear"; break;
+                case 2: resampleName = "cubic"; break;
+                case 3: resampleName = "cubicspline"; break;
+                case 4: resampleName = "lanczos"; break;
+                default: resampleName = "bilinear"; break;
+            }
+
+            // 分辨率字符串
+            char resXStr[64], resYStr[64];
+            snprintf(resXStr, sizeof(resXStr), "%.15g", info->resX);
+            snprintf(resYStr, sizeof(resYStr), "%.15g", info->resY);
+
+            // 使用 GDALWarpAppOptions 方式
+            char** argv = NULL;
+            argv = CSLAddString(argv, "-of");
+            argv = CSLAddString(argv, "MEM");
+            argv = CSLAddString(argv, "-t_srs");
+            argv = CSLAddString(argv, info->projection);
+            argv = CSLAddString(argv, "-tr");
+            argv = CSLAddString(argv, resXStr);
+            argv = CSLAddString(argv, resYStr);
+            argv = CSLAddString(argv, "-r");
+            argv = CSLAddString(argv, resampleName);
+
+            if (options->numThreads > 0) {
+                argv = CSLAddString(argv, "-multi");
+                argv = CSLAddString(argv, "-wo");
+                char woStr[64];
+                snprintf(woStr, sizeof(woStr), "NUM_THREADS=%d", options->numThreads);
+                argv = CSLAddString(argv, woStr);
+            } else {
+                argv = CSLAddString(argv, "-multi");
+                argv = CSLAddString(argv, "-wo");
+                argv = CSLAddString(argv, "NUM_THREADS=ALL_CPUS");
+            }
+
+            GDALWarpAppOptions* warpOpts = GDALWarpAppOptionsNew(argv, NULL);
+            CSLDestroy(argv);
+
+            if (warpOpts) {
+                int bUsageError = 0;
+                GDALDatasetH srcDSArray[1] = { ds };
+
+                // 关键修复：第一个参数传空字符串，第二个参数传NULL
+                input->warpedDS = GDALWarp("", NULL, 1, srcDSArray, warpOpts, &bUsageError);
+
+                GDALWarpAppOptionsFree(warpOpts);
+
+                if (bUsageError) {
+                    CPLError(CE_Warning, CPLE_AppDefined, "GDALWarp usage error for dataset %d", i);
+                }
+            }
+
+            if (input->warpedDS == NULL) {
+                // 尝试备用方案：使用 GDALAutoCreateWarpedVRT
+                input->warpedDS = GDALAutoCreateWarpedVRT(
+                    ds,
+                    GDALGetProjectionRef(ds),
+                    info->projection,
+                    getResampleAlgorithm(options->resampleMethod),
+                    0.0,
+                    NULL
+                );
+            }
+
+            if (input->warpedDS == NULL) {
+                if (errorMsg) {
+                    sprintf(errorMsg, "Failed to warp dataset %d", i);
+                }
+                // 清理已创建的
+                for (int j = 0; j < i; j++) {
+                    if (inputs[j].warpedDS) {
+                        GDALClose(inputs[j].warpedDS);
+                    }
+                }
+                CPLFree(inputs);
+                if (dsSRS) OSRDestroySpatialReference(dsSRS);
+                if (targetSRS) OSRDestroySpatialReference(targetSRS);
+                return NULL;
+            }
+
+            // 更新信息
+            GDALGetGeoTransform(input->warpedDS, input->geoTransform);
+            input->width = GDALGetRasterXSize(input->warpedDS);
+            input->height = GDALGetRasterYSize(input->warpedDS);
+            input->minX = input->geoTransform[0];
+            input->maxY = input->geoTransform[3];
+            input->maxX = input->geoTransform[0] + input->width * input->geoTransform[1];
+            input->minY = input->geoTransform[3] + input->height * input->geoTransform[5];
+        }
+
+        if (dsSRS) OSRDestroySpatialReference(dsSRS);
+    }
+
+    if (targetSRS) OSRDestroySpatialReference(targetSRS);
+
+    return inputs;
+}
+
+
+
+
+void freeMosaicInputs(MosaicInputInfo* inputs, int count) {
+    if (inputs == NULL) return;
+
+    for (int i = 0; i < count; i++) {
+        if (inputs[i].warpedDS) {
+            GDALClose(inputs[i].warpedDS);
+        }
+    }
+    CPLFree(inputs);
+}
+
+int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS, MosaicInfo* info) {
+    GDALDatasetH srcDS = input->warpedDS ? input->warpedDS : input->dataset;
+
+    int srcWidth = GDALGetRasterXSize(srcDS);
+    int srcHeight = GDALGetRasterYSize(srcDS);
+
+    double srcGeoTransform[6];
+    GDALGetGeoTransform(srcDS, srcGeoTransform);
+
+    // 计算源数据在输出中的位置
+    int dstX = (int)round((srcGeoTransform[0] - info->minX) / info->resX);
+    int dstY = (int)round((info->maxY - srcGeoTransform[3]) / info->resY);
+
+    // 边界检查
+    if (dstX < 0) {
+        srcWidth += dstX;
+        dstX = 0;
+    }
+    if (dstY < 0) {
+        srcHeight += dstY;
+        dstY = 0;
+    }
+    if (dstX + srcWidth > info->width) {
+        srcWidth = info->width - dstX;
+    }
+    if (dstY + srcHeight > info->height) {
+        srcHeight = info->height - dstY;
+    }
+
+    if (srcWidth <= 0 || srcHeight <= 0) {
+        return 1; // 无重叠区域，跳过
+    }
+
+    // 计算数据类型大小
+    int dataTypeSize = GDALGetDataTypeSizeBytes(info->dataType);
+
+    // 分配缓冲区
+    size_t bufferSize = (size_t)srcWidth * srcHeight * dataTypeSize;
+    void* buffer = CPLMalloc(bufferSize);
+    if (buffer == NULL) {
+        return 0;
+    }
+
+    // 逐波段复制
+    int bandsToCopy = input->bandCount < info->bandCount ? input->bandCount : info->bandCount;
+
+    for (int b = 1; b <= bandsToCopy; b++) {
+        GDALRasterBandH srcBand = GDALGetRasterBand(srcDS, b);
+        GDALRasterBandH dstBand = GDALGetRasterBand(outputDS, b);
+
+        if (srcBand == NULL || dstBand == NULL) {
+            continue;
+        }
+
+        // 读取源数据
+        CPLErr err = GDALRasterIO(srcBand, GF_Read,
+                                   0, 0, srcWidth, srcHeight,
+                                   buffer, srcWidth, srcHeight,
+                                   info->dataType, 0, 0);
+
+        if (err != CE_None) {
+            CPLFree(buffer);
+            return 0;
+        }
+
+        // 写入目标
+        err = GDALRasterIO(dstBand, GF_Write,
+                           dstX, dstY, srcWidth, srcHeight,
+                           buffer, srcWidth, srcHeight,
+                           info->dataType, 0, 0);
+
+        if (err != CE_None) {
+            CPLFree(buffer);
+            return 0;
+        }
+    }
+
+    CPLFree(buffer);
+    return 1;
+}
+
+GDALDatasetH mosaicDatasets(GDALDatasetH* datasets, int datasetCount,
+                            MosaicOptions* options, char* errorMsg) {
+    if (datasets == NULL || datasetCount <= 0) {
+        if (errorMsg) strcpy(errorMsg, "No datasets provided");
+        return NULL;
+    }
+
+    // 计算镶嵌参数
+    MosaicInfo* info = calculateMosaicInfo(datasets, datasetCount, options, errorMsg);
+    if (info == NULL) {
+        return NULL;
+    }
+
+    // 准备输入数据集（重投影/重采样）
+    MosaicInputInfo* inputs = prepareMosaicInputs(datasets, datasetCount, info, options, errorMsg);
+    if (inputs == NULL) {
+        freeMosaicInfo(info);
+        return NULL;
+    }
+
+    // 创建输出数据集
+    GDALDriverH memDriver = GDALGetDriverByName("MEM");
+    if (memDriver == NULL) {
+        if (errorMsg) strcpy(errorMsg, "MEM driver not available");
+        freeMosaicInputs(inputs, datasetCount);
+        freeMosaicInfo(info);
+        return NULL;
+    }
+
+    GDALDatasetH outputDS = GDALCreate(memDriver, "", info->width, info->height,
+                                        info->bandCount, info->dataType, NULL);
+    if (outputDS == NULL) {
+        if (errorMsg) strcpy(errorMsg, "Failed to create output dataset");
+        freeMosaicInputs(inputs, datasetCount);
+        freeMosaicInfo(info);
+        return NULL;
+    }
+
+    // 设置地理变换
+    double outGeoTransform[6] = {
+        info->minX, info->resX, 0,
+        info->maxY, 0, -info->resY
+    };
+    GDALSetGeoTransform(outputDS, outGeoTransform);
+
+    // 设置投影
+    GDALSetProjection(outputDS, info->projection);
+
+    // 设置NoData值
+    if (options->hasNoData) {
+        for (int b = 1; b <= info->bandCount; b++) {
+            GDALRasterBandH band = GDALGetRasterBand(outputDS, b);
+            GDALSetRasterNoDataValue(band, options->noDataValue);
+
+            // 填充NoData
+            GDALFillRaster(band, options->noDataValue, 0);
+        }
+    }
+
+    // 复制颜色解释
+    GDALDatasetH refDS = datasets[0];
+    for (int b = 1; b <= info->bandCount; b++) {
+        GDALRasterBandH srcBand = GDALGetRasterBand(refDS, b);
+        GDALRasterBandH dstBand = GDALGetRasterBand(outputDS, b);
+        if (srcBand && dstBand) {
+            GDALSetRasterColorInterpretation(dstBand, GDALGetRasterColorInterpretation(srcBand));
+        }
+    }
+
+    // 执行镶嵌（按顺序复制，后面的覆盖前面的）
+    for (int i = 0; i < datasetCount; i++) {
+        if (!copyRasterToMosaic(&inputs[i], outputDS, info)) {
+            if (errorMsg) {
+                sprintf(errorMsg, "Failed to copy dataset %d to mosaic", i);
+            }
+            GDALClose(outputDS);
+            freeMosaicInputs(inputs, datasetCount);
+            freeMosaicInfo(info);
+            return NULL;
+        }
+    }
+
+    // 清理
+    freeMosaicInputs(inputs, datasetCount);
+    freeMosaicInfo(info);
+
+    return outputDS;
+}

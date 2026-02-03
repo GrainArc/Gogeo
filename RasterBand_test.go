@@ -781,3 +781,12 @@ func ComprehensiveIndexCalculationSample(rd *RasterDataset) {
 	fmt.Printf("归一化后范围: [0, 255]\n")
 	fmt.Println("NDVI计算与归一化完成")
 }
+
+func BandCalculatorSample(rd *RasterDataset) {
+	calc := rd.NewBandCalculator()
+
+	err := calc.CalculateAndWrite("(b1 + b2) / 4", 3)
+	if err != nil {
+		return
+	}
+}
