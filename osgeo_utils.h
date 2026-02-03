@@ -348,7 +348,10 @@ MosaicInputInfo* prepareMosaicInputs(GDALDatasetH* datasets, int datasetCount,
                                       MosaicInfo* info, MosaicOptions* options,
                                       char* errorMsg);
 void freeMosaicInputs(MosaicInputInfo* inputs, int count);
-int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS, MosaicInfo* info);
+
+int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS,
+                       MosaicInfo* info, MosaicOptions* options);
+
 GDALResampleAlg getResampleAlgorithm(int method);
 
 #ifdef __cplusplus

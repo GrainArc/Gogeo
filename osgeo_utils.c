@@ -2382,7 +2382,8 @@ void freeMosaicInputs(MosaicInputInfo* inputs, int count) {
     CPLFree(inputs);
 }
 
-int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS, MosaicInfo* info) {
+int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS,
+                       MosaicInfo* info, MosaicOptions* options) {
     GDALDatasetH srcDS = input->warpedDS ? input->warpedDS : input->dataset;
 
     int srcWidth = GDALGetRasterXSize(srcDS);
@@ -2395,37 +2396,46 @@ int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS, MosaicInfo
     int dstX = (int)round((srcGeoTransform[0] - info->minX) / info->resX);
     int dstY = (int)round((info->maxY - srcGeoTransform[3]) / info->resY);
 
-    // 边界检查
+    // 计算实际读取的源数据偏移
+    int srcOffsetX = 0;
+    int srcOffsetY = 0;
+    int copyWidth = srcWidth;
+    int copyHeight = srcHeight;
+
+    // 边界检查和调整
     if (dstX < 0) {
-        srcWidth += dstX;
+        srcOffsetX = -dstX;
+        copyWidth += dstX;
         dstX = 0;
     }
     if (dstY < 0) {
-        srcHeight += dstY;
+        srcOffsetY = -dstY;
+        copyHeight += dstY;
         dstY = 0;
     }
-    if (dstX + srcWidth > info->width) {
-        srcWidth = info->width - dstX;
+    if (dstX + copyWidth > info->width) {
+        copyWidth = info->width - dstX;
     }
-    if (dstY + srcHeight > info->height) {
-        srcHeight = info->height - dstY;
+    if (dstY + copyHeight > info->height) {
+        copyHeight = info->height - dstY;
     }
 
-    if (srcWidth <= 0 || srcHeight <= 0) {
+    if (copyWidth <= 0 || copyHeight <= 0) {
         return 1; // 无重叠区域，跳过
     }
 
-    // 计算数据类型大小
     int dataTypeSize = GDALGetDataTypeSizeBytes(info->dataType);
+    size_t bufferSize = (size_t)copyWidth * copyHeight * dataTypeSize;
 
-    // 分配缓冲区
-    size_t bufferSize = (size_t)srcWidth * srcHeight * dataTypeSize;
-    void* buffer = CPLMalloc(bufferSize);
-    if (buffer == NULL) {
+    void* srcBuffer = CPLMalloc(bufferSize);
+    void* dstBuffer = CPLMalloc(bufferSize);
+
+    if (srcBuffer == NULL || dstBuffer == NULL) {
+        if (srcBuffer) CPLFree(srcBuffer);
+        if (dstBuffer) CPLFree(dstBuffer);
         return 0;
     }
 
-    // 逐波段复制
     int bandsToCopy = input->bandCount < info->bandCount ? input->bandCount : info->bandCount;
 
     for (int b = 1; b <= bandsToCopy; b++) {
@@ -2436,32 +2446,153 @@ int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS, MosaicInfo
             continue;
         }
 
+        // 获取源数据的NoData值
+        int hasNoData = 0;
+        double srcNoData = GDALGetRasterNoDataValue(srcBand, &hasNoData);
+
+        // 如果源没有NoData但选项指定了，使用选项的NoData
+        if (!hasNoData && options->hasNoData) {
+            hasNoData = 1;
+            srcNoData = options->noDataValue;
+        }
+
         // 读取源数据
         CPLErr err = GDALRasterIO(srcBand, GF_Read,
-                                   0, 0, srcWidth, srcHeight,
-                                   buffer, srcWidth, srcHeight,
+                                   srcOffsetX, srcOffsetY, copyWidth, copyHeight,
+                                   srcBuffer, copyWidth, copyHeight,
                                    info->dataType, 0, 0);
-
         if (err != CE_None) {
-            CPLFree(buffer);
+            CPLFree(srcBuffer);
+            CPLFree(dstBuffer);
             return 0;
         }
 
-        // 写入目标
-        err = GDALRasterIO(dstBand, GF_Write,
-                           dstX, dstY, srcWidth, srcHeight,
-                           buffer, srcWidth, srcHeight,
-                           info->dataType, 0, 0);
+        // 如果有NoData，需要混合处理
+        if (hasNoData) {
+            // 读取目标区域现有数据
+            err = GDALRasterIO(dstBand, GF_Read,
+                               dstX, dstY, copyWidth, copyHeight,
+                               dstBuffer, copyWidth, copyHeight,
+                               info->dataType, 0, 0);
+            if (err != CE_None) {
+                CPLFree(srcBuffer);
+                CPLFree(dstBuffer);
+                return 0;
+            }
+
+            // 混合：只覆盖非NoData像素
+            size_t pixelCount = (size_t)copyWidth * copyHeight;
+
+            switch (info->dataType) {
+                case GDT_Byte: {
+                    unsigned char* src = (unsigned char*)srcBuffer;
+                    unsigned char* dst = (unsigned char*)dstBuffer;
+                    unsigned char noDataVal = (unsigned char)srcNoData;
+                    for (size_t i = 0; i < pixelCount; i++) {
+                        if (src[i] != noDataVal) {
+                            dst[i] = src[i];
+                        }
+                    }
+                    break;
+                }
+                case GDT_UInt16: {
+                    unsigned short* src = (unsigned short*)srcBuffer;
+                    unsigned short* dst = (unsigned short*)dstBuffer;
+                    unsigned short noDataVal = (unsigned short)srcNoData;
+                    for (size_t i = 0; i < pixelCount; i++) {
+                        if (src[i] != noDataVal) {
+                            dst[i] = src[i];
+                        }
+                    }
+                    break;
+                }
+                case GDT_Int16: {
+                    short* src = (short*)srcBuffer;
+                    short* dst = (short*)dstBuffer;
+                    short noDataVal = (short)srcNoData;
+                    for (size_t i = 0; i < pixelCount; i++) {
+                        if (src[i] != noDataVal) {
+                            dst[i] = src[i];
+                        }
+                    }
+                    break;
+                }
+                case GDT_UInt32: {
+                    unsigned int* src = (unsigned int*)srcBuffer;
+                    unsigned int* dst = (unsigned int*)dstBuffer;
+                    unsigned int noDataVal = (unsigned int)srcNoData;
+                    for (size_t i = 0; i < pixelCount; i++) {
+                        if (src[i] != noDataVal) {
+                            dst[i] = src[i];
+                        }
+                    }
+                    break;
+                }
+                case GDT_Int32: {
+                    int* src = (int*)srcBuffer;
+                    int* dst = (int*)dstBuffer;
+                    int noDataVal = (int)srcNoData;
+                    for (size_t i = 0; i < pixelCount; i++) {
+                        if (src[i] != noDataVal) {
+                            dst[i] = src[i];
+                        }
+                    }
+                    break;
+                }
+                case GDT_Float32: {
+                    float* src = (float*)srcBuffer;
+                    float* dst = (float*)dstBuffer;
+                    float noDataVal = (float)srcNoData;
+                    for (size_t i = 0; i < pixelCount; i++) {
+                        // 浮点数比较需要考虑NaN
+                        if (!isnan(src[i]) && (isnan(noDataVal) || fabs(src[i] - noDataVal) > 1e-6)) {
+                            dst[i] = src[i];
+                        }
+                    }
+                    break;
+                }
+                case GDT_Float64: {
+                    double* src = (double*)srcBuffer;
+                    double* dst = (double*)dstBuffer;
+                    for (size_t i = 0; i < pixelCount; i++) {
+                        if (!isnan(src[i]) && (isnan(srcNoData) || fabs(src[i] - srcNoData) > 1e-10)) {
+                            dst[i] = src[i];
+                        }
+                    }
+                    break;
+                }
+                default: {
+                    // 其他类型：直接覆盖
+                    memcpy(dstBuffer, srcBuffer, bufferSize);
+                    break;
+                }
+            }
+
+            // 写入混合后的数据
+            err = GDALRasterIO(dstBand, GF_Write,
+                               dstX, dstY, copyWidth, copyHeight,
+                               dstBuffer, copyWidth, copyHeight,
+                               info->dataType, 0, 0);
+        } else {
+            // 无NoData，直接写入
+            err = GDALRasterIO(dstBand, GF_Write,
+                               dstX, dstY, copyWidth, copyHeight,
+                               srcBuffer, copyWidth, copyHeight,
+                               info->dataType, 0, 0);
+        }
 
         if (err != CE_None) {
-            CPLFree(buffer);
+            CPLFree(srcBuffer);
+            CPLFree(dstBuffer);
             return 0;
         }
     }
 
-    CPLFree(buffer);
+    CPLFree(srcBuffer);
+    CPLFree(dstBuffer);
     return 1;
 }
+
 
 GDALDatasetH mosaicDatasets(GDALDatasetH* datasets, int datasetCount,
                             MosaicOptions* options, char* errorMsg) {
@@ -2534,7 +2665,7 @@ GDALDatasetH mosaicDatasets(GDALDatasetH* datasets, int datasetCount,
 
     // 执行镶嵌（按顺序复制，后面的覆盖前面的）
     for (int i = 0; i < datasetCount; i++) {
-        if (!copyRasterToMosaic(&inputs[i], outputDS, info)) {
+        if (!copyRasterToMosaic(&inputs[i], outputDS, info, options)) {
             if (errorMsg) {
                 sprintf(errorMsg, "Failed to copy dataset %d to mosaic", i);
             }
