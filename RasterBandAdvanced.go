@@ -49,6 +49,8 @@ func (rd *RasterDataset) ReadBandData(bandIndex int) ([]float64, error) {
 }
 
 // WriteBandData 写入波段数据
+// RasterDataset.go - 修复 WriteBandData
+
 func (rd *RasterDataset) WriteBandData(bandIndex int, data []float64) error {
 	if err := rd.ensureMemoryCopy(); err != nil {
 		return err
@@ -64,15 +66,31 @@ func (rd *RasterDataset) WriteBandData(bandIndex int, data []float64) error {
 	if len(data) != expectedSize {
 		return fmt.Errorf("data size mismatch: expected %d, got %d", expectedSize, len(data))
 	}
+
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
+
+	// ★★★ 关键修复：使用 C 分配的内存 ★★★
+	cData := C.malloc(C.size_t(len(data)) * C.size_t(unsafe.Sizeof(C.double(0))))
+	if cData == nil {
+		return fmt.Errorf("failed to allocate memory")
+	}
+	defer C.free(cData)
+
+	// 复制数据到 C 内存
+	cSlice := (*[1 << 30]C.double)(cData)[:len(data):len(data)]
+	for i, v := range data {
+		cSlice[i] = C.double(v)
+	}
+
 	err := C.GDALRasterIO(band, C.GF_Write,
 		0, 0, C.int(rd.width), C.int(rd.height),
-		unsafe.Pointer(&data[0]),
+		cData,
 		C.int(rd.width), C.int(rd.height),
 		C.GDT_Float64, 0, 0)
+
 	if err != C.CE_None {
 		return fmt.Errorf("failed to write band data")
 	}
