@@ -293,54 +293,48 @@ func (rd *RasterDataset) RemoveBand(bandIndex int) error {
 
 // SetBandColorInterpretation 设置波段颜色解释
 func (rd *RasterDataset) SetBandColorInterpretation(bandIndex int, colorInterp ColorInterpretation) error {
-	activeDS := rd.GetActiveDataset()
-	if activeDS == nil {
-		return fmt.Errorf("dataset is nil")
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
 	}
 
+	activeDS := rd.GetActiveDataset()
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
-
-	// 调用C函数创建新数据集
-	newDS := C.setBandColorInterpretationForced(activeDS, C.int(bandIndex), C.ColorInterpretation(colorInterp))
-	if newDS == nil {
-		return fmt.Errorf("failed to set color interpretation for band %d", bandIndex)
+	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
+	if band == nil {
+		return fmt.Errorf("failed to get band %d", bandIndex)
 	}
 
-	// 替换当前数据集
-	rd.replaceDataset(newDS)
-
+	C.GDALSetRasterColorInterpretation(band, C.colorInterpToGDAL(C.ColorInterpretation(colorInterp)))
 	return nil
 }
 
 // SetBandNoDataValue 设置波段NoData值
 func (rd *RasterDataset) SetBandNoDataValue(bandIndex int, noDataValue float64) error {
-	activeDS := rd.GetActiveDataset()
-	if activeDS == nil {
-		return fmt.Errorf("dataset is nil")
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
 	}
 
+	activeDS := rd.GetActiveDataset()
 	result := C.setBandNoDataValue(activeDS, C.int(bandIndex), C.double(noDataValue))
 	if result == 0 {
 		return fmt.Errorf("failed to set nodata value for band %d", bandIndex)
 	}
-
 	return nil
 }
 
 // DeleteBandNoDataValue 删除波段NoData值
 func (rd *RasterDataset) DeleteBandNoDataValue(bandIndex int) error {
-	activeDS := rd.GetActiveDataset()
-	if activeDS == nil {
-		return fmt.Errorf("dataset is nil")
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
 	}
 
+	activeDS := rd.GetActiveDataset()
 	result := C.deleteBandNoDataValue(activeDS, C.int(bandIndex))
 	if result == 0 {
 		return fmt.Errorf("failed to delete nodata value for band %d", bandIndex)
 	}
-
 	return nil
 }
 
@@ -407,6 +401,34 @@ func (rd *RasterDataset) CopyBandData(srcBandIndex int, dstDataset *RasterDatase
 }
 
 // ==================== 调色板操作 ====================
+func (rd *RasterDataset) ensureMemoryCopy() error {
+	// 已经有内存副本
+	if rd.warpedDS != nil {
+		return nil
+	}
+
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	// 检查是否已经是MEM数据集
+	driver := C.GDALGetDatasetDriver(rd.dataset)
+	if driver != nil {
+		driverName := C.GoString(C.GDALGetDriverShortName(driver))
+		if driverName == "MEM" {
+			return nil
+		}
+	}
+
+	// 创建内存副本
+	memDS := C.ensureMemoryDataset(rd.dataset)
+	if memDS == nil {
+		return fmt.Errorf("failed to create memory copy")
+	}
+
+	rd.warpedDS = memDS
+	return nil
+}
 
 // GetPaletteInfo 获取调色板信息
 func (rd *RasterDataset) GetPaletteInfo(bandIndex int) (*PaletteInfo, error) {
@@ -480,51 +502,47 @@ func (ct *ColorTable) Destroy() {
 
 // SetBandColorTable 设置波段调色板
 func (rd *RasterDataset) SetBandColorTable(bandIndex int, colorTable *ColorTable) error {
-	activeDS := rd.GetActiveDataset()
-	if activeDS == nil {
-		return fmt.Errorf("dataset is nil")
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
 	}
 
+	activeDS := rd.GetActiveDataset()
 	if colorTable == nil || colorTable.handle == nil {
 		return fmt.Errorf("color table is nil")
 	}
-
 	result := C.setBandColorTable(activeDS, C.int(bandIndex), colorTable.handle)
 	if result == 0 {
 		return fmt.Errorf("failed to set color table for band %d", bandIndex)
 	}
-
 	return nil
 }
 
 // DeleteBandColorTable 删除波段调色板
 func (rd *RasterDataset) DeleteBandColorTable(bandIndex int) error {
-	activeDS := rd.GetActiveDataset()
-	if activeDS == nil {
-		return fmt.Errorf("dataset is nil")
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
 	}
 
+	activeDS := rd.GetActiveDataset()
 	result := C.deleteBandColorTable(activeDS, C.int(bandIndex))
 	if result == 0 {
 		return fmt.Errorf("failed to delete color table for band %d", bandIndex)
 	}
-
 	return nil
 }
 
 // ModifyPaletteEntry 修改调色板条目
 func (rd *RasterDataset) ModifyPaletteEntry(bandIndex, entryIndex int, r, g, b, a int16) error {
-	activeDS := rd.GetActiveDataset()
-	if activeDS == nil {
-		return fmt.Errorf("dataset is nil")
+	if err := rd.ensureMemoryCopy(); err != nil {
+		return err
 	}
 
+	activeDS := rd.GetActiveDataset()
 	result := C.modifyPaletteEntry(activeDS, C.int(bandIndex), C.int(entryIndex),
 		C.short(r), C.short(g), C.short(b), C.short(a))
 	if result == 0 {
 		return fmt.Errorf("failed to modify palette entry %d for band %d", entryIndex, bandIndex)
 	}
-
 	return nil
 }
 

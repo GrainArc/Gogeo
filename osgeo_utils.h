@@ -260,6 +260,7 @@ BandDataType gdalToBandDataType(GDALDataType type);
 GDALColorInterp colorInterpToGDAL(ColorInterpretation interp);
 ColorInterpretation gdalToColorInterp(GDALColorInterp interp);
 GDALDatasetH setBandColorInterpretationForced(GDALDatasetH hDS, int bandIndex, ColorInterpretation colorInterp);
+GDALDatasetH ensureMemoryDataset(GDALDatasetH hDS);
 #ifdef __cplusplus
 }
 #endif

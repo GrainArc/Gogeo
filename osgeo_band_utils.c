@@ -1036,3 +1036,57 @@ GDALDatasetH setBandColorInterpretationForced(GDALDatasetH hDS, int bandIndex, C
 
     return hNewDS;
 }
+
+// osgeo_utils.c - 添加 ensureMemoryDataset 函数
+
+GDALDatasetH ensureMemoryDataset(GDALDatasetH hDS) {
+    if (hDS == NULL) return NULL;
+
+    int width = GDALGetRasterXSize(hDS);
+    int height = GDALGetRasterYSize(hDS);
+    int bandCount = GDALGetRasterCount(hDS);
+    if (bandCount == 0) return NULL;
+
+    GDALDataType dataType = GDALGetRasterDataType(GDALGetRasterBand(hDS, 1));
+    GDALDriverH memDriver = GDALGetDriverByName("MEM");
+    if (memDriver == NULL) return NULL;
+
+    GDALDatasetH hMemDS = GDALCreate(memDriver, "", width, height, bandCount, dataType, NULL);
+    if (hMemDS == NULL) return NULL;
+
+    // 复制地理信息
+    double geoTransform[6];
+    if (GDALGetGeoTransform(hDS, geoTransform) == CE_None) {
+        GDALSetGeoTransform(hMemDS, geoTransform);
+    }
+    const char* projection = GDALGetProjectionRef(hDS);
+    if (projection != NULL && strlen(projection) > 0) {
+        GDALSetProjection(hMemDS, projection);
+    }
+
+    // 复制所有波段
+    for (int i = 1; i <= bandCount; i++) {
+        GDALRasterBandH srcBand = GDALGetRasterBand(hDS, i);
+        GDALRasterBandH dstBand = GDALGetRasterBand(hMemDS, i);
+
+        GDALDataType srcType = GDALGetRasterDataType(srcBand);
+        int typeSize = GDALGetDataTypeSizeBytes(srcType);
+
+        void* buffer = CPLMalloc((size_t)width * (size_t)height * typeSize);
+        GDALRasterIO(srcBand, GF_Read, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
+        GDALRasterIO(dstBand, GF_Write, 0, 0, width, height, buffer, width, height, srcType, 0, 0);
+        CPLFree(buffer);
+
+        // 复制属性
+        GDALSetRasterColorInterpretation(dstBand, GDALGetRasterColorInterpretation(srcBand));
+
+        int hasNoData = 0;
+        double noData = GDALGetRasterNoDataValue(srcBand, &hasNoData);
+        if (hasNoData) GDALSetRasterNoDataValue(dstBand, noData);
+
+        GDALColorTableH ct = GDALGetRasterColorTable(srcBand);
+        if (ct != NULL) GDALSetRasterColorTable(dstBand, GDALCloneColorTable(ct));
+    }
+
+    return hMemDS;
+}
