@@ -889,9 +889,6 @@ func (rd *RasterDataset) ExportBandToFile(bandIndex int, outputPath, format stri
 	return nil
 }
 
-// RasterBandAdvanced.go - 修复 ExportToFile 函数
-
-// ExportToFile 导出整个数据集到文件
 func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[string]string) error {
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
@@ -906,36 +903,19 @@ func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[str
 		return fmt.Errorf("unsupported format: %s", format)
 	}
 
-	// 构建选项 - 添加 PHOTOMETRIC=RGB 确保颜色解释正确
-	finalOptions := make(map[string]string)
-	for k, v := range options {
-		finalOptions[k] = v
-	}
-
-	// 检查波段数，如果是3或4波段且没有调色板，添加PHOTOMETRIC选项
-	bandCount := C.GDALGetRasterCount(activeDS)
-	if bandCount >= 3 && format == "GTiff" {
-		if _, exists := finalOptions["PHOTOMETRIC"]; !exists {
-			// 检查是否有调色板
-			firstBand := C.GDALGetRasterBand(activeDS, 1)
-			colorTable := C.GDALGetRasterColorTable(firstBand)
-			if colorTable == nil {
-				finalOptions["PHOTOMETRIC"] = "RGB"
-			}
-		}
-	}
-
+	// 构建选项
 	var cOptions **C.char
 	var optionPtrs []*C.char
-	if len(finalOptions) > 0 {
-		optionPtrs = make([]*C.char, 0, len(finalOptions)+1)
-		for k, v := range finalOptions {
+	if len(options) > 0 {
+		optionPtrs = make([]*C.char, 0, len(options)+1)
+		for k, v := range options {
 			optStr := C.CString(fmt.Sprintf("%s=%s", k, v))
 			optionPtrs = append(optionPtrs, optStr)
 		}
 		optionPtrs = append(optionPtrs, nil)
 		cOptions = &optionPtrs[0]
 	}
+
 	defer func() {
 		for _, ptr := range optionPtrs {
 			if ptr != nil {
@@ -947,17 +927,68 @@ func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[str
 	cOutputPath := C.CString(outputPath)
 	defer C.free(unsafe.Pointer(cOutputPath))
 
-	// 使用 GDALCreateCopy，它会自动处理颜色解释
+	// 创建输出文件
 	outputDS := C.GDALCreateCopy(driver, cOutputPath, activeDS, C.int(0), cOptions, nil, nil)
 	if outputDS == nil {
-		errMsg := C.CPLGetLastErrorMsg()
-		return fmt.Errorf("failed to create output file: %s", C.GoString(errMsg))
+		return fmt.Errorf("failed to create output: %s", C.GoString(C.CPLGetLastErrorMsg()))
+	}
+
+	// 关键：同步元数据修改到输出数据集
+	bandCount := int(C.GDALGetRasterCount(activeDS))
+	for i := 1; i <= bandCount; i++ {
+		srcBand := C.GDALGetRasterBand(activeDS, C.int(i))
+		dstBand := C.GDALGetRasterBand(outputDS, C.int(i))
+
+		if srcBand == nil || dstBand == nil {
+			continue
+		}
+
+		// 同步颜色解释
+		colorInterp := C.GDALGetRasterColorInterpretation(srcBand)
+		C.GDALSetRasterColorInterpretation(dstBand, colorInterp)
+
+		// 同步 NoData
+		var hasNoData C.int
+		noData := C.GDALGetRasterNoDataValue(srcBand, &hasNoData)
+		if hasNoData != 0 {
+			C.GDALSetRasterNoDataValue(dstBand, noData)
+		}
+
+		// 同步调色板
+		colorTable := C.GDALGetRasterColorTable(srcBand)
+		if colorTable != nil {
+			C.GDALSetRasterColorTable(dstBand, colorTable)
+		}
 	}
 
 	C.GDALFlushCache(outputDS)
 	C.GDALClose(outputDS)
 
 	return nil
+}
+
+// 辅助函数：颜色解释转字符串
+func colorInterpToString(interp int) string {
+	names := map[int]string{
+		0:  "Undefined",
+		1:  "Gray",
+		2:  "Palette",
+		3:  "Red",
+		4:  "Green",
+		5:  "Blue",
+		6:  "Alpha",
+		7:  "Hue",
+		8:  "Saturation",
+		9:  "Lightness",
+		10: "Cyan",
+		11: "Magenta",
+		12: "Yellow",
+		13: "Black",
+	}
+	if name, ok := names[interp]; ok {
+		return name
+	}
+	return fmt.Sprintf("Unknown(%d)", interp)
 }
 
 // ==================== 波段元数据操作 ====================
