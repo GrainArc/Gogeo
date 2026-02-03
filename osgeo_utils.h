@@ -259,7 +259,7 @@ BandDataType gdalToBandDataType(GDALDataType type);
 // 颜色解释转换
 GDALColorInterp colorInterpToGDAL(ColorInterpretation interp);
 ColorInterpretation gdalToColorInterp(GDALColorInterp interp);
-
+GDALDatasetH setBandColorInterpretationForced(GDALDatasetH hDS, int bandIndex, ColorInterpretation colorInterp);
 #ifdef __cplusplus
 }
 #endif

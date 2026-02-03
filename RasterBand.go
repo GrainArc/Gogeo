@@ -289,16 +289,27 @@ func (rd *RasterDataset) RemoveBand(bandIndex int) error {
 }
 
 // SetBandColorInterpretation 设置波段颜色解释
+// RasterBand.go
+
+// SetBandColorInterpretation 设置波段颜色解释
 func (rd *RasterDataset) SetBandColorInterpretation(bandIndex int, colorInterp ColorInterpretation) error {
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
 	}
 
-	result := C.setBandColorInterpretation(activeDS, C.int(bandIndex), C.ColorInterpretation(colorInterp))
-	if result == 0 {
+	if bandIndex < 1 || bandIndex > rd.bandCount {
+		return fmt.Errorf("invalid band index: %d", bandIndex)
+	}
+
+	// 调用C函数创建新数据集
+	newDS := C.setBandColorInterpretationForced(activeDS, C.int(bandIndex), C.ColorInterpretation(colorInterp))
+	if newDS == nil {
 		return fmt.Errorf("failed to set color interpretation for band %d", bandIndex)
 	}
+
+	// 替换当前数据集
+	rd.replaceDataset(newDS)
 
 	return nil
 }
