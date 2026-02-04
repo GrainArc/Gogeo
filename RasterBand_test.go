@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"path/filepath"
 	"runtime"
 )
 
@@ -951,4 +952,287 @@ func ColorPipelineSample(ds *RasterDataset) {
 	result.ExportToFile("output_pipeline.tif", "GTiff", nil)
 	result.Close()
 	fmt.Println("色彩处理管道完成: output_pipeline.tif")
+}
+
+// 示例1：为没有坐标系的栅格定义投影
+func exampleDefineProjection() {
+	fmt.Println("=== 示例1：定义投影 ===")
+
+	// 打开没有坐标系的栅格数据
+	rd, err := OpenRasterDataset("path/to/no_projection_image.tif", false)
+	if err != nil {
+		log.Fatalf("Failed to open raster: %v", err)
+	}
+	defer rd.Close()
+
+	fmt.Printf("原始数据集信息：\n")
+	fmt.Printf("  宽度: %d\n", rd.GetWidth())
+	fmt.Printf("  高度: %d\n", rd.GetHeight())
+	fmt.Printf("  投影: %s\n", rd.projection)
+
+	// 定义为WGS84投影（EPSG:4326）
+	newRD, err := rd.DefineProjectionToMemory(4326)
+	if err != nil {
+		log.Fatalf("Failed to define projection: %v", err)
+	}
+	defer newRD.Close()
+
+	fmt.Printf("定义投影后的数据集信息：\n")
+	fmt.Printf("  投影: %s\n", newRD.projection)
+	fmt.Printf("  有地理信息: %v\n", newRD.hasGeoInfo)
+
+	// 导出到文件
+	outputPath := "path/to/output_with_projection.tif"
+	err = newRD.ExportToFile(outputPath, "GTiff", nil)
+	if err != nil {
+		log.Fatalf("Failed to export: %v", err)
+	}
+
+	fmt.Printf("✓ 已导出到: %s\n\n", outputPath)
+}
+
+// 示例2：重投影到指定EPSG
+func exampleReprojectToEPSG() {
+	fmt.Println("=== 示例2：重投影到EPSG ===")
+
+	// 打开栅格数据
+	rd, err := OpenRasterDataset("path/to/source_image.tif", false)
+	if err != nil {
+		log.Fatalf("Failed to open raster: %v", err)
+	}
+	defer rd.Close()
+
+	// 源坐标系：UTM Zone 50N (EPSG:32650)
+	// 目标坐标系：WGS84 (EPSG:4326)
+	srcEPSG := 32650
+	dstEPSG := 4326
+	outputPath := "path/to/reprojected_to_wgs84.tif"
+
+	fmt.Printf("正在重投影...\n")
+	fmt.Printf("  源坐标系: EPSG:%d\n", srcEPSG)
+	fmt.Printf("  目标坐标系: EPSG:%d\n", dstEPSG)
+	fmt.Printf("  输出路径: %s\n", outputPath)
+
+	// 使用双线性插值重采样
+	err = rd.ReprojectToEPSG(srcEPSG, dstEPSG, outputPath, "GTiff", ResampleBilinear)
+	if err != nil {
+		log.Fatalf("Failed to reproject: %v", err)
+	}
+
+	fmt.Printf("✓ 重投影完成\n\n")
+}
+
+// 示例3：使用自定义WKT进行重投影
+func exampleReprojectWithCustomWKT() {
+	fmt.Println("=== 示例3：使用自定义WKT重投影 ===")
+
+	rd, err := OpenRasterDataset("path/to/source_image.tif", false)
+	if err != nil {
+		log.Fatalf("Failed to open raster: %v", err)
+	}
+	defer rd.Close()
+
+	// 自定义WKT投影定义（例如：自定义高斯投影）
+	customWKT := `PROJCS["Custom_Projection",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",120],PARAMETER["scale_factor",1],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1]]`
+
+	srcEPSG := 4326
+	outputPath := "path/to/reprojected_custom.tif"
+
+	fmt.Printf("正在使用自定义WKT重投影...\n")
+	fmt.Printf("  源坐标系: EPSG:%d\n", srcEPSG)
+	fmt.Printf("  输出路径: %s\n", outputPath)
+
+	err = rd.ReprojectWithCustomWKT(srcEPSG, customWKT, outputPath, "GTiff", ResampleCubic)
+	if err != nil {
+		log.Fatalf("Failed to reproject with custom WKT: %v", err)
+	}
+
+	fmt.Printf("✓ 自定义WKT重投影完成\n\n")
+}
+
+// 示例4：使用四参数进行重投影
+func exampleReprojectWithAffineParams() {
+	fmt.Println("=== 示例4：使用四参数重投影 ===")
+
+	rd, err := OpenRasterDataset("path/to/source_image.tif", false)
+	if err != nil {
+		log.Fatalf("Failed to open raster: %v", err)
+	}
+	defer rd.Close()
+
+	// 四参数变换：dx, dy, scale, angle
+	params := &AffineParams{
+		Dx:     10.5,   // X平移 10.5 米
+		Dy:     20.3,   // Y平移 20.3 米
+		DScale: 1.0001, // 缩放因子
+		Angle:  0.5,    // 旋转 0.5 度
+	}
+
+	srcEPSG := 4326
+	outputPath := "path/to/reprojected_4param.tif"
+
+	fmt.Printf("正在使用四参数重投影...\n")
+	fmt.Printf("  源坐标系: EPSG:%d\n", srcEPSG)
+	fmt.Printf("  参数: dx=%.2f, dy=%.2f, scale=%.6f, angle=%.2f\n",
+		params.Dx, params.Dy, params.DScale, params.Angle)
+	fmt.Printf("  输出路径: %s\n", outputPath)
+
+	err = rd.ReprojectWithAffineParams(srcEPSG, params, "4param", outputPath, "GTiff", ResampleBilinear)
+	if err != nil {
+		log.Fatalf("Failed to reproject with affine params: %v", err)
+	}
+
+	fmt.Printf("✓ 四参数重投影完成\n\n")
+}
+
+// 示例5：使用七参数进行重投影
+func exampleReprojectWith7Params() {
+	fmt.Println("=== 示例5：使用七参数重投影 ===")
+
+	rd, err := OpenRasterDataset("path/to/source_image.tif", false)
+	if err != nil {
+		log.Fatalf("Failed to open raster: %v", err)
+	}
+	defer rd.Close()
+
+	// 七参数变换：tx, ty, tz, rx, ry, rz, scale
+	params := &AffineParams{
+		Tx:    10.5,   // X平移 10.5 米
+		Ty:    20.3,   // Y平移 20.3 米
+		Tz:    5.1,    // Z平移 5.1 米
+		Rx:    0.1,    // X旋转 0.1 度
+		Ry:    0.2,    // Y旋转 0.2 度
+		Rz:    0.3,    // Z旋转 0.3 度
+		Scale: 1.0001, // 缩放因子
+	}
+
+	srcEPSG := 4326
+	outputPath := "path/to/reprojected_7param.tif"
+
+	fmt.Printf("正在使用七参数重投影...\n")
+	fmt.Printf("  源坐标系: EPSG:%d\n", srcEPSG)
+	fmt.Printf("  参数: tx=%.2f, ty=%.2f, tz=%.2f, rx=%.2f, ry=%.2f, rz=%.2f, scale=%.6f\n",
+		params.Tx, params.Ty, params.Tz, params.Rx, params.Ry, params.Rz, params.Scale)
+	fmt.Printf("  输出路径: %s\n", outputPath)
+
+	err = rd.ReprojectWithAffineParams(srcEPSG, params, "7param", outputPath, "GTiff", ResampleLanczos)
+	if err != nil {
+		log.Fatalf("Failed to reproject with 7 params: %v", err)
+	}
+
+	fmt.Printf("✓ 七参数重投影完成\n\n")
+}
+
+// 示例6：获取投影WKT
+func exampleGetProjectionWKT() {
+	fmt.Println("=== 示例6：获取投影WKT ===")
+
+	// 获取WGS84的WKT定义
+	wkt, err := GetProjectionWKT(4326)
+	if err != nil {
+		log.Fatalf("Failed to get projection WKT: %v", err)
+	}
+
+	fmt.Printf("EPSG:4326 (WGS84) 的WKT定义：\n")
+	fmt.Printf("%s\n\n", wkt)
+
+	// 验证WKT
+	isValid := ValidateProjectionWKT(wkt)
+	fmt.Printf("WKT有效性: %v\n\n", isValid)
+}
+
+// 示例7：批量处理多个栅格文件
+func exampleBatchReproject() {
+	fmt.Println("=== 示例7：批量重投影 ===")
+
+	sourceDir := "path/to/source/images"
+	outputDir := "path/to/output/images"
+
+	files := []string{
+		"image1.tif",
+		"image2.tif",
+		"image3.tif",
+	}
+
+	srcEPSG := 32650 // UTM Zone 50N
+	dstEPSG := 4326  // WGS84
+
+	for i, file := range files {
+		sourcePath := filepath.Join(sourceDir, file)
+		outputPath := filepath.Join(outputDir, fmt.Sprintf("reprojected_%s", file))
+
+		fmt.Printf("[%d/%d] 正在处理: %s\n", i+1, len(files), file)
+
+		rd, err := OpenRasterDataset(sourcePath, false)
+		if err != nil {
+			fmt.Printf("  ✗ 打开失败: %v\n", err)
+			continue
+		}
+
+		err = rd.ReprojectToEPSG(srcEPSG, dstEPSG, outputPath, "GTiff", ResampleBilinear)
+		rd.Close()
+
+		if err != nil {
+			fmt.Printf("  ✗ 重投影失败: %v\n", err)
+		} else {
+			fmt.Printf("  ✓ 完成，输出: %s\n", outputPath)
+		}
+	}
+
+	fmt.Printf("批量处理完成\n\n")
+}
+
+// 示例8：组合操作 - 定义投影后再重投影
+func exampleCombinedOperation() {
+	fmt.Println("=== 示例8：组合操作 ===")
+
+	// 第一步：打开没有坐标系的栅格
+	rd, err := OpenRasterDataset("path/to/no_projection_image.tif", false)
+	if err != nil {
+		log.Fatalf("Failed to open raster: %v", err)
+	}
+	defer rd.Close()
+
+	fmt.Printf("第一步：定义投影为UTM Zone 50N (EPSG:32650)...\n")
+
+	// 定义投影
+	rdWithProj, err := rd.DefineProjectionToMemory(32650)
+	if err != nil {
+		log.Fatalf("Failed to define projection: %v", err)
+	}
+	defer rdWithProj.Close()
+
+	fmt.Printf("✓ 投影已定义\n")
+
+	// 第二步：重投影到WGS84
+	fmt.Printf("第二步：重投影到WGS84 (EPSG:4326)...\n")
+
+	outputPath := "path/to/final_output.tif"
+	err = rdWithProj.ReprojectToEPSG(32650, 4326, outputPath, "GTiff", ResampleCubic)
+	if err != nil {
+		log.Fatalf("Failed to reproject: %v", err)
+	}
+
+	fmt.Printf("✓ 已输出到: %s\n\n", outputPath)
+}
+func exampleDefineProjectionInPlace() {
+	fmt.Println("=== 示例1：直接定义投影 ===")
+
+	// 打开没有坐标系的栅格数据（以更新模式打开）
+	rd, err := OpenRasterDataset("C:\\Users\\Administrator\\Desktop\\新建文件夹 (2)\\output.tif", false)
+	if err != nil {
+		log.Fatalf("Failed to open raster: %v", err)
+	}
+	defer rd.Close()
+
+	fmt.Printf("原始投影: %s\n", rd.GetProjection())
+
+	// 直接定义为WGS84投影
+	err = rd.DefineProjection(3857)
+	if err != nil {
+		log.Fatalf("Failed to define projection: %v", err)
+	}
+
+	fmt.Printf("定义后投影: %s\n", rd.GetProjection())
+	fmt.Printf("✓ 投影已直接写入原文件\n\n")
 }

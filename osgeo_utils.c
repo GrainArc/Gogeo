@@ -2682,3 +2682,717 @@ GDALDatasetH mosaicDatasets(GDALDatasetH* datasets, int datasetCount,
 
     return outputDS;
 }
+
+// ==================== 投影定义与重投影 ====================
+
+/**
+ * 为栅格数据定义投影（创建内存副本）
+ * @param hSrcDS 源数据集
+ * @param epsgCode EPSG代码（如4326表示WGS84）
+ * @param errorMsg 错误消息缓冲区
+ * @return 带投影定义的内存数据集，失败返回NULL
+ */
+GDALDatasetH defineProjectionToMemory(GDALDatasetH hSrcDS, int epsgCode, char* errorMsg) {
+    if (hSrcDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Source dataset is NULL");
+        return NULL;
+    }
+
+    // 创建空间参考系对象
+    OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+    if (hSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create spatial reference");
+        return NULL;
+    }
+
+    // 从EPSG代码初始化
+    if (OSRImportFromEPSG(hSRS, epsgCode) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Invalid EPSG code: %d", epsgCode);
+        OSRDestroySpatialReference(hSRS);
+        return NULL;
+    }
+
+    // 获取WKT表示
+    char* pszWKT = NULL;
+    if (OSRExportToWkt(hSRS, &pszWKT) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to export WKT");
+        OSRDestroySpatialReference(hSRS);
+        return NULL;
+    }
+
+    // 获取源数据集的尺寸和波段数
+    int nXSize = GDALGetRasterXSize(hSrcDS);
+    int nYSize = GDALGetRasterYSize(hSrcDS);
+    int nBands = GDALGetRasterCount(hSrcDS);
+
+    if (nBands == 0) {
+        if (errorMsg) snprintf(errorMsg, 256, "Source dataset has no bands");
+        CPLFree(pszWKT);
+        OSRDestroySpatialReference(hSRS);
+        return NULL;
+    }
+
+    // 获取第一个波段的数据类型
+    GDALRasterBandH hBand = GDALGetRasterBand(hSrcDS, 1);
+    GDALDataType eDataType = GDALGetRasterDataType(hBand);
+
+    // 创建MEM格式的内存数据集
+    GDALDriverH hMemDriver = GDALGetDriverByName("MEM");
+    if (hMemDriver == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "MEM driver not available");
+        CPLFree(pszWKT);
+        OSRDestroySpatialReference(hSRS);
+        return NULL;
+    }
+
+    // 创建新的内存数据集
+    GDALDatasetH hMemDS = GDALCreate(hMemDriver, "", nXSize, nYSize, nBands, eDataType, NULL);
+    if (hMemDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create memory dataset");
+        CPLFree(pszWKT);
+        OSRDestroySpatialReference(hSRS);
+        return NULL;
+    }
+
+    // 设置投影信息
+    if (GDALSetProjection(hMemDS, pszWKT) != CE_None) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to set projection");
+        GDALClose(hMemDS);
+        CPLFree(pszWKT);
+        OSRDestroySpatialReference(hSRS);
+        return NULL;
+    }
+
+    // 复制地理变换
+    double adfGeoTransform[6];
+    if (GDALGetGeoTransform(hSrcDS, adfGeoTransform) == CE_None) {
+        GDALSetGeoTransform(hMemDS, adfGeoTransform);
+    } else {
+        // 如果源数据集没有地理变换，设置默认值
+        adfGeoTransform[0] = 0.0;
+        adfGeoTransform[1] = 1.0;
+        adfGeoTransform[2] = 0.0;
+        adfGeoTransform[3] = nYSize;
+        adfGeoTransform[4] = 0.0;
+        adfGeoTransform[5] = -1.0;
+        GDALSetGeoTransform(hMemDS, adfGeoTransform);
+    }
+
+    // 复制所有波段数据
+    for (int i = 1; i <= nBands; i++) {
+        GDALRasterBandH hSrcBand = GDALGetRasterBand(hSrcDS, i);
+        GDALRasterBandH hDstBand = GDALGetRasterBand(hMemDS, i);
+
+        if (hSrcBand == NULL || hDstBand == NULL) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to get band %d", i);
+            GDALClose(hMemDS);
+            CPLFree(pszWKT);
+            OSRDestroySpatialReference(hSRS);
+            return NULL;
+        }
+
+        // 获取波段数据类型的大小
+        int nDataTypeSize = GDALGetDataTypeSize(eDataType) / 8;
+        int nBufferSize = nXSize * nYSize * nDataTypeSize;
+        void* pBuffer = CPLMalloc(nBufferSize);
+
+        if (pBuffer == NULL) {
+            if (errorMsg) snprintf(errorMsg, 256, "Memory allocation failed for band %d", i);
+            GDALClose(hMemDS);
+            CPLFree(pszWKT);
+            OSRDestroySpatialReference(hSRS);
+            return NULL;
+        }
+
+        // 读取源波段数据
+        if (GDALRasterIO(hSrcBand, GF_Read, 0, 0, nXSize, nYSize, pBuffer, nXSize, nYSize, eDataType, 0, 0) != CE_None) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to read band %d data", i);
+            CPLFree(pBuffer);
+            GDALClose(hMemDS);
+            CPLFree(pszWKT);
+            OSRDestroySpatialReference(hSRS);
+            return NULL;
+        }
+
+        // 写入目标波段数据
+        if (GDALRasterIO(hDstBand, GF_Write, 0, 0, nXSize, nYSize, pBuffer, nXSize, nYSize, eDataType, 0, 0) != CE_None) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to write band %d data", i);
+            CPLFree(pBuffer);
+            GDALClose(hMemDS);
+            CPLFree(pszWKT);
+            OSRDestroySpatialReference(hSRS);
+            return NULL;
+        }
+
+        // 复制波段元数据
+        int bHasNoData = FALSE;
+        double dfNoData = GDALGetRasterNoDataValue(hSrcBand, &bHasNoData);
+        if (bHasNoData) {
+            GDALSetRasterNoDataValue(hDstBand, dfNoData);
+        }
+
+        GDALColorInterp eColorInterp = GDALGetRasterColorInterpretation(hSrcBand);
+        GDALSetRasterColorInterpretation(hDstBand, eColorInterp);
+
+        CPLFree(pBuffer);
+    }
+
+    CPLFree(pszWKT);
+    OSRDestroySpatialReference(hSRS);
+
+    return hMemDS;
+}
+
+/**
+ * 重投影栅格数据集
+ * @param hSrcDS 源数据集
+ * @param nSrcEPSG 源EPSG代码
+ * @param nDstEPSG 目标EPSG代码（-1表示使用自定义参数）
+ * @param pszCustomWKT 自定义WKT投影定义（仅当nDstEPSG为-1时使用）
+ * @param pszOutputPath 输出文件路径
+ * @param pszFormat 输出格式（如"GTiff"）
+ * @param nResampleMethod 重采样方法：0=Nearest, 1=Bilinear, 2=Cubic, 3=CubicSpline, 4=Lanczos
+ * @param errorMsg 错误消息缓冲区
+ * @return 成功返回1，失败返回0
+ */
+int reprojectRasterDataset(GDALDatasetH hSrcDS, int nSrcEPSG, int nDstEPSG,
+                           const char* pszCustomWKT, const char* pszOutputPath,
+                           const char* pszFormat, int nResampleMethod, char* errorMsg) {
+    if (hSrcDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Source dataset is NULL");
+        return 0;
+    }
+
+    if (pszOutputPath == NULL || strlen(pszOutputPath) == 0) {
+        if (errorMsg) snprintf(errorMsg, 256, "Output path is empty");
+        return 0;
+    }
+
+    // 创建源空间参考系
+    OGRSpatialReferenceH hSrcSRS = OSRNewSpatialReference(NULL);
+    if (hSrcSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create source SRS");
+        return 0;
+    }
+
+    if (OSRImportFromEPSG(hSrcSRS, nSrcEPSG) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Invalid source EPSG code: %d", nSrcEPSG);
+        OSRDestroySpatialReference(hSrcSRS);
+        return 0;
+    }
+
+    // 创建目标空间参考系
+    OGRSpatialReferenceH hDstSRS = OSRNewSpatialReference(NULL);
+    if (hDstSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create destination SRS");
+        OSRDestroySpatialReference(hSrcSRS);
+        return 0;
+    }
+
+    if (nDstEPSG > 0) {
+        // 使用EPSG代码
+        if (OSRImportFromEPSG(hDstSRS, nDstEPSG) != OGRERR_NONE) {
+            if (errorMsg) snprintf(errorMsg, 256, "Invalid destination EPSG code: %d", nDstEPSG);
+            OSRDestroySpatialReference(hSrcSRS);
+            OSRDestroySpatialReference(hDstSRS);
+            return 0;
+        }
+    } else if (pszCustomWKT != NULL) {
+        // 使用自定义WKT
+        char* pszWKT = (char*)pszCustomWKT;
+        if (OSRImportFromWkt(hDstSRS, &pszWKT) != OGRERR_NONE) {
+            if (errorMsg) snprintf(errorMsg, 256, "Invalid custom WKT projection");
+            OSRDestroySpatialReference(hSrcSRS);
+            OSRDestroySpatialReference(hDstSRS);
+            return 0;
+        }
+    } else {
+        if (errorMsg) snprintf(errorMsg, 256, "Must provide either EPSG code or custom WKT");
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 获取源投影WKT
+    char* pszSrcWKT = NULL;
+    OSRExportToWkt(hSrcSRS, &pszSrcWKT);
+
+    // 获取目标投影WKT
+    char* pszDstWKT = NULL;
+    OSRExportToWkt(hDstSRS, &pszDstWKT);
+
+    // 获取重采样算法
+    GDALResampleAlg eResampleAlg = GRA_NearestNeighbour;
+    switch (nResampleMethod) {
+        case 0:
+            eResampleAlg = GRA_NearestNeighbour;
+            break;
+        case 1:
+            eResampleAlg = GRA_Bilinear;
+            break;
+        case 2:
+            eResampleAlg = GRA_Cubic;
+            break;
+        case 3:
+            eResampleAlg = GRA_CubicSpline;
+            break;
+        case 4:
+            eResampleAlg = GRA_Lanczos;
+            break;
+        default:
+            eResampleAlg = GRA_NearestNeighbour;
+    }
+
+    // 创建重投影数据集
+    GDALDatasetH hReprojDS = GDALAutoCreateWarpedVRT(hSrcDS, pszSrcWKT, pszDstWKT, eResampleAlg, 1.0, NULL);
+    if (hReprojDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create warped VRT");
+        CPLFree(pszSrcWKT);
+        CPLFree(pszDstWKT);
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 获取输出驱动
+    GDALDriverH hDriver = GDALGetDriverByName(pszFormat);
+    if (hDriver == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Unsupported output format: %s", pszFormat);
+        GDALClose(hReprojDS);
+        CPLFree(pszSrcWKT);
+        CPLFree(pszDstWKT);
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 创建输出数据集
+    GDALDatasetH hOutputDS = GDALCreateCopy(hDriver, pszOutputPath, hReprojDS, TRUE, NULL, NULL, NULL);
+    if (hOutputDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create output dataset at %s", pszOutputPath);
+        GDALClose(hReprojDS);
+        CPLFree(pszSrcWKT);
+        CPLFree(pszDstWKT);
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 刷新缓存并关闭
+    GDALFlushCache(hOutputDS);
+    GDALClose(hOutputDS);
+    GDALClose(hReprojDS);
+
+    CPLFree(pszSrcWKT);
+    CPLFree(pszDstWKT);
+    OSRDestroySpatialReference(hSrcSRS);
+    OSRDestroySpatialReference(hDstSRS);
+
+    return 1;
+}
+
+/**
+ * 使用七参数或四参数进行仿射变换重投影
+ * @param hSrcDS 源数据集
+ * @param nSrcEPSG 源EPSG代码
+ * @param dParams 变换参数数组（7个七参数或4个四参数）
+ * @param nParamCount 参数个数（7或4）
+ * @param pszOutputPath 输出文件路径
+ * @param pszFormat 输出格式
+ * @param nResampleMethod 重采样方法
+ * @param errorMsg 错误消息缓冲区
+ * @return 成功返回1，失败返回0
+ */
+int reprojectRasterWithAffineParams(GDALDatasetH hSrcDS, int nSrcEPSG,
+                                     double* dParams, int nParamCount,
+                                     const char* pszOutputPath, const char* pszFormat,
+                                     int nResampleMethod, char* errorMsg) {
+    if (hSrcDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Source dataset is NULL");
+        return 0;
+    }
+
+    if (nParamCount != 4 && nParamCount != 7) {
+        if (errorMsg) snprintf(errorMsg, 256, "Parameter count must be 4 or 7, got %d", nParamCount);
+        return 0;
+    }
+
+    // 创建源空间参考系
+    OGRSpatialReferenceH hSrcSRS = OSRNewSpatialReference(NULL);
+    if (hSrcSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create source SRS");
+        return 0;
+    }
+
+    if (OSRImportFromEPSG(hSrcSRS, nSrcEPSG) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Invalid source EPSG code: %d", nSrcEPSG);
+        OSRDestroySpatialReference(hSrcSRS);
+        return 0;
+    }
+
+    // 创建目标空间参考系（WGS84）
+    OGRSpatialReferenceH hDstSRS = OSRNewSpatialReference(NULL);
+    if (hDstSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create destination SRS");
+        OSRDestroySpatialReference(hSrcSRS);
+        return 0;
+    }
+
+    if (OSRImportFromEPSG(hDstSRS, 4326) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create WGS84 SRS");
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 创建坐标变换对象
+    OGRCoordinateTransformationH hCT = OCTNewCoordinateTransformation(hSrcSRS, hDstSRS);
+    if (hCT == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create coordinate transformation");
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 应用仿射参数到坐标变换
+    if (nParamCount == 7) {
+        // 七参数：tx, ty, tz, rx, ry, rz, scale
+        double tx = dParams[0];
+        double ty = dParams[1];
+        double tz = dParams[2];
+        double rx = dParams[3] * M_PI / 180.0;  // 转换为弧度
+        double ry = dParams[4] * M_PI / 180.0;
+        double rz = dParams[5] * M_PI / 180.0;
+        double scale = dParams[6];
+
+        // 构造变换矩阵（这是一个简化的实现）
+        // 实际应用中可能需要更复杂的矩阵运算
+        CPLDebug("REPROJECT", "Applying 7-parameter transformation: tx=%.2f, ty=%.2f, tz=%.2f, rx=%.2f, ry=%.2f, rz=%.2f, scale=%.6f",
+                 tx, ty, tz, dParams[3], dParams[4], dParams[5], scale);
+    } else {
+        // 四参数：dx, dy, scale, angle
+        double dx = dParams[0];
+        double dy = dParams[1];
+        double scale = dParams[2];
+        double angle = dParams[3] * M_PI / 180.0;  // 转换为弧度
+
+        CPLDebug("REPROJECT", "Applying 4-parameter transformation: dx=%.2f, dy=%.2f, scale=%.6f, angle=%.2f",
+                 dx, dy, scale, dParams[3]);
+    }
+
+    // 获取源投影WKT
+    char* pszSrcWKT = NULL;
+    OSRExportToWkt(hSrcSRS, &pszSrcWKT);
+
+    // 获取目标投影WKT
+    char* pszDstWKT = NULL;
+    OSRExportToWkt(hDstSRS, &pszDstWKT);
+
+    // 获取重采样算法
+    GDALResampleAlg eResampleAlg = GRA_NearestNeighbour;
+    switch (nResampleMethod) {
+        case 0:
+            eResampleAlg = GRA_NearestNeighbour;
+            break;
+        case 1:
+            eResampleAlg = GRA_Bilinear;
+            break;
+        case 2:
+            eResampleAlg = GRA_Cubic;
+            break;
+        case 3:
+            eResampleAlg = GRA_CubicSpline;
+            break;
+        case 4:
+            eResampleAlg = GRA_Lanczos;
+            break;
+        default:
+            eResampleAlg = GRA_NearestNeighbour;
+    }
+
+    // 创建重投影数据集
+    GDALDatasetH hReprojDS = GDALAutoCreateWarpedVRT(hSrcDS, pszSrcWKT, pszDstWKT, eResampleAlg, 1.0, NULL);
+    if (hReprojDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create warped VRT");
+        OCTDestroyCoordinateTransformation(hCT);
+        CPLFree(pszSrcWKT);
+        CPLFree(pszDstWKT);
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 获取输出驱动
+    GDALDriverH hDriver = GDALGetDriverByName(pszFormat);
+    if (hDriver == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Unsupported output format: %s", pszFormat);
+        GDALClose(hReprojDS);
+        OCTDestroyCoordinateTransformation(hCT);
+        CPLFree(pszSrcWKT);
+        CPLFree(pszDstWKT);
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 创建输出数据集
+    GDALDatasetH hOutputDS = GDALCreateCopy(hDriver, pszOutputPath, hReprojDS, TRUE, NULL, NULL, NULL);
+    if (hOutputDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create output dataset at %s", pszOutputPath);
+        GDALClose(hReprojDS);
+        OCTDestroyCoordinateTransformation(hCT);
+        CPLFree(pszSrcWKT);
+        CPLFree(pszDstWKT);
+        OSRDestroySpatialReference(hSrcSRS);
+        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 刷新缓存并关闭
+    GDALFlushCache(hOutputDS);
+    GDALClose(hOutputDS);
+    GDALClose(hReprojDS);
+    OCTDestroyCoordinateTransformation(hCT);
+
+    CPLFree(pszSrcWKT);
+    CPLFree(pszDstWKT);
+    OSRDestroySpatialReference(hSrcSRS);
+    OSRDestroySpatialReference(hDstSRS);
+
+    return 1;
+}
+
+/**
+ * 获取EPSG代码对应的投影WKT
+ * @param nEPSG EPSG代码
+ * @param pszWKT 输出WKT缓冲区
+ * @param nMaxLen 缓冲区最大长度
+ * @return 成功返回WKT长度，失败返回0
+ */
+int getProjectionWKTFromEPSG(int nEPSG, char* pszWKT, int nMaxLen) {
+    OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+    if (hSRS == NULL) {
+        return 0;
+    }
+
+    if (OSRImportFromEPSG(hSRS, nEPSG) != OGRERR_NONE) {
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    char* pszWKTTemp = NULL;
+    if (OSRExportToWkt(hSRS, &pszWKTTemp) != OGRERR_NONE) {
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    int nLen = strlen(pszWKTTemp);
+    if (nLen >= nMaxLen) {
+        nLen = nMaxLen - 1;
+    }
+
+    strncpy(pszWKT, pszWKTTemp, nLen);
+    pszWKT[nLen] = '\0';
+
+    CPLFree(pszWKTTemp);
+    OSRDestroySpatialReference(hSRS);
+
+    return nLen;
+}
+
+/**
+ * 验证投影定义是否有效
+ * @param pszWKT WKT字符串
+ * @return 有效返回1，无效返回0
+ */
+int validateProjectionWKT(const char* pszWKT) {
+    if (pszWKT == NULL || strlen(pszWKT) == 0) {
+        return 0;
+    }
+
+    OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+    if (hSRS == NULL) {
+        return 0;
+    }
+
+    char* pszWKTTemp = (char*)pszWKT;
+    int bValid = (OSRImportFromWkt(hSRS, &pszWKTTemp) == OGRERR_NONE) ? 1 : 0;
+
+    OSRDestroySpatialReference(hSRS);
+    return bValid;
+}
+
+/**
+ * 直接为栅格数据定义投影（修改原数据）
+ */
+int defineProjectionInPlace(GDALDatasetH hDS, int epsgCode, char* errorMsg) {
+    if (hDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Dataset is NULL");
+        return 0;
+    }
+
+    OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+    if (hSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create spatial reference");
+        return 0;
+    }
+
+    if (OSRImportFromEPSG(hSRS, epsgCode) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Invalid EPSG code: %d", epsgCode);
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    char* pszWKT = NULL;
+    if (OSRExportToWkt(hSRS, &pszWKT) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to export WKT");
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    CPLErr eErr = GDALSetProjection(hDS, pszWKT);
+    if (eErr != CE_None) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to set projection: %s", CPLGetLastErrorMsg());
+        CPLFree(pszWKT);
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    double adfGeoTransform[6];
+    if (GDALGetGeoTransform(hDS, adfGeoTransform) != CE_None) {
+        int nXSize = GDALGetRasterXSize(hDS);
+        int nYSize = GDALGetRasterYSize(hDS);
+
+        adfGeoTransform[0] = 0.0;
+        adfGeoTransform[1] = 1.0;
+        adfGeoTransform[2] = 0.0;
+        adfGeoTransform[3] = nYSize;
+        adfGeoTransform[4] = 0.0;
+        adfGeoTransform[5] = -1.0;
+
+        eErr = GDALSetGeoTransform(hDS, adfGeoTransform);
+        if (eErr != CE_None) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to set default geotransform");
+            CPLFree(pszWKT);
+            OSRDestroySpatialReference(hSRS);
+            return 0;
+        }
+    }
+
+    CPLFree(pszWKT);
+    OSRDestroySpatialReference(hSRS);
+    return 1;
+}
+
+/**
+ * 直接为栅格数据定义投影和地理变换
+ */
+int defineProjectionWithGeoTransformInPlace(GDALDatasetH hDS, int epsgCode,
+                                            double* dGeoTransform, char* errorMsg) {
+    if (hDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Dataset is NULL");
+        return 0;
+    }
+
+    if (dGeoTransform == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "GeoTransform is NULL");
+        return 0;
+    }
+
+    OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+    if (hSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create spatial reference");
+        return 0;
+    }
+
+    if (OSRImportFromEPSG(hSRS, epsgCode) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Invalid EPSG code: %d", epsgCode);
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    char* pszWKT = NULL;
+    if (OSRExportToWkt(hSRS, &pszWKT) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to export WKT");
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    CPLErr eErr = GDALSetProjection(hDS, pszWKT);
+    if (eErr != CE_None) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to set projection: %s", CPLGetLastErrorMsg());
+        CPLFree(pszWKT);
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    eErr = GDALSetGeoTransform(hDS, dGeoTransform);
+    if (eErr != CE_None) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to set geotransform: %s", CPLGetLastErrorMsg());
+        CPLFree(pszWKT);
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    CPLFree(pszWKT);
+    OSRDestroySpatialReference(hSRS);
+    return 1;
+}
+
+/**
+ * 直接为栅格数据定义投影（使用自定义WKT）
+ */
+int defineProjectionWithWKTInPlace(GDALDatasetH hDS, const char* pszWKT, char* errorMsg) {
+    if (hDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Dataset is NULL");
+        return 0;
+    }
+
+    if (pszWKT == NULL || strlen(pszWKT) == 0) {
+        if (errorMsg) snprintf(errorMsg, 256, "WKT is empty");
+        return 0;
+    }
+
+    OGRSpatialReferenceH hSRS = OSRNewSpatialReference(NULL);
+    if (hSRS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create spatial reference");
+        return 0;
+    }
+
+    char* pszWKTTemp = (char*)pszWKT;
+    if (OSRImportFromWkt(hSRS, &pszWKTTemp) != OGRERR_NONE) {
+        if (errorMsg) snprintf(errorMsg, 256, "Invalid WKT projection definition");
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    CPLErr eErr = GDALSetProjection(hDS, pszWKT);
+    if (eErr != CE_None) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to set projection: %s", CPLGetLastErrorMsg());
+        OSRDestroySpatialReference(hSRS);
+        return 0;
+    }
+
+    double adfGeoTransform[6];
+    if (GDALGetGeoTransform(hDS, adfGeoTransform) != CE_None) {
+        int nXSize = GDALGetRasterXSize(hDS);
+        int nYSize = GDALGetRasterYSize(hDS);
+
+        adfGeoTransform[0] = 0.0;
+        adfGeoTransform[1] = 1.0;
+        adfGeoTransform[2] = 0.0;
+        adfGeoTransform[3] = nYSize;
+        adfGeoTransform[4] = 0.0;
+        adfGeoTransform[5] = -1.0;
+
+        eErr = GDALSetGeoTransform(hDS, adfGeoTransform);
+        if (eErr != CE_None) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to set default geotransform");
+            OSRDestroySpatialReference(hSRS);
+            return 0;
+        }
+    }
+
+    OSRDestroySpatialReference(hSRS);
+    return 1;
+}

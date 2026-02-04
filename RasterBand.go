@@ -401,34 +401,6 @@ func (rd *RasterDataset) CopyBandData(srcBandIndex int, dstDataset *RasterDatase
 }
 
 // ==================== 调色板操作 ====================
-func (rd *RasterDataset) ensureMemoryCopy() error {
-	// 已经有内存副本
-	if rd.warpedDS != nil {
-		return nil
-	}
-
-	if rd.dataset == nil {
-		return fmt.Errorf("dataset is nil")
-	}
-
-	// 检查是否已经是MEM数据集
-	driver := C.GDALGetDatasetDriver(rd.dataset)
-	if driver != nil {
-		driverName := C.GoString(C.GDALGetDriverShortName(driver))
-		if driverName == "MEM" {
-			return nil
-		}
-	}
-
-	// 创建内存副本
-	memDS := C.ensureMemoryDataset(rd.dataset)
-	if memDS == nil {
-		return fmt.Errorf("failed to create memory copy")
-	}
-
-	rd.warpedDS = memDS
-	return nil
-}
 
 // GetPaletteInfo 获取调色板信息
 func (rd *RasterDataset) GetPaletteInfo(bandIndex int) (*PaletteInfo, error) {

@@ -42,6 +42,17 @@ type DatasetInfo struct {
 	HasGeoInfo   bool
 }
 
+func (rd *RasterDataset) GetActiveDataset() C.GDALDatasetH {
+	if rd == nil {
+		return nil
+	}
+	// 优先返回 warpedDS（内存副本）
+	if rd.warpedDS != nil {
+		return rd.warpedDS
+	}
+	return rd.dataset
+}
+
 // imagePath: 影像文件路径
 func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 	cPath := C.CString(imagePath)
@@ -151,6 +162,34 @@ func (rd *RasterDataset) Close() {
 		C.GDALClose(rd.dataset)
 		rd.dataset = nil
 	}
+}
+func (rd *RasterDataset) ensureMemoryCopy() error {
+	// 已经有内存副本
+	if rd.warpedDS != nil {
+		return nil
+	}
+
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	// 检查是否已经是MEM数据集
+	driver := C.GDALGetDatasetDriver(rd.dataset)
+	if driver != nil {
+		driverName := C.GoString(C.GDALGetDriverShortName(driver))
+		if driverName == "MEM" {
+			return nil
+		}
+	}
+
+	// 创建内存副本
+	memDS := C.ensureMemoryDataset(rd.dataset)
+	if memDS == nil {
+		return fmt.Errorf("failed to create memory copy")
+	}
+
+	rd.warpedDS = memDS
+	return nil
 }
 
 // GetInfo 获取数据集信息
@@ -457,7 +496,9 @@ func (rd *RasterDataset) GetWidth() int {
 func (rd *RasterDataset) GetHeight() int {
 	return rd.height
 }
-
+func (rd *RasterDataset) GetProjection() string {
+	return rd.projection
+}
 func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[string]string) error {
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
@@ -536,133 +577,350 @@ func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[str
 	return nil
 }
 
-// RasterReader.go - 添加以下方法到 RasterDataset 结构体
+// ==================== 投影定义与重投影 ====================
 
-// DefineProjection 为栅格数据定义投影（不改变像素数据）
-// epsgCode: EPSG代码（如4326表示WGS84）
+// AffineParams 仿射变换参数
+type AffineParams struct {
+	// 七参数
+	Tx    float64 // X平移（米）
+	Ty    float64 // Y平移（米）
+	Tz    float64 // Z平移（米）
+	Rx    float64 // X旋转（度）
+	Ry    float64 // Y旋转（度）
+	Rz    float64 // Z旋转（度）
+	Scale float64 // 缩放因子
+
+	// 四参数
+	Dx     float64 // X平移（米）
+	Dy     float64 // Y平移（米）
+	DScale float64 // 缩放因子
+	Angle  float64 // 旋转角度（度）
+}
+
+// DefineProjection 直接为栅格数据定义投影（修改原数据）
+// epsgCode: EPSG代码
+// 注意：此操作会直接修改原数据文件
 func (rd *RasterDataset) DefineProjection(epsgCode int) error {
-	if epsgCode <= 0 {
-		return fmt.Errorf("invalid EPSG code: %d", epsgCode)
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
 	}
 
-	// 获取当前文件路径（需要从数据集中获取）
-	// 注意：这里需要在打开时保存文件路径
-	if rd.filePath == "" {
-		return fmt.Errorf("file path not available")
-	}
+	var errorMsg [256]C.char
+	result := C.defineProjectionInPlace(rd.dataset, C.int(epsgCode), &errorMsg[0])
 
-	result := C.defineProjectionInPlace(C.CString(rd.filePath), C.int(epsgCode))
 	if result == 0 {
-		return fmt.Errorf("failed to define projection")
+		return fmt.Errorf("failed to define projection: %s", C.GoString(&errorMsg[0]))
 	}
 
-	// 更新投影信息
-	rd.projection = fmt.Sprintf("EPSG:%d", epsgCode)
+	// 更新内部投影信息
+	rd.projection = C.GoString(C.GDALGetProjectionRef(rd.dataset))
 	rd.hasGeoInfo = true
 
 	return nil
 }
 
-// Reproject 重投影栅格数据到目标坐标系
-// targetEpsgCode: 目标EPSG代码
-// resampleMethod: 重采样方法 (0=最近邻, 1=双线性, 2=立方卷积, 3=立方样条, 4=Lanczos)
-// inPlace: 是否直接覆盖原文件
-func (rd *RasterDataset) Reproject(targetEpsgCode int, resampleMethod int, inPlace bool) error {
-	if targetEpsgCode <= 0 {
-		return fmt.Errorf("invalid target EPSG code: %d", targetEpsgCode)
-	}
-
-	if resampleMethod < 0 || resampleMethod > 4 {
-		return fmt.Errorf("invalid resample method: %d", resampleMethod)
-	}
-
-	// 检查是否有投影信息
-	if !rd.hasGeoInfo {
-		return fmt.Errorf("source dataset has no projection information")
-	}
-
-	var result C.int
-
-	if inPlace {
-		// 直接覆盖原文件
-		result = C.reprojectionRasterInPlace(
-			C.CString(rd.filePath),
-			C.int(targetEpsgCode),
-			C.int(resampleMethod),
-			nil,
-		)
-	} else {
-		// 创建新文件
-		outputPath := rd.filePath + ".reprojected.tif"
-		result = C.reprojectionRaster(
-			C.CString(rd.filePath),
-			C.CString(outputPath),
-			C.int(targetEpsgCode),
-			C.int(resampleMethod),
-		)
-
-		if result != 0 {
-			fmt.Printf("Reprojected file saved to: %s\n", outputPath)
-		}
-	}
-
-	if result == 0 {
-		return fmt.Errorf("failed to reproject dataset")
-	}
-
-	// 如果是直接覆盖，重新加载数据集
-	if inPlace {
-		rd.Close()
-		newRD, err := OpenRasterDataset(rd.filePath, false)
-		if err != nil {
-			return err
-		}
-		*rd = *newRD
-	}
-
-	return nil
-}
-
-// ReprojectionRaster 静态方法：重投影栅格文件
-// inputPath: 输入文件路径
-// outputPath: 输出文件路径
-// targetEpsgCode: 目标EPSG代码
-// resampleMethod: 重采样方法
-func ReprojectionRaster(inputPath, outputPath string, targetEpsgCode, resampleMethod int) error {
-	if inputPath == "" || outputPath == "" || targetEpsgCode <= 0 {
-		return fmt.Errorf("invalid parameters")
-	}
-
-	result := C.reprojectionRaster(
-		C.CString(inputPath),
-		C.CString(outputPath),
-		C.int(targetEpsgCode),
-		C.int(resampleMethod),
-	)
-
-	if result == 0 {
-		return fmt.Errorf("failed to reproject raster")
-	}
-
-	return nil
-}
-
-// DefineProjectionForFile 静态方法：为栅格文件定义投影
-// filePath: 文件路径
+// DefineProjectionWithGeoTransform 直接为栅格数据定义投影和地理变换
 // epsgCode: EPSG代码
-func DefineProjectionForFile(filePath string, epsgCode int) error {
-	if filePath == "" || epsgCode <= 0 {
-		return fmt.Errorf("invalid parameters")
+// geoTransform: 地理变换参数 [originX, pixelWidth, rotationX, originY, rotationY, pixelHeight]
+// 注意：此操作会直接修改原数据文件
+func (rd *RasterDataset) DefineProjectionWithGeoTransform(epsgCode int, geoTransform [6]float64) error {
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
 	}
 
-	result := C.defineProjectionInPlace(
-		C.CString(filePath),
+	cGeoTransform := [6]C.double{
+		C.double(geoTransform[0]),
+		C.double(geoTransform[1]),
+		C.double(geoTransform[2]),
+		C.double(geoTransform[3]),
+		C.double(geoTransform[4]),
+		C.double(geoTransform[5]),
+	}
+
+	var errorMsg [256]C.char
+	result := C.defineProjectionWithGeoTransformInPlace(
+		rd.dataset,
 		C.int(epsgCode),
+		&cGeoTransform[0],
+		&errorMsg[0],
 	)
 
 	if result == 0 {
-		return fmt.Errorf("failed to define projection")
+		return fmt.Errorf("failed to define projection with geotransform: %s", C.GoString(&errorMsg[0]))
+	}
+
+	// 更新内部信息
+	rd.projection = C.GoString(C.GDALGetProjectionRef(rd.dataset))
+	rd.hasGeoInfo = true
+
+	// 更新边界信息
+	width := rd.GetWidth()
+	height := rd.GetHeight()
+	minX := geoTransform[0]
+	maxY := geoTransform[3]
+	maxX := minX + geoTransform[1]*float64(width)
+	minY := maxY + geoTransform[5]*float64(height)
+
+	rd.bounds = [4]float64{minX, minY, maxX, maxY}
+
+	return nil
+}
+
+// DefineProjectionWithWKT 直接为栅格数据定义投影（使用自定义WKT）
+// wkt: WKT投影定义
+// 注意：此操作会直接修改原数据文件
+func (rd *RasterDataset) DefineProjectionWithWKT(wkt string) error {
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	if wkt == "" {
+		return fmt.Errorf("WKT is empty")
+	}
+
+	cWKT := C.CString(wkt)
+	defer C.free(unsafe.Pointer(cWKT))
+
+	var errorMsg [256]C.char
+	result := C.defineProjectionWithWKTInPlace(rd.dataset, cWKT, &errorMsg[0])
+
+	if result == 0 {
+		return fmt.Errorf("failed to define projection with WKT: %s", C.GoString(&errorMsg[0]))
+	}
+
+	// 更新内部投影信息
+	rd.projection = C.GoString(C.GDALGetProjectionRef(rd.dataset))
+	rd.hasGeoInfo = true
+
+	return nil
+}
+
+// DefineProjectionToMemory 为栅格数据定义投影（创建内存副本）
+// 用于没有坐标系的栅格数据，定义其投影后返回内存副本
+// 返回的数据集支持ExportToFile导出
+func (rd *RasterDataset) DefineProjectionToMemory(epsgCode int) (*RasterDataset, error) {
+	if rd.dataset == nil {
+		return nil, fmt.Errorf("source dataset is nil")
+	}
+
+	var errorMsg [256]C.char
+	memDS := C.defineProjectionToMemory(rd.dataset, C.int(epsgCode), &errorMsg[0])
+
+	if memDS == nil {
+		return nil, fmt.Errorf("failed to define projection: %s", C.GoString(&errorMsg[0]))
+	}
+
+	// 获取投影后的基本信息
+	width := int(C.GDALGetRasterXSize(memDS))
+	height := int(C.GDALGetRasterYSize(memDS))
+	bandCount := int(C.GDALGetRasterCount(memDS))
+
+	// 获取地理变换
+	var geoTransform [6]C.double
+	C.GDALGetGeoTransform(memDS, &geoTransform[0])
+
+	// 获取投影信息
+	projection := C.GoString(C.GDALGetProjectionRef(memDS))
+
+	// 计算边界
+	minX := float64(geoTransform[0])
+	maxY := float64(geoTransform[3])
+	maxX := minX + float64(width)*float64(geoTransform[1])
+	minY := maxY + float64(height)*float64(geoTransform[5])
+
+	newRD := &RasterDataset{
+		dataset:       rd.dataset,
+		warpedDS:      memDS,
+		width:         width,
+		height:        height,
+		bandCount:     bandCount,
+		bounds:        [4]float64{minX, minY, maxX, maxY},
+		projection:    projection,
+		isReprojected: false,
+		hasGeoInfo:    true,
+	}
+
+	runtime.SetFinalizer(newRD, (*RasterDataset).Close)
+	return newRD, nil
+}
+
+// ReprojectToEPSG 将栅格数据重投影到指定的EPSG坐标系
+// srcEPSG: 源EPSG代码
+// dstEPSG: 目标EPSG代码
+// outputPath: 输出文件路径
+// format: 输出格式（如"GTiff"、"JP2OpenJPEG"等）
+// resampleMethod: 重采样方法
+func (rd *RasterDataset) ReprojectToEPSG(srcEPSG, dstEPSG int, outputPath, format string, resampleMethod ResampleMethod) error {
+	if rd.dataset == nil {
+		return fmt.Errorf("source dataset is nil")
+	}
+
+	if outputPath == "" {
+		return fmt.Errorf("output path is empty")
+	}
+
+	cOutputPath := C.CString(outputPath)
+	defer C.free(unsafe.Pointer(cOutputPath))
+
+	cFormat := C.CString(format)
+	defer C.free(unsafe.Pointer(cFormat))
+
+	var errorMsg [256]C.char
+	result := C.reprojectRasterDataset(
+		rd.getActiveDataset(),
+		C.int(srcEPSG),
+		C.int(dstEPSG),
+		nil, // 不使用自定义WKT
+		cOutputPath,
+		cFormat,
+		C.int(resampleMethod),
+		&errorMsg[0],
+	)
+
+	if result == 0 {
+		return fmt.Errorf("reproject failed: %s", C.GoString(&errorMsg[0]))
 	}
 
 	return nil
+}
+
+// ReprojectWithCustomWKT 使用自定义WKT投影定义进行重投影
+// srcEPSG: 源EPSG代码
+// customWKT: 自定义WKT投影定义
+// outputPath: 输出文件路径
+// format: 输出格式
+// resampleMethod: 重采样方法
+func (rd *RasterDataset) ReprojectWithCustomWKT(srcEPSG int, customWKT, outputPath, format string, resampleMethod ResampleMethod) error {
+	if rd.dataset == nil {
+		return fmt.Errorf("source dataset is nil")
+	}
+
+	if outputPath == "" {
+		return fmt.Errorf("output path is empty")
+	}
+
+	if customWKT == "" {
+		return fmt.Errorf("custom WKT is empty")
+	}
+
+	cOutputPath := C.CString(outputPath)
+	defer C.free(unsafe.Pointer(cOutputPath))
+
+	cFormat := C.CString(format)
+	defer C.free(unsafe.Pointer(cFormat))
+
+	cWKT := C.CString(customWKT)
+	defer C.free(unsafe.Pointer(cWKT))
+
+	var errorMsg [256]C.char
+	result := C.reprojectRasterDataset(
+		rd.getActiveDataset(),
+		C.int(srcEPSG),
+		-1, // 使用自定义WKT
+		cWKT,
+		cOutputPath,
+		cFormat,
+		C.int(resampleMethod),
+		&errorMsg[0],
+	)
+
+	if result == 0 {
+		return fmt.Errorf("reproject with custom WKT failed: %s", C.GoString(&errorMsg[0]))
+	}
+
+	return nil
+}
+
+// ReprojectWithAffineParams 使用仿射参数进行重投影
+// srcEPSG: 源EPSG代码
+// params: 仿射变换参数
+// paramType: 参数类型（"7param" 或 "4param"）
+// outputPath: 输出文件路径
+// format: 输出格式
+// resampleMethod: 重采样方法
+func (rd *RasterDataset) ReprojectWithAffineParams(srcEPSG int, params *AffineParams, paramType, outputPath, format string, resampleMethod ResampleMethod) error {
+	if rd.dataset == nil {
+		return fmt.Errorf("source dataset is nil")
+	}
+
+	if outputPath == "" {
+		return fmt.Errorf("output path is empty")
+	}
+
+	if params == nil {
+		return fmt.Errorf("affine params is nil")
+	}
+
+	cOutputPath := C.CString(outputPath)
+	defer C.free(unsafe.Pointer(cOutputPath))
+
+	cFormat := C.CString(format)
+	defer C.free(unsafe.Pointer(cFormat))
+
+	var paramArray []C.double
+	var paramCount int
+
+	if paramType == "7param" {
+		// 七参数：tx, ty, tz, rx, ry, rz, scale
+		paramArray = []C.double{
+			C.double(params.Tx),
+			C.double(params.Ty),
+			C.double(params.Tz),
+			C.double(params.Rx),
+			C.double(params.Ry),
+			C.double(params.Rz),
+			C.double(params.Scale),
+		}
+		paramCount = 7
+	} else if paramType == "4param" {
+		// 四参数：dx, dy, scale, angle
+		paramArray = []C.double{
+			C.double(params.Dx),
+			C.double(params.Dy),
+			C.double(params.DScale),
+			C.double(params.Angle),
+		}
+		paramCount = 4
+	} else {
+		return fmt.Errorf("invalid param type: %s, must be '7param' or '4param'", paramType)
+	}
+
+	var errorMsg [256]C.char
+	result := C.reprojectRasterWithAffineParams(
+		rd.getActiveDataset(),
+		C.int(srcEPSG),
+		(*C.double)(unsafe.Pointer(&paramArray[0])),
+		C.int(paramCount),
+		cOutputPath,
+		cFormat,
+		C.int(resampleMethod),
+		&errorMsg[0],
+	)
+
+	if result == 0 {
+		return fmt.Errorf("reproject with affine params failed: %s", C.GoString(&errorMsg[0]))
+	}
+
+	return nil
+}
+
+// GetProjectionWKT 获取EPSG代码对应的WKT投影定义
+func GetProjectionWKT(epsgCode int) (string, error) {
+	wktBuffer := make([]C.char, 4096)
+	result := C.getProjectionWKTFromEPSG(C.int(epsgCode), &wktBuffer[0], 4096)
+
+	if result == 0 {
+		return "", fmt.Errorf("failed to get WKT for EPSG code: %d", epsgCode)
+	}
+
+	return C.GoString(&wktBuffer[0]), nil
+}
+
+// ValidateProjectionWKT 验证WKT投影定义是否有效
+func ValidateProjectionWKT(wkt string) bool {
+	cWKT := C.CString(wkt)
+	defer C.free(unsafe.Pointer(cWKT))
+
+	result := C.validateProjectionWKT(cWKT)
+	return result != 0
 }

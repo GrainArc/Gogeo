@@ -36,17 +36,6 @@ type ClipResult struct {
 	Error      error
 }
 
-func (rd *RasterDataset) GetActiveDataset() C.GDALDatasetH {
-	if rd == nil {
-		return nil
-	}
-	// 优先返回 warpedDS（内存副本）
-	if rd.warpedDS != nil {
-		return rd.warpedDS
-	}
-	return rd.dataset
-}
-
 // ClipRasterByLayer 使用矢量图层裁剪栅格数据
 func (rd *RasterDataset) ClipRasterByLayer(layer *GDALLayer, options *ClipOptions) ([]ClipResult, error) {
 	if layer == nil || layer.layer == nil {
