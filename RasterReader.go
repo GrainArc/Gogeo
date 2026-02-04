@@ -832,23 +832,14 @@ func (rd *RasterDataset) ReprojectWithCustomWKT(srcEPSG int, customWKT, outputPa
 }
 
 // ReprojectWithAffineParams 使用仿射参数进行重投影
-// srcEPSG: 源EPSG代码
-// params: 仿射变换参数
-// paramType: 参数类型（"7param" 或 "4param"）
-// outputPath: 输出文件路径
-// format: 输出格式
-// resampleMethod: 重采样方法
-func (rd *RasterDataset) ReprojectWithAffineParams(srcEPSG int, params *AffineParams, paramType, outputPath, format string, resampleMethod ResampleMethod) error {
+// mode: "geotransform" - 只修改地理变换（快速，不改变像素）
+//
+//	"resample" - 重采样（慢，像素会旋转/缩放）
+func (rd *RasterDataset) ReprojectWithAffineParams(srcEPSG int, params *AffineParams,
+	paramType, outputPath, format string, resampleMethod ResampleMethod, mode string) error {
+
 	if rd.dataset == nil {
 		return fmt.Errorf("source dataset is nil")
-	}
-
-	if outputPath == "" {
-		return fmt.Errorf("output path is empty")
-	}
-
-	if params == nil {
-		return fmt.Errorf("affine params is nil")
 	}
 
 	cOutputPath := C.CString(outputPath)
@@ -861,46 +852,40 @@ func (rd *RasterDataset) ReprojectWithAffineParams(srcEPSG int, params *AffinePa
 	var paramCount int
 
 	if paramType == "7param" {
-		// 七参数：tx, ty, tz, rx, ry, rz, scale
 		paramArray = []C.double{
-			C.double(params.Tx),
-			C.double(params.Ty),
-			C.double(params.Tz),
-			C.double(params.Rx),
-			C.double(params.Ry),
-			C.double(params.Rz),
+			C.double(params.Tx), C.double(params.Ty), C.double(params.Tz),
+			C.double(params.Rx), C.double(params.Ry), C.double(params.Rz),
 			C.double(params.Scale),
 		}
 		paramCount = 7
-	} else if paramType == "4param" {
-		// 四参数：dx, dy, scale, angle
+	} else {
 		paramArray = []C.double{
-			C.double(params.Dx),
-			C.double(params.Dy),
-			C.double(params.DScale),
-			C.double(params.Angle),
+			C.double(params.Dx), C.double(params.Dy),
+			C.double(params.DScale), C.double(params.Angle),
 		}
 		paramCount = 4
-	} else {
-		return fmt.Errorf("invalid param type: %s, must be '7param' or '4param'", paramType)
 	}
 
 	var errorMsg [256]C.char
-	result := C.reprojectRasterWithAffineParams(
-		rd.getActiveDataset(),
-		C.int(srcEPSG),
-		(*C.double)(unsafe.Pointer(&paramArray[0])),
-		C.int(paramCount),
-		cOutputPath,
-		cFormat,
-		C.int(resampleMethod),
-		&errorMsg[0],
-	)
+	var result C.int
 
-	if result == 0 {
-		return fmt.Errorf("reproject with affine params failed: %s", C.GoString(&errorMsg[0]))
+	if mode == "resample" {
+		result = C.reprojectRasterWithAffineParamsResample(
+			rd.getActiveDataset(), C.int(srcEPSG),
+			(*C.double)(&paramArray[0]), C.int(paramCount),
+			cOutputPath, cFormat, C.int(resampleMethod), &errorMsg[0],
+		)
+	} else {
+		result = C.reprojectRasterWithAffineParams(
+			rd.getActiveDataset(), C.int(srcEPSG),
+			(*C.double)(&paramArray[0]), C.int(paramCount),
+			cOutputPath, cFormat, C.int(resampleMethod), &errorMsg[0],
+		)
 	}
 
+	if result == 0 {
+		return fmt.Errorf("reproject failed: %s", C.GoString(&errorMsg[0]))
+	}
 	return nil
 }
 

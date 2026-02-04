@@ -1077,7 +1077,7 @@ func exampleReprojectWithAffineParams() {
 		params.Dx, params.Dy, params.DScale, params.Angle)
 	fmt.Printf("  输出路径: %s\n", outputPath)
 
-	err = rd.ReprojectWithAffineParams(srcEPSG, params, "4param", outputPath, "GTiff", ResampleBilinear)
+	err = rd.ReprojectWithAffineParams(srcEPSG, params, "4param", outputPath, "GTiff", ResampleBilinear, "")
 	if err != nil {
 		log.Fatalf("Failed to reproject with affine params: %v", err)
 	}
@@ -1115,7 +1115,7 @@ func exampleReprojectWith7Params() {
 		params.Tx, params.Ty, params.Tz, params.Rx, params.Ry, params.Rz, params.Scale)
 	fmt.Printf("  输出路径: %s\n", outputPath)
 
-	err = rd.ReprojectWithAffineParams(srcEPSG, params, "7param", outputPath, "GTiff", ResampleLanczos)
+	err = rd.ReprojectWithAffineParams(srcEPSG, params, "7param", outputPath, "GTiff", ResampleLanczos, "")
 	if err != nil {
 		log.Fatalf("Failed to reproject with 7 params: %v", err)
 	}

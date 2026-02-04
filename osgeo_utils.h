@@ -387,7 +387,10 @@ int validateProjectionWKT(const char* pszWKT);
 int defineProjectionInPlace(GDALDatasetH hDS, int epsgCode, char* errorMsg);
 int defineProjectionWithGeoTransformInPlace(GDALDatasetH hDS, int epsgCode, double* dGeoTransform, char* errorMsg);
 int defineProjectionWithWKTInPlace(GDALDatasetH hDS, const char* pszWKT, char* errorMsg);
-
+int reprojectRasterWithAffineParamsResample(GDALDatasetH hSrcDS, int nSrcEPSG,
+                                             double* dParams, int nParamCount,
+                                             const char* pszOutputPath, const char* pszFormat,
+                                             int nResampleMethod, char* errorMsg);
 
 
 #ifdef __cplusplus

@@ -2990,18 +2990,10 @@ int reprojectRasterDataset(GDALDatasetH hSrcDS, int nSrcEPSG, int nDstEPSG,
 
     return 1;
 }
-
 /**
- * 使用七参数或四参数进行仿射变换重投影
- * @param hSrcDS 源数据集
- * @param nSrcEPSG 源EPSG代码
- * @param dParams 变换参数数组（7个七参数或4个四参数）
- * @param nParamCount 参数个数（7或4）
- * @param pszOutputPath 输出文件路径
- * @param pszFormat 输出格式
- * @param nResampleMethod 重采样方法
- * @param errorMsg 错误消息缓冲区
- * @return 成功返回1，失败返回0
+ * 使用四参数或七参数进行仿射变换（不改变坐标系，只修改GeoTransform）
+ * 四参数：平移X, 平移Y, 缩放, 旋转角度
+ * 七参数：平移X, 平移Y, 平移Z, 旋转X, 旋转Y, 旋转Z, 缩放(ppm)
  */
 int reprojectRasterWithAffineParams(GDALDatasetH hSrcDS, int nSrcEPSG,
                                      double* dParams, int nParamCount,
@@ -3017,147 +3009,487 @@ int reprojectRasterWithAffineParams(GDALDatasetH hSrcDS, int nSrcEPSG,
         return 0;
     }
 
-    // 创建源空间参考系
-    OGRSpatialReferenceH hSrcSRS = OSRNewSpatialReference(NULL);
-    if (hSrcSRS == NULL) {
-        if (errorMsg) snprintf(errorMsg, 256, "Failed to create source SRS");
+    // 获取源数据集信息
+    int nXSize = GDALGetRasterXSize(hSrcDS);
+    int nYSize = GDALGetRasterYSize(hSrcDS);
+    int nBands = GDALGetRasterCount(hSrcDS);
+
+    if (nBands == 0) {
+        if (errorMsg) snprintf(errorMsg, 256, "Source dataset has no bands");
         return 0;
     }
 
-    if (OSRImportFromEPSG(hSrcSRS, nSrcEPSG) != OGRERR_NONE) {
-        if (errorMsg) snprintf(errorMsg, 256, "Invalid source EPSG code: %d", nSrcEPSG);
-        OSRDestroySpatialReference(hSrcSRS);
-        return 0;
+    // 获取源地理变换
+    double adfSrcGeoTransform[6];
+    if (GDALGetGeoTransform(hSrcDS, adfSrcGeoTransform) != CE_None) {
+        // 设置默认地理变换
+        adfSrcGeoTransform[0] = 0.0;
+        adfSrcGeoTransform[1] = 1.0;
+        adfSrcGeoTransform[2] = 0.0;
+        adfSrcGeoTransform[3] = nYSize;
+        adfSrcGeoTransform[4] = 0.0;
+        adfSrcGeoTransform[5] = -1.0;
     }
 
-    // 创建目标空间参考系（WGS84）
-    OGRSpatialReferenceH hDstSRS = OSRNewSpatialReference(NULL);
-    if (hDstSRS == NULL) {
-        if (errorMsg) snprintf(errorMsg, 256, "Failed to create destination SRS");
-        OSRDestroySpatialReference(hSrcSRS);
-        return 0;
-    }
+    // 获取源投影（保持不变）
+    const char* pszSrcProjection = GDALGetProjectionRef(hSrcDS);
 
-    if (OSRImportFromEPSG(hDstSRS, 4326) != OGRERR_NONE) {
-        if (errorMsg) snprintf(errorMsg, 256, "Failed to create WGS84 SRS");
-        OSRDestroySpatialReference(hSrcSRS);
-        OSRDestroySpatialReference(hDstSRS);
-        return 0;
-    }
+    // 计算新的地理变换（应用仿射参数）
+    double adfDstGeoTransform[6];
 
-    // 创建坐标变换对象
-    OGRCoordinateTransformationH hCT = OCTNewCoordinateTransformation(hSrcSRS, hDstSRS);
-    if (hCT == NULL) {
-        if (errorMsg) snprintf(errorMsg, 256, "Failed to create coordinate transformation");
-        OSRDestroySpatialReference(hSrcSRS);
-        OSRDestroySpatialReference(hDstSRS);
-        return 0;
-    }
+    // 原始GeoTransform参数
+    double ox = adfSrcGeoTransform[0];  // 原点X
+    double px = adfSrcGeoTransform[1];  // 像素宽度
+    double rx = adfSrcGeoTransform[2];  // 旋转X
+    double oy = adfSrcGeoTransform[3];  // 原点Y
+    double ry = adfSrcGeoTransform[4];  // 旋转Y
+    double py = adfSrcGeoTransform[5];  // 像素高度（通常为负）
 
-    // 应用仿射参数到坐标变换
-    if (nParamCount == 7) {
-        // 七参数：tx, ty, tz, rx, ry, rz, scale
-        double tx = dParams[0];
-        double ty = dParams[1];
-        double tz = dParams[2];
-        double rx = dParams[3] * M_PI / 180.0;  // 转换为弧度
-        double ry = dParams[4] * M_PI / 180.0;
-        double rz = dParams[5] * M_PI / 180.0;
-        double scale = dParams[6];
-
-        // 构造变换矩阵（这是一个简化的实现）
-        // 实际应用中可能需要更复杂的矩阵运算
-        CPLDebug("REPROJECT", "Applying 7-parameter transformation: tx=%.2f, ty=%.2f, tz=%.2f, rx=%.2f, ry=%.2f, rz=%.2f, scale=%.6f",
-                 tx, ty, tz, dParams[3], dParams[4], dParams[5], scale);
-    } else {
-        // 四参数：dx, dy, scale, angle
+    if (nParamCount == 4) {
+        // 四参数：dx, dy, scale, angle(度)
         double dx = dParams[0];
         double dy = dParams[1];
         double scale = dParams[2];
-        double angle = dParams[3] * M_PI / 180.0;  // 转换为弧度
+        double angle_deg = dParams[3];
+        double angle_rad = angle_deg * M_PI / 180.0;
 
-        CPLDebug("REPROJECT", "Applying 4-parameter transformation: dx=%.2f, dy=%.2f, scale=%.6f, angle=%.2f",
-                 dx, dy, scale, dParams[3]);
+        double cos_a = cos(angle_rad);
+        double sin_a = sin(angle_rad);
+
+        // 应用四参数变换到原点：
+        // X' = dx + scale * (X * cos(θ) - Y * sin(θ))
+        // Y' = dy + scale * (X * sin(θ) + Y * cos(θ))
+        adfDstGeoTransform[0] = dx + scale * (ox * cos_a - oy * sin_a);
+        adfDstGeoTransform[3] = dy + scale * (ox * sin_a + oy * cos_a);
+
+        // 应用变换到像素尺寸和旋转
+        adfDstGeoTransform[1] = scale * (px * cos_a - ry * sin_a);
+        adfDstGeoTransform[2] = scale * (rx * cos_a - py * sin_a);
+        adfDstGeoTransform[4] = scale * (px * sin_a + ry * cos_a);
+        adfDstGeoTransform[5] = scale * (rx * sin_a + py * cos_a);
+
+    } else {
+        // 七参数：tx, ty, tz, rx(角秒), ry(角秒), rz(角秒), scale(ppm)
+        double tx = dParams[0];
+        double ty = dParams[1];
+        // double tz = dParams[2];  // Z方向平移，2D栅格不使用
+        double rx_arcsec = dParams[3];
+        double ry_arcsec = dParams[4];
+        double rz_arcsec = dParams[5];
+        double scale_ppm = dParams[6];
+
+        // 转换为弧度（角秒 -> 弧度）
+        double rz = rz_arcsec * M_PI / (180.0 * 3600.0);
+
+        // 缩放因子（ppm -> 比例）
+        double s = 1.0 + scale_ppm * 1e-6;
+
+        double cos_rz = cos(rz);
+        double sin_rz = sin(rz);
+
+        // 应用七参数变换（简化为2D，主要使用tx, ty, rz, scale）
+        adfDstGeoTransform[0] = tx + s * (ox * cos_rz - oy * sin_rz);
+        adfDstGeoTransform[3] = ty + s * (ox * sin_rz + oy * cos_rz);
+        adfDstGeoTransform[1] = s * (px * cos_rz - ry * sin_rz);
+        adfDstGeoTransform[2] = s * (rx * cos_rz - py * sin_rz);
+        adfDstGeoTransform[4] = s * (px * sin_rz + ry * cos_rz);
+        adfDstGeoTransform[5] = s * (rx * sin_rz + py * cos_rz);
     }
 
-    // 获取源投影WKT
-    char* pszSrcWKT = NULL;
-    OSRExportToWkt(hSrcSRS, &pszSrcWKT);
-
-    // 获取目标投影WKT
-    char* pszDstWKT = NULL;
-    OSRExportToWkt(hDstSRS, &pszDstWKT);
-
-    // 获取重采样算法
-    GDALResampleAlg eResampleAlg = GRA_NearestNeighbour;
-    switch (nResampleMethod) {
-        case 0:
-            eResampleAlg = GRA_NearestNeighbour;
-            break;
-        case 1:
-            eResampleAlg = GRA_Bilinear;
-            break;
-        case 2:
-            eResampleAlg = GRA_Cubic;
-            break;
-        case 3:
-            eResampleAlg = GRA_CubicSpline;
-            break;
-        case 4:
-            eResampleAlg = GRA_Lanczos;
-            break;
-        default:
-            eResampleAlg = GRA_NearestNeighbour;
-    }
-
-    // 创建重投影数据集
-    GDALDatasetH hReprojDS = GDALAutoCreateWarpedVRT(hSrcDS, pszSrcWKT, pszDstWKT, eResampleAlg, 1.0, NULL);
-    if (hReprojDS == NULL) {
-        if (errorMsg) snprintf(errorMsg, 256, "Failed to create warped VRT");
-        OCTDestroyCoordinateTransformation(hCT);
-        CPLFree(pszSrcWKT);
-        CPLFree(pszDstWKT);
-        OSRDestroySpatialReference(hSrcSRS);
-        OSRDestroySpatialReference(hDstSRS);
-        return 0;
-    }
+    // 获取数据类型
+    GDALRasterBandH hBand = GDALGetRasterBand(hSrcDS, 1);
+    GDALDataType eDataType = GDALGetRasterDataType(hBand);
 
     // 获取输出驱动
     GDALDriverH hDriver = GDALGetDriverByName(pszFormat);
     if (hDriver == NULL) {
         if (errorMsg) snprintf(errorMsg, 256, "Unsupported output format: %s", pszFormat);
-        GDALClose(hReprojDS);
-        OCTDestroyCoordinateTransformation(hCT);
-        CPLFree(pszSrcWKT);
-        CPLFree(pszDstWKT);
-        OSRDestroySpatialReference(hSrcSRS);
-        OSRDestroySpatialReference(hDstSRS);
+        return 0;
+    }
+
+    // 创建输出数据集（尺寸与源相同）
+    GDALDatasetH hDstDS = GDALCreate(hDriver, pszOutputPath, nXSize, nYSize, nBands, eDataType, NULL);
+    if (hDstDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create output dataset: %s", CPLGetLastErrorMsg());
+        return 0;
+    }
+
+    // 设置新的地理变换
+    if (GDALSetGeoTransform(hDstDS, adfDstGeoTransform) != CE_None) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to set geotransform");
+        GDALClose(hDstDS);
+        return 0;
+    }
+
+    // 保持源投影不变！
+    if (pszSrcProjection != NULL && strlen(pszSrcProjection) > 0) {
+        GDALSetProjection(hDstDS, pszSrcProjection);
+    }
+
+    // 复制所有波段数据
+    for (int i = 1; i <= nBands; i++) {
+        GDALRasterBandH hSrcBand = GDALGetRasterBand(hSrcDS, i);
+        GDALRasterBandH hDstBand = GDALGetRasterBand(hDstDS, i);
+
+        if (hSrcBand == NULL || hDstBand == NULL) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to get band %d", i);
+            GDALClose(hDstDS);
+            return 0;
+        }
+
+        // 分配缓冲区
+        int nDataTypeSize = GDALGetDataTypeSizeBytes(eDataType);
+        size_t nBufferSize = (size_t)nXSize * nYSize * nDataTypeSize;
+        void* pBuffer = CPLMalloc(nBufferSize);
+
+        if (pBuffer == NULL) {
+            if (errorMsg) snprintf(errorMsg, 256, "Memory allocation failed for band %d", i);
+            GDALClose(hDstDS);
+            return 0;
+        }
+
+        // 读取源波段数据
+        CPLErr eErr = GDALRasterIO(hSrcBand, GF_Read, 0, 0, nXSize, nYSize,
+                                    pBuffer, nXSize, nYSize, eDataType, 0, 0);
+        if (eErr != CE_None) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to read band %d data", i);
+            CPLFree(pBuffer);
+            GDALClose(hDstDS);
+            return 0;
+        }
+
+        // 写入目标波段数据
+        eErr = GDALRasterIO(hDstBand, GF_Write, 0, 0, nXSize, nYSize,
+                            pBuffer, nXSize, nYSize, eDataType, 0, 0);
+        if (eErr != CE_None) {
+            if (errorMsg) snprintf(errorMsg, 256, "Failed to write band %d data", i);
+            CPLFree(pBuffer);
+            GDALClose(hDstDS);
+            return 0;
+        }
+
+        // 复制NoData值
+        int bHasNoData = FALSE;
+        double dfNoData = GDALGetRasterNoDataValue(hSrcBand, &bHasNoData);
+        if (bHasNoData) {
+            GDALSetRasterNoDataValue(hDstBand, dfNoData);
+        }
+
+        // 复制颜色解释
+        GDALColorInterp eColorInterp = GDALGetRasterColorInterpretation(hSrcBand);
+        GDALSetRasterColorInterpretation(hDstBand, eColorInterp);
+
+        // 复制调色板
+        GDALColorTableH hColorTable = GDALGetRasterColorTable(hSrcBand);
+        if (hColorTable != NULL) {
+            GDALSetRasterColorTable(hDstBand, hColorTable);
+        }
+
+        CPLFree(pBuffer);
+    }
+
+    // 刷新并关闭
+    GDALFlushCache(hDstDS);
+    GDALClose(hDstDS);
+
+    return 1;
+}
+
+
+/**
+ * 使用仿射参数进行带重采样的重投影（像素会重新采样）
+ * 适用于需要旋转图像内容的场景
+ */
+int reprojectRasterWithAffineParamsResample(GDALDatasetH hSrcDS, int nSrcEPSG,
+                                             double* dParams, int nParamCount,
+                                             const char* pszOutputPath, const char* pszFormat,
+                                             int nResampleMethod, char* errorMsg) {
+    if (hSrcDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Source dataset is NULL");
+        return 0;
+    }
+
+    if (nParamCount != 4 && nParamCount != 7) {
+        if (errorMsg) snprintf(errorMsg, 256, "Parameter count must be 4 or 7, got %d", nParamCount);
+        return 0;
+    }
+
+    // 获取源数据集信息
+    int nSrcXSize = GDALGetRasterXSize(hSrcDS);
+    int nSrcYSize = GDALGetRasterYSize(hSrcDS);
+    int nBands = GDALGetRasterCount(hSrcDS);
+
+    if (nBands == 0) {
+        if (errorMsg) snprintf(errorMsg, 256, "Source dataset has no bands");
+        return 0;
+    }
+
+    // 获取源地理变换
+    double adfSrcGeoTransform[6];
+    if (GDALGetGeoTransform(hSrcDS, adfSrcGeoTransform) != CE_None) {
+        // 设置默认地理变换
+        adfSrcGeoTransform[0] = 0.0;
+        adfSrcGeoTransform[1] = 1.0;
+        adfSrcGeoTransform[2] = 0.0;
+        adfSrcGeoTransform[3] = nSrcYSize;
+        adfSrcGeoTransform[4] = 0.0;
+        adfSrcGeoTransform[5] = -1.0;
+    }
+
+    // 解析仿射参数
+    double dx, dy, scale, angle_rad;
+
+    if (nParamCount == 4) {
+        dx = dParams[0];
+        dy = dParams[1];
+        scale = dParams[2];
+        angle_rad = dParams[3] * M_PI / 180.0;
+    } else {
+        // 七参数简化为四参数
+        dx = dParams[0];
+        dy = dParams[1];
+        scale = 1.0 + dParams[6] * 1e-6;
+        angle_rad = dParams[5] * M_PI / 180.0 / 3600.0;  // rz
+    }
+
+    double cos_a = cos(angle_rad);
+    double sin_a = sin(angle_rad);
+
+    // 计算源图像四个角点的坐标
+    double corners[4][2];
+    // 左上角
+    corners[0][0] = adfSrcGeoTransform[0];
+    corners[0][1] = adfSrcGeoTransform[3];
+    // 右上角
+    corners[1][0] = adfSrcGeoTransform[0] + nSrcXSize * adfSrcGeoTransform[1];
+    corners[1][1] = adfSrcGeoTransform[3] + nSrcXSize * adfSrcGeoTransform[4];
+    // 左下角
+    corners[2][0] = adfSrcGeoTransform[0] + nSrcYSize * adfSrcGeoTransform[2];
+    corners[2][1] = adfSrcGeoTransform[3] + nSrcYSize * adfSrcGeoTransform[5];
+    // 右下角
+    corners[3][0] = adfSrcGeoTransform[0] + nSrcXSize * adfSrcGeoTransform[1] + nSrcYSize * adfSrcGeoTransform[2];
+    corners[3][1] = adfSrcGeoTransform[3] + nSrcXSize * adfSrcGeoTransform[4] + nSrcYSize * adfSrcGeoTransform[5];
+
+    // 变换角点并计算新边界
+    double minX = 1e38, minY = 1e38, maxX = -1e38, maxY = -1e38;
+    for (int i = 0; i < 4; i++) {
+        double x = corners[i][0];
+        double y = corners[i][1];
+        double newX = dx + scale * (x * cos_a - y * sin_a);
+        double newY = dy + scale * (x * sin_a + y * cos_a);
+
+        if (newX < minX) minX = newX;
+        if (newX > maxX) maxX = newX;
+        if (newY < minY) minY = newY;
+        if (newY > maxY) maxY = newY;
+    }
+
+    // 计算新的像素分辨率（保持原始分辨率 * 缩放）
+    double srcPixelSize = fabs(adfSrcGeoTransform[1]);
+    double dstPixelSize = srcPixelSize * scale;
+
+    // 计算输出尺寸
+    int nDstXSize = (int)ceil((maxX - minX) / dstPixelSize);
+    int nDstYSize = (int)ceil((maxY - minY) / dstPixelSize);
+
+    // 防止尺寸过大
+    if (nDstXSize > nSrcXSize * 4) nDstXSize = nSrcXSize * 4;
+    if (nDstYSize > nSrcYSize * 4) nDstYSize = nSrcYSize * 4;
+
+    // 设置目标地理变换
+    double adfDstGeoTransform[6];
+    adfDstGeoTransform[0] = minX;
+    adfDstGeoTransform[1] = dstPixelSize;
+    adfDstGeoTransform[2] = 0.0;
+    adfDstGeoTransform[3] = maxY;
+    adfDstGeoTransform[4] = 0.0;
+    adfDstGeoTransform[5] = -dstPixelSize;
+
+    // 获取数据类型
+    GDALRasterBandH hBand = GDALGetRasterBand(hSrcDS, 1);
+    GDALDataType eDataType = GDALGetRasterDataType(hBand);
+
+    // 获取输出驱动
+    GDALDriverH hDriver = GDALGetDriverByName(pszFormat);
+    if (hDriver == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Unsupported output format: %s", pszFormat);
         return 0;
     }
 
     // 创建输出数据集
-    GDALDatasetH hOutputDS = GDALCreateCopy(hDriver, pszOutputPath, hReprojDS, TRUE, NULL, NULL, NULL);
-    if (hOutputDS == NULL) {
-        if (errorMsg) snprintf(errorMsg, 256, "Failed to create output dataset at %s", pszOutputPath);
-        GDALClose(hReprojDS);
-        OCTDestroyCoordinateTransformation(hCT);
-        CPLFree(pszSrcWKT);
-        CPLFree(pszDstWKT);
-        OSRDestroySpatialReference(hSrcSRS);
-        OSRDestroySpatialReference(hDstSRS);
+    GDALDatasetH hDstDS = GDALCreate(hDriver, pszOutputPath, nDstXSize, nDstYSize, nBands, eDataType, NULL);
+    if (hDstDS == NULL) {
+        if (errorMsg) snprintf(errorMsg, 256, "Failed to create output dataset");
         return 0;
     }
 
-    // 刷新缓存并关闭
-    GDALFlushCache(hOutputDS);
-    GDALClose(hOutputDS);
-    GDALClose(hReprojDS);
-    OCTDestroyCoordinateTransformation(hCT);
+    // 设置地理变换和投影
+    GDALSetGeoTransform(hDstDS, adfDstGeoTransform);
 
-    CPLFree(pszSrcWKT);
-    CPLFree(pszDstWKT);
-    OSRDestroySpatialReference(hSrcSRS);
-    OSRDestroySpatialReference(hDstSRS);
+    const char* pszProjection = GDALGetProjectionRef(hSrcDS);
+    if (pszProjection != NULL && strlen(pszProjection) > 0) {
+        GDALSetProjection(hDstDS, pszProjection);
+    }
+
+    // 获取重采样算法
+    GDALResampleAlg eResampleAlg = GRA_NearestNeighbour;
+    switch (nResampleMethod) {
+        case 0: eResampleAlg = GRA_NearestNeighbour; break;
+        case 1: eResampleAlg = GRA_Bilinear; break;
+        case 2: eResampleAlg = GRA_Cubic; break;
+        case 3: eResampleAlg = GRA_CubicSpline; break;
+        case 4: eResampleAlg = GRA_Lanczos; break;
+    }
+
+    // 逐波段进行重采样
+    int nDataTypeSize = GDALGetDataTypeSizeBytes(eDataType);
+
+    for (int iBand = 1; iBand <= nBands; iBand++) {
+        GDALRasterBandH hSrcBand = GDALGetRasterBand(hSrcDS, iBand);
+        GDALRasterBandH hDstBand = GDALGetRasterBand(hDstDS, iBand);
+
+        // 获取NoData值
+        int bHasNoData = FALSE;
+        double dfNoData = GDALGetRasterNoDataValue(hSrcBand, &bHasNoData);
+        if (bHasNoData) {
+            GDALSetRasterNoDataValue(hDstBand, dfNoData);
+        }
+
+        // 分配目标缓冲区
+        void* pDstBuffer = CPLMalloc((size_t)nDstXSize * nDstYSize * nDataTypeSize);
+        if (pDstBuffer == NULL) {
+            if (errorMsg) snprintf(errorMsg, 256, "Memory allocation failed");
+            GDALClose(hDstDS);
+            return 0;
+        }
+
+        // 初始化为NoData或0
+        if (bHasNoData) {
+            if (eDataType == GDT_Float32) {
+                float* pFloat = (float*)pDstBuffer;
+                for (int i = 0; i < nDstXSize * nDstYSize; i++) {
+                    pFloat[i] = (float)dfNoData;
+                }
+            } else if (eDataType == GDT_Float64) {
+                double* pDouble = (double*)pDstBuffer;
+                for (int i = 0; i < nDstXSize * nDstYSize; i++) {
+                    pDouble[i] = dfNoData;
+                }
+            } else {
+                memset(pDstBuffer, 0, (size_t)nDstXSize * nDstYSize * nDataTypeSize);
+            }
+        } else {
+            memset(pDstBuffer, 0, (size_t)nDstXSize * nDstYSize * nDataTypeSize);
+        }
+
+        // 读取源数据
+        void* pSrcBuffer = CPLMalloc((size_t)nSrcXSize * nSrcYSize * nDataTypeSize);
+        if (pSrcBuffer == NULL) {
+            CPLFree(pDstBuffer);
+            if (errorMsg) snprintf(errorMsg, 256, "Memory allocation failed for source");
+            GDALClose(hDstDS);
+            return 0;
+        }
+
+        GDALRasterIO(hSrcBand, GF_Read, 0, 0, nSrcXSize, nSrcYSize,
+                     pSrcBuffer, nSrcXSize, nSrcYSize, eDataType, 0, 0);
+
+        // 逆变换采样：对于目标图像的每个像素，计算其在源图像中的位置
+        for (int dstY = 0; dstY < nDstYSize; dstY++) {
+            for (int dstX = 0; dstX < nDstXSize; dstX++) {
+                // 目标像素的地理坐标
+                double geoX = adfDstGeoTransform[0] + dstX * adfDstGeoTransform[1] + dstY * adfDstGeoTransform[2];
+                double geoY = adfDstGeoTransform[3] + dstX * adfDstGeoTransform[4] + dstY * adfDstGeoTransform[5];
+
+                // 逆仿射变换：从目标坐标计算源坐标
+                // 正变换: X' = dx + scale * (X * cos - Y * sin)
+                //         Y' = dy + scale * (X * sin + Y * cos)
+                // 逆变换: X = (1/scale) * ((X'-dx)*cos + (Y'-dy)*sin)
+                //         Y = (1/scale) * (-(X'-dx)*sin + (Y'-dy)*cos)
+                double tmpX = geoX - dx;
+                double tmpY = geoY - dy;
+                double srcGeoX = (tmpX * cos_a + tmpY * sin_a) / scale;
+                double srcGeoY = (-tmpX * sin_a + tmpY * cos_a) / scale;
+
+                // 计算源像素坐标
+                double srcPixelX = (srcGeoX - adfSrcGeoTransform[0]) / adfSrcGeoTransform[1];
+                double srcPixelY = (srcGeoY - adfSrcGeoTransform[3]) / adfSrcGeoTransform[5];
+
+                // 边界检查
+                if (srcPixelX < 0 || srcPixelX >= nSrcXSize - 1 ||
+                    srcPixelY < 0 || srcPixelY >= nSrcYSize - 1) {
+                    continue;
+                }
+
+                int dstIdx = dstY * nDstXSize + dstX;
+
+                if (eResampleAlg == GRA_NearestNeighbour) {
+                    // 最近邻
+                    int srcX = (int)(srcPixelX + 0.5);
+                    int srcY = (int)(srcPixelY + 0.5);
+                    if (srcX >= 0 && srcX < nSrcXSize && srcY >= 0 && srcY < nSrcYSize) {
+                        int srcIdx = srcY * nSrcXSize + srcX;
+                        memcpy((char*)pDstBuffer + dstIdx * nDataTypeSize,
+                               (char*)pSrcBuffer + srcIdx * nDataTypeSize,
+                               nDataTypeSize);
+                    }
+                } else {
+                    // 双线性插值
+                    int x0 = (int)srcPixelX;
+                    int y0 = (int)srcPixelY;
+                    int x1 = x0 + 1;
+                    int y1 = y0 + 1;
+
+                    if (x1 >= nSrcXSize) x1 = nSrcXSize - 1;
+                    if (y1 >= nSrcYSize) y1 = nSrcYSize - 1;
+
+                    double fx = srcPixelX - x0;
+                    double fy = srcPixelY - y0;
+
+                    if (eDataType == GDT_Byte) {
+                        unsigned char* pSrc = (unsigned char*)pSrcBuffer;
+                        unsigned char* pDst = (unsigned char*)pDstBuffer;
+                        double v00 = pSrc[y0 * nSrcXSize + x0];
+                        double v10 = pSrc[y0 * nSrcXSize + x1];
+                        double v01 = pSrc[y1 * nSrcXSize + x0];
+                        double v11 = pSrc[y1 * nSrcXSize + x1];
+                        double value = v00 * (1-fx) * (1-fy) + v10 * fx * (1-fy) +
+                                      v01 * (1-fx) * fy + v11 * fx * fy;
+                        pDst[dstIdx] = (unsigned char)(value + 0.5);
+                    } else if (eDataType == GDT_UInt16) {
+                        unsigned short* pSrc = (unsigned short*)pSrcBuffer;
+                        unsigned short* pDst = (unsigned short*)pDstBuffer;
+                        double v00 = pSrc[y0 * nSrcXSize + x0];
+                        double v10 = pSrc[y0 * nSrcXSize + x1];
+                        double v01 = pSrc[y1 * nSrcXSize + x0];
+                        double v11 = pSrc[y1 * nSrcXSize + x1];
+                        double value = v00 * (1-fx) * (1-fy) + v10 * fx * (1-fy) +
+                                      v01 * (1-fx) * fy + v11 * fx * fy;
+                        pDst[dstIdx] = (unsigned short)(value + 0.5);
+                    } else if (eDataType == GDT_Float32) {
+                        float* pSrc = (float*)pSrcBuffer;
+                        float* pDst = (float*)pDstBuffer;
+                        double v00 = pSrc[y0 * nSrcXSize + x0];
+                        double v10 = pSrc[y0 * nSrcXSize + x1];
+                        double v01 = pSrc[y1 * nSrcXSize + x0];
+                        double v11 = pSrc[y1 * nSrcXSize + x1];
+                        pDst[dstIdx] = (float)(v00 * (1-fx) * (1-fy) + v10 * fx * (1-fy) +
+                                              v01 * (1-fx) * fy + v11 * fx * fy);
+                    }
+                }
+            }
+        }
+
+        // 写入目标波段
+        GDALRasterIO(hDstBand, GF_Write, 0, 0, nDstXSize, nDstYSize,
+                     pDstBuffer, nDstXSize, nDstYSize, eDataType, 0, 0);
+
+        CPLFree(pSrcBuffer);
+        CPLFree(pDstBuffer);
+    }
+
+    GDALFlushCache(hDstDS);
+    GDALClose(hDstDS);
 
     return 1;
 }
