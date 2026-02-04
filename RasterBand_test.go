@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime"
 )
 
 func AddBandSample(rd *RasterDataset) {
@@ -789,4 +790,26 @@ func BandCalculatorSample(rd *RasterDataset) {
 	if err != nil {
 		return
 	}
+}
+
+func MosaicWithOptions() {
+	ds1, _ := OpenRasterDataset("E:\\影像数据\\00影像\\2025年1月耕林园影像\\510183邛崃市0102\\510183邛崃市1.img", false)
+	defer ds1.Close()
+	ds2, _ := OpenRasterDataset("E:\\影像数据\\00影像\\2025年1月耕林园影像\\510183邛崃市0102\\510183邛崃市2.img", false)
+	defer ds2.Close()
+	// 自定义选项
+	options := &MosaicOptions{
+		ForceBandMatch: true,          // 强制波段匹配
+		ResampleMethod: ResampleCubic, // 三次卷积重采样
+		NoDataValue:    -9999,         // NoData值
+		HasNoData:      true,
+		NumThreads:     runtime.NumCPU() / 2, // 使用4个线程
+	}
+	result, err := MosaicDatasets([]*RasterDataset{ds1, ds2}, options)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer result.Close()
+	fmt.Printf("镶嵌结果: %dx%d, %d波段\n", result.GetWidth(), result.GetHeight(), result.GetBandCount())
+
 }
