@@ -22,6 +22,7 @@ import (
 type RasterDataset struct {
 	dataset       C.GDALDatasetH
 	warpedDS      C.GDALDatasetH
+	filePath      string
 	width         int
 	height        int
 	bandCount     int
@@ -127,6 +128,7 @@ func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 		warpedDS:      warpedDS,
 		width:         width,
 		height:        height,
+		filePath:      imagePath,
 		bandCount:     bandCount,
 		bounds:        [4]float64{minX, minY, maxX, maxY},
 		projection:    projection,
@@ -454,4 +456,213 @@ func (rd *RasterDataset) GetWidth() int {
 // GetHeight 获取数据集高度（像素）
 func (rd *RasterDataset) GetHeight() int {
 	return rd.height
+}
+
+func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[string]string) error {
+	activeDS := rd.GetActiveDataset()
+	if activeDS == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	cFormat := C.CString(format)
+	defer C.free(unsafe.Pointer(cFormat))
+
+	driver := C.GDALGetDriverByName(cFormat)
+	if driver == nil {
+		return fmt.Errorf("unsupported format: %s", format)
+	}
+
+	// 构建选项
+	var cOptions **C.char
+	var optionPtrs []*C.char
+	if len(options) > 0 {
+		optionPtrs = make([]*C.char, 0, len(options)+1)
+		for k, v := range options {
+			optStr := C.CString(fmt.Sprintf("%s=%s", k, v))
+			optionPtrs = append(optionPtrs, optStr)
+		}
+		optionPtrs = append(optionPtrs, nil)
+		cOptions = &optionPtrs[0]
+	}
+
+	defer func() {
+		for _, ptr := range optionPtrs {
+			if ptr != nil {
+				C.free(unsafe.Pointer(ptr))
+			}
+		}
+	}()
+
+	cOutputPath := C.CString(outputPath)
+	defer C.free(unsafe.Pointer(cOutputPath))
+
+	// 创建输出文件
+	outputDS := C.GDALCreateCopy(driver, cOutputPath, activeDS, C.int(0), cOptions, nil, nil)
+	if outputDS == nil {
+		return fmt.Errorf("failed to create output: %s", C.GoString(C.CPLGetLastErrorMsg()))
+	}
+
+	// 关键：同步元数据修改到输出数据集
+	bandCount := int(C.GDALGetRasterCount(activeDS))
+	for i := 1; i <= bandCount; i++ {
+		srcBand := C.GDALGetRasterBand(activeDS, C.int(i))
+		dstBand := C.GDALGetRasterBand(outputDS, C.int(i))
+
+		if srcBand == nil || dstBand == nil {
+			continue
+		}
+
+		// 同步颜色解释
+		colorInterp := C.GDALGetRasterColorInterpretation(srcBand)
+		C.GDALSetRasterColorInterpretation(dstBand, colorInterp)
+
+		// 同步 NoData
+		var hasNoData C.int
+		noData := C.GDALGetRasterNoDataValue(srcBand, &hasNoData)
+		if hasNoData != 0 {
+			C.GDALSetRasterNoDataValue(dstBand, noData)
+		}
+
+		// 同步调色板
+		colorTable := C.GDALGetRasterColorTable(srcBand)
+		if colorTable != nil {
+			C.GDALSetRasterColorTable(dstBand, colorTable)
+		}
+	}
+
+	C.GDALFlushCache(outputDS)
+	C.GDALClose(outputDS)
+
+	return nil
+}
+
+// RasterReader.go - 添加以下方法到 RasterDataset 结构体
+
+// DefineProjection 为栅格数据定义投影（不改变像素数据）
+// epsgCode: EPSG代码（如4326表示WGS84）
+func (rd *RasterDataset) DefineProjection(epsgCode int) error {
+	if epsgCode <= 0 {
+		return fmt.Errorf("invalid EPSG code: %d", epsgCode)
+	}
+
+	// 获取当前文件路径（需要从数据集中获取）
+	// 注意：这里需要在打开时保存文件路径
+	if rd.filePath == "" {
+		return fmt.Errorf("file path not available")
+	}
+
+	result := C.defineProjectionInPlace(C.CString(rd.filePath), C.int(epsgCode))
+	if result == 0 {
+		return fmt.Errorf("failed to define projection")
+	}
+
+	// 更新投影信息
+	rd.projection = fmt.Sprintf("EPSG:%d", epsgCode)
+	rd.hasGeoInfo = true
+
+	return nil
+}
+
+// Reproject 重投影栅格数据到目标坐标系
+// targetEpsgCode: 目标EPSG代码
+// resampleMethod: 重采样方法 (0=最近邻, 1=双线性, 2=立方卷积, 3=立方样条, 4=Lanczos)
+// inPlace: 是否直接覆盖原文件
+func (rd *RasterDataset) Reproject(targetEpsgCode int, resampleMethod int, inPlace bool) error {
+	if targetEpsgCode <= 0 {
+		return fmt.Errorf("invalid target EPSG code: %d", targetEpsgCode)
+	}
+
+	if resampleMethod < 0 || resampleMethod > 4 {
+		return fmt.Errorf("invalid resample method: %d", resampleMethod)
+	}
+
+	// 检查是否有投影信息
+	if !rd.hasGeoInfo {
+		return fmt.Errorf("source dataset has no projection information")
+	}
+
+	var result C.int
+
+	if inPlace {
+		// 直接覆盖原文件
+		result = C.reprojectionRasterInPlace(
+			C.CString(rd.filePath),
+			C.int(targetEpsgCode),
+			C.int(resampleMethod),
+			nil,
+		)
+	} else {
+		// 创建新文件
+		outputPath := rd.filePath + ".reprojected.tif"
+		result = C.reprojectionRaster(
+			C.CString(rd.filePath),
+			C.CString(outputPath),
+			C.int(targetEpsgCode),
+			C.int(resampleMethod),
+		)
+
+		if result != 0 {
+			fmt.Printf("Reprojected file saved to: %s\n", outputPath)
+		}
+	}
+
+	if result == 0 {
+		return fmt.Errorf("failed to reproject dataset")
+	}
+
+	// 如果是直接覆盖，重新加载数据集
+	if inPlace {
+		rd.Close()
+		newRD, err := OpenRasterDataset(rd.filePath, false)
+		if err != nil {
+			return err
+		}
+		*rd = *newRD
+	}
+
+	return nil
+}
+
+// ReprojectionRaster 静态方法：重投影栅格文件
+// inputPath: 输入文件路径
+// outputPath: 输出文件路径
+// targetEpsgCode: 目标EPSG代码
+// resampleMethod: 重采样方法
+func ReprojectionRaster(inputPath, outputPath string, targetEpsgCode, resampleMethod int) error {
+	if inputPath == "" || outputPath == "" || targetEpsgCode <= 0 {
+		return fmt.Errorf("invalid parameters")
+	}
+
+	result := C.reprojectionRaster(
+		C.CString(inputPath),
+		C.CString(outputPath),
+		C.int(targetEpsgCode),
+		C.int(resampleMethod),
+	)
+
+	if result == 0 {
+		return fmt.Errorf("failed to reproject raster")
+	}
+
+	return nil
+}
+
+// DefineProjectionForFile 静态方法：为栅格文件定义投影
+// filePath: 文件路径
+// epsgCode: EPSG代码
+func DefineProjectionForFile(filePath string, epsgCode int) error {
+	if filePath == "" || epsgCode <= 0 {
+		return fmt.Errorf("invalid parameters")
+	}
+
+	result := C.defineProjectionInPlace(
+		C.CString(filePath),
+		C.int(epsgCode),
+	)
+
+	if result == 0 {
+		return fmt.Errorf("failed to define projection")
+	}
+
+	return nil
 }

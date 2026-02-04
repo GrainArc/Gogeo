@@ -354,6 +354,49 @@ int copyRasterToMosaic(MosaicInputInfo* input, GDALDatasetH outputDS,
 
 GDALResampleAlg getResampleAlgorithm(int method);
 
+// ==================== 投影定义与重投影 ====================
+
+/**
+ * 为栅格数据定义投影（不改变像素数据，仅设置坐标系信息）
+ * @param inputPath 输入栅格文件路径
+ * @param outputPath 输出栅格文件路径（可与inputPath相同以覆盖）
+ * @param epsgCode EPSG代码（如4326表示WGS84）
+ * @return 成功返回1，失败返回0
+ */
+int defineProjection(const char* inputPath, const char* outputPath, int epsgCode);
+
+/**
+ * 重投影栅格数据到目标坐标系
+ * @param inputPath 输入栅格文件路径
+ * @param outputPath 输出栅格文件路径
+ * @param targetEpsgCode 目标EPSG代码
+ * @param resampleMethod 重采样方法: 0=Nearest, 1=Bilinear, 2=Cubic, 3=CubicSpline, 4=Lanczos
+ * @return 成功返回1，失败返回0
+ */
+int reprojectionRaster(const char* inputPath, const char* outputPath,
+                       int targetEpsgCode, int resampleMethod);
+
+/**
+ * 重投影栅格数据到目标坐标系（支持直接覆盖）
+ * @param inputPath 输入栅格文件路径
+ * @param targetEpsgCode 目标EPSG代码
+ * @param resampleMethod 重采样方法: 0=Nearest, 1=Bilinear, 2=Cubic, 3=CubicSpline, 4=Lanczos
+ * @param tempDir 临时文件目录（为NULL时使用系统临时目录）
+ * @return 成功返回1，失败返回0
+ */
+int reprojectionRasterInPlace(const char* inputPath, int targetEpsgCode,
+                              int resampleMethod, const char* tempDir);
+
+/**
+ * 定义投影（直接修改文件）
+ * @param filePath 栅格文件路径
+ * @param epsgCode EPSG代码
+ * @return 成功返回1，失败返回0
+ */
+int defineProjectionInPlace(const char* filePath, int epsgCode);
+
+
+
 #ifdef __cplusplus
 }
 #endif

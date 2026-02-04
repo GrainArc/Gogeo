@@ -813,3 +813,142 @@ func MosaicWithOptions() {
 	fmt.Printf("镶嵌结果: %dx%d, %d波段\n", result.GetWidth(), result.GetHeight(), result.GetBandCount())
 
 }
+
+// ==================== 基础调色示例 ====================
+
+// 综合调色示例
+func AdjustColorsSample(ds *RasterDataset) {
+	fmt.Println("执行综合调色...")
+	params := &ColorAdjustParams{
+		Brightness: 0.1,
+		Contrast:   0.2,
+		Saturation: 0.15,
+		Gamma:      1.1,
+		Hue:        0,
+	}
+	adjusted, err := ds.AdjustColors(params)
+	if err != nil {
+		log.Fatal(err)
+	}
+	adjusted.ExportToFile("output_adjusted.tif", "GTiff", nil)
+	adjusted.Close()
+	fmt.Println("综合调色完成: output_adjusted.tif")
+}
+
+// 自动色阶示例
+func AutoLevelsSample(ds *RasterDataset) {
+	fmt.Println("执行自动色阶...")
+	autoLeveled, err := ds.AutoLevels(0.5)
+	if err != nil {
+		log.Fatal(err)
+	}
+	autoLeveled.ExportToFile("output_autolevels.tif", "GTiff", nil)
+	autoLeveled.Close()
+	fmt.Println("自动色阶完成: output_autolevels.tif")
+}
+
+// 自动白平衡示例
+func AutoWhiteBalanceSample(ds *RasterDataset) {
+	fmt.Println("执行自动白平衡...")
+	whiteBalanced, err := ds.AutoWhiteBalance()
+	if err != nil {
+		log.Fatal(err)
+	}
+	whiteBalanced.ExportToFile("output_wb.tif", "GTiff", nil)
+	whiteBalanced.Close()
+	fmt.Println("自动白平衡完成: output_wb.tif")
+}
+
+// CLAHE均衡化示例
+func CLAHEEqualizationSample(ds *RasterDataset) {
+	fmt.Println("执行CLAHE均衡化...")
+	clahe, err := ds.CLAHEEqualization(64, 2.0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	clahe.ExportToFile("output_clahe.tif", "GTiff", nil)
+	clahe.Close()
+	fmt.Println("CLAHE均衡化完成: output_clahe.tif")
+}
+
+// 预设鲜艳风格示例
+func PresetVividSample(ds *RasterDataset) {
+	fmt.Println("执行预设鲜艳风格...")
+	vivid, err := ds.PresetVivid()
+	if err != nil {
+		log.Fatal(err)
+	}
+	vivid.ExportToFile("output_vivid.tif", "GTiff", nil)
+	vivid.Close()
+	fmt.Println("预设鲜艳风格完成: output_vivid.tif")
+}
+
+// ==================== 匀色示例 ====================
+
+// 直方图匹配示例
+func HistogramMatchSample(ds *RasterDataset, refDS *RasterDataset) {
+	fmt.Println("执行直方图匹配...")
+	histMatched, err := ds.HistogramMatch(refDS, nil, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	histMatched.ExportToFile("output_histmatch.tif", "GTiff", nil)
+	histMatched.Close()
+	fmt.Println("直方图匹配完成: output_histmatch.tif")
+}
+
+// Wallis滤波匀色示例
+func WallisFilterSample(ds *RasterDataset) {
+	fmt.Println("执行Wallis滤波匀色...")
+	wallis, err := ds.WallisFilter(128, 50, 0.8, 0.9, 31)
+	if err != nil {
+		log.Fatal(err)
+	}
+	wallis.ExportToFile("output_wallis.tif", "GTiff", nil)
+	wallis.Close()
+	fmt.Println("Wallis滤波匀色完成: output_wallis.tif")
+}
+
+// Dodging匀光示例
+func DodgingBalanceSample(ds *RasterDataset) {
+	fmt.Println("执行Dodging匀光...")
+	dodging, err := ds.DodgingBalance(128, 0.8)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dodging.ExportToFile("output_dodging.tif", "GTiff", nil)
+	dodging.Close()
+	fmt.Println("Dodging匀光完成: output_dodging.tif")
+}
+
+// 智能匀色示例
+func SmartColorBalanceSample(ds *RasterDataset, refDS *RasterDataset) {
+	fmt.Println("执行智能匀色...")
+	smart, err := ds.SmartColorBalance(refDS, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	smart.ExportToFile("output_smart.tif", "GTiff", nil)
+	smart.Close()
+	fmt.Println("智能匀色完成: output_smart.tif")
+}
+
+// ==================== 链式调用示例 ====================
+
+// 色彩处理管道示例
+func ColorPipelineSample(ds *RasterDataset) {
+	fmt.Println("执行色彩处理管道...")
+	result, err := ds.NewColorPipeline().
+		AutoLevels(0.5).
+		Brightness(0.05).
+		Contrast(0.1).
+		Saturation(0.1).
+		CLAHE(64, 2.0).
+		Result()
+	if err != nil {
+		log.Fatal(err)
+	}
+	result.ExportToFile("output_pipeline.tif", "GTiff", nil)
+	result.Close()
+	fmt.Println("色彩处理管道完成: output_pipeline.tif")
+}

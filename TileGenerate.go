@@ -1233,30 +1233,40 @@ func readBinFilesMap(dir string) map[int]string {
 func GenerateTilesFromPG(db *gorm.DB, table1, table2 string, tileCount int, uuid string) error {
 	// 1. 直接从PG计算合并的extent
 	extent, err := getLayersExtentFromPG(db, table1, table2)
-
 	if err != nil {
 		return fmt.Errorf("获取图层范围失败: %v", err)
 	}
+
 	// 2. 创建瓦片信息
 	tiles := createTileInfos(extent, tileCount)
-	// 3. 配置处理参数
+
+	// 3. 获取规范的工作目录
+	workDir, err := getWorkDirectory(uuid)
+	if err != nil {
+		return fmt.Errorf("获取工作目录失败: %v", err)
+	}
+
+	// 4. 配置处理参数
 	config := &TileProcessingConfig{
 		MaxConcurrency: runtime.NumCPU() / 2,
 		BufferSize:     1024 * 1024,
 		EnableProgress: true,
 	}
-	// 4. 并发处理两个图层的瓦片裁剪
+
+	// 5. 并发处理两个图层的瓦片裁剪
 	var wg sync.WaitGroup
 	var err1, err2 error
+
 	// 处理第一个图层
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		layer1Path := filepath.Join(workDir, "layer1")
 		err1 = clipAndSerializeTilesFromPG(
 			db,
 			table1,
 			tiles,
-			filepath.Join(uuid, "layer1"),
+			layer1Path,
 			config,
 		)
 		if err1 != nil {
@@ -1265,15 +1275,17 @@ func GenerateTilesFromPG(db *gorm.DB, table1, table2 string, tileCount int, uuid
 			log.Printf("layer1 处理完成\n")
 		}
 	}()
+
 	// 处理第二个图层
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		layer2Path := filepath.Join(workDir, "layer2")
 		err2 = clipAndSerializeTilesFromPG(
 			db,
 			table2,
 			tiles,
-			filepath.Join(uuid, "layer2"),
+			layer2Path,
 			config,
 		)
 		if err2 != nil {
@@ -1282,12 +1294,31 @@ func GenerateTilesFromPG(db *gorm.DB, table1, table2 string, tileCount int, uuid
 			log.Printf("layer2 处理完成\n")
 		}
 	}()
+
 	wg.Wait()
+
 	if err1 != nil || err2 != nil {
 		return fmt.Errorf("分割处理失败 - layer1: %v, layer2: %v", err1, err2)
 	}
-	fmt.Printf("所有图层分割处理完成\n")
+
+	fmt.Printf("所有图层分割处理完成，工作目录: %s\n", workDir)
 	return nil
+}
+
+// getWorkDirectory 获取规范的工作目录
+func getWorkDirectory(uuid string) (string, error) {
+	var basePath string
+
+	basePath = filepath.Join(os.TempDir(), "tiles")
+	// 完整工作目录
+	workDir := filepath.Join(basePath, uuid)
+
+	// 创建目录
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		return "", fmt.Errorf("创建工作目录失败: %w", err)
+	}
+
+	return workDir, nil
 }
 
 // getLayersExtentFromPG 直接从PostgreSQL获取两个图层的合并范围
