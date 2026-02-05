@@ -481,3 +481,101 @@ func (bc *BandCalculator) ValidateExpression(expression string) error {
 	C.freeCompiledExpression(ce)
 	return nil
 }
+
+// CreateSingleBandDataset 从计算结果创建单波段数据集
+func (rd *RasterDataset) CreateSingleBandDataset(data []float64, dataType BandDataType) (*RasterDataset, error) {
+	width := rd.GetWidth()
+	height := rd.GetHeight()
+	expectedSize := width * height
+
+	if len(data) != expectedSize {
+		return nil, fmt.Errorf("data size mismatch: got %d, expected %d", len(data), expectedSize)
+	}
+
+	// 获取MEM驱动
+	cDriverName := C.CString("MEM")
+	defer C.free(unsafe.Pointer(cDriverName))
+	driver := C.GDALGetDriverByName(cDriverName)
+	if driver == nil {
+		return nil, fmt.Errorf("failed to get MEM driver")
+	}
+
+	// 创建内存数据集
+	cEmpty := C.CString("")
+	defer C.free(unsafe.Pointer(cEmpty))
+	newDS := C.GDALCreate(driver, cEmpty, C.int(width), C.int(height), 1, C.GDALDataType(dataType), nil)
+	if newDS == nil {
+		return nil, fmt.Errorf("failed to create dataset")
+	}
+
+	// 复制地理变换
+	var geoTransform [6]C.double
+	activeDS := rd.dataset
+	if rd.warpedDS != nil {
+		activeDS = rd.warpedDS
+	}
+
+	hasGeoInfo := false
+	if C.GDALGetGeoTransform(activeDS, &geoTransform[0]) == C.CE_None {
+		C.GDALSetGeoTransform(newDS, &geoTransform[0])
+		hasGeoInfo = true
+	}
+
+	// 复制投影
+	proj := C.GDALGetProjectionRef(activeDS)
+	projection := ""
+	if proj != nil {
+		projection = C.GoString(proj)
+		if projection != "" {
+			cProj := C.CString(projection)
+			defer C.free(unsafe.Pointer(cProj))
+			C.GDALSetProjection(newDS, cProj)
+		}
+	}
+
+	// 获取波段并写入数据
+	band := C.GDALGetRasterBand(newDS, 1)
+	if band == nil {
+		C.GDALClose(newDS)
+		return nil, fmt.Errorf("failed to get raster band")
+	}
+
+	// 转换数据
+	cData := make([]C.double, len(data))
+	for i, v := range data {
+		cData[i] = C.double(v)
+	}
+
+	// 写入数据
+	err := C.GDALRasterIO(band, C.GF_Write, 0, 0, C.int(width), C.int(height),
+		unsafe.Pointer(&cData[0]), C.int(width), C.int(height), C.GDT_Float64, 0, 0)
+	if err != C.CE_None {
+		C.GDALClose(newDS)
+		return nil, fmt.Errorf("failed to write raster data")
+	}
+
+	// 计算bounds
+	var bounds [4]float64
+	if hasGeoInfo {
+		bounds[0] = float64(geoTransform[0])                                            // minX
+		bounds[1] = float64(geoTransform[3]) + float64(height)*float64(geoTransform[5]) // minY
+		bounds[2] = float64(geoTransform[0]) + float64(width)*float64(geoTransform[1])  // maxX
+		bounds[3] = float64(geoTransform[3])                                            // maxY
+	}
+
+	// 创建新的 RasterDataset
+	newRD := &RasterDataset{
+		dataset:       newDS,
+		warpedDS:      nil,
+		filePath:      "",
+		width:         width,
+		height:        height,
+		bandCount:     1,
+		bounds:        bounds,
+		projection:    projection,
+		isReprojected: rd.isReprojected,
+		hasGeoInfo:    hasGeoInfo,
+	}
+
+	return newRD, nil
+}
