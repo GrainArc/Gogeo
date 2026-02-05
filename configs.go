@@ -19,7 +19,9 @@ package Gogeo
 import (
 	"encoding/xml"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 )
 
 var MainConfig PGConfig
@@ -34,8 +36,12 @@ type PGConfig struct {
 }
 
 func init() {
-
-	xmlFile, err := os.Open("config.xml")
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		log.Fatal("无法获取用户配置目录:", err)
+	}
+	configdata := filepath.Join(configDir, "BoundlessMap", "config.xml")
+	xmlFile, err := os.Open(configdata)
 	if err != nil {
 		fmt.Println("Error  opening  file:", err)
 		return
