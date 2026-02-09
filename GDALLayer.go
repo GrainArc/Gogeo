@@ -515,3 +515,191 @@ func CopyFieldDefinitions(srcLayer, dstLayer *GDALLayer) error {
 	}
 	return nil
 }
+
+// ReprojectLayer 将图层投影到新的坐标系（返回新的内存图层）
+func (gl *GDALLayer) ReprojectLayer(targetEPSG int) (*GDALLayer, error) {
+	if gl.layer == nil {
+		return nil, fmt.Errorf("源图层为空")
+	}
+
+	// 获取源空间参考
+	srcSRS := gl.GetSpatialRef()
+	if srcSRS == nil {
+		return nil, fmt.Errorf("源图层没有定义空间参考系统")
+	}
+
+	// 创建目标空间参考
+	dstSRS := C.OSRNewSpatialReference(nil)
+	if dstSRS == nil {
+		return nil, fmt.Errorf("创建目标空间参考失败")
+	}
+
+	// 从EPSG代码导入
+	result := C.OSRImportFromEPSG(dstSRS, C.int(targetEPSG))
+	if result != C.OGRERR_NONE {
+		C.OSRDestroySpatialReference(dstSRS)
+		return nil, fmt.Errorf("无效的EPSG代码: %d", targetEPSG)
+	}
+
+	// 创建坐标转换器
+	transform := C.OCTNewCoordinateTransformation(srcSRS, dstSRS)
+	if transform == nil {
+		C.OSRDestroySpatialReference(dstSRS)
+		return nil, fmt.Errorf("创建坐标转换器失败")
+	}
+	defer C.OCTDestroyCoordinateTransformation(transform)
+
+	// 获取几何类型和图层定义
+	srcDefn := gl.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(srcDefn)
+
+	// 创建新图层名称
+	layerName := fmt.Sprintf("%s_EPSG%d", gl.GetLayerName(), targetEPSG)
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	// 创建内存图层
+	newLayer := C.createMemoryLayer(cLayerName, geomType, dstSRS)
+	if newLayer == nil {
+		C.OSRDestroySpatialReference(dstSRS)
+		return nil, fmt.Errorf("创建内存图层失败")
+	}
+
+	// 包装为GDALLayer
+	resultLayer := &GDALLayer{
+		layer:   newLayer,
+		dataset: nil,
+		driver:  nil,
+	}
+
+	// 复制字段定义
+	err := CopyFieldDefinitions(gl, resultLayer)
+	if err != nil {
+		C.OSRDestroySpatialReference(dstSRS)
+		return nil, fmt.Errorf("复制字段定义失败: %v", err)
+	}
+
+	// 获取目标图层定义
+	dstDefn := resultLayer.GetLayerDefn()
+
+	// 复制并转换要素
+	gl.ResetReading()
+	for {
+		srcFeature := gl.GetNextFeatureRow()
+		if srcFeature == nil {
+			break
+		}
+
+		// 创建新要素
+		dstFeature := C.OGR_F_Create(dstDefn)
+		if dstFeature == nil {
+			C.OGR_F_Destroy(srcFeature)
+			continue
+		}
+
+		// 复制属性（使用现有函数）
+		copyFeatureAttributes(srcFeature, dstFeature, srcDefn, dstDefn)
+
+		// 获取并转换几何
+		srcGeom := C.OGR_F_GetGeometryRef(srcFeature)
+		if srcGeom != nil {
+			dstGeom := C.OGR_G_Clone(srcGeom)
+			if dstGeom != nil {
+				if C.OGR_G_Transform(dstGeom, transform) == C.OGRERR_NONE {
+					C.OGR_F_SetGeometryDirectly(dstFeature, dstGeom)
+				} else {
+					C.OGR_G_DestroyGeometry(dstGeom)
+				}
+			}
+		}
+
+		// 添加要素到图层
+		C.OGR_L_CreateFeature(newLayer, dstFeature)
+		C.OGR_F_Destroy(dstFeature)
+		C.OGR_F_Destroy(srcFeature)
+	}
+
+	gl.ResetReading()
+	return resultLayer, nil
+}
+
+// GetEPSGCode 获取图层的EPSG代码
+func (gl *GDALLayer) GetEPSGCode() int {
+	srs := gl.GetSpatialRef()
+	if srs == nil {
+		return 0
+	}
+
+	code := C.OSRGetAuthorityCode(srs, nil)
+	if code == nil {
+		return 0
+	}
+
+	var epsg int
+	fmt.Sscanf(C.GoString(code), "%d", &epsg)
+	return epsg
+}
+
+// reprojectToSRS 内部投影转换实现
+func (gl *GDALLayer) reprojectToSRS(dstSRS C.OGRSpatialReferenceH, suffix string) (*GDALLayer, error) {
+	srcSRS := gl.GetSpatialRef()
+	transform := C.OCTNewCoordinateTransformation(srcSRS, dstSRS)
+	if transform == nil {
+		C.OSRDestroySpatialReference(dstSRS)
+		return nil, fmt.Errorf("创建坐标转换器失败")
+	}
+	defer C.OCTDestroyCoordinateTransformation(transform)
+
+	srcDefn := gl.GetLayerDefn()
+	geomType := C.OGR_FD_GetGeomType(srcDefn)
+
+	layerName := fmt.Sprintf("%s_%s", gl.GetLayerName(), suffix)
+	cLayerName := C.CString(layerName)
+	defer C.free(unsafe.Pointer(cLayerName))
+
+	newLayer := C.createMemoryLayer(cLayerName, geomType, dstSRS)
+	if newLayer == nil {
+		C.OSRDestroySpatialReference(dstSRS)
+		return nil, fmt.Errorf("创建内存图层失败")
+	}
+
+	resultLayer := &GDALLayer{layer: newLayer}
+
+	if err := CopyFieldDefinitions(gl, resultLayer); err != nil {
+		C.OSRDestroySpatialReference(dstSRS)
+		return nil, err
+	}
+
+	dstDefn := resultLayer.GetLayerDefn()
+
+	gl.ResetReading()
+	for {
+		srcFeature := gl.GetNextFeatureRow()
+		if srcFeature == nil {
+			break
+		}
+
+		dstFeature := C.OGR_F_Create(dstDefn)
+		if dstFeature != nil {
+			copyFeatureAttributes(srcFeature, dstFeature, srcDefn, dstDefn)
+
+			srcGeom := C.OGR_F_GetGeometryRef(srcFeature)
+			if srcGeom != nil {
+				dstGeom := C.OGR_G_Clone(srcGeom)
+				if dstGeom != nil {
+					if C.OGR_G_Transform(dstGeom, transform) == C.OGRERR_NONE {
+						C.OGR_F_SetGeometryDirectly(dstFeature, dstGeom)
+					} else {
+						C.OGR_G_DestroyGeometry(dstGeom)
+					}
+				}
+			}
+			C.OGR_L_CreateFeature(newLayer, dstFeature)
+			C.OGR_F_Destroy(dstFeature)
+		}
+		C.OGR_F_Destroy(srcFeature)
+	}
+
+	gl.ResetReading()
+	return resultLayer, nil
+}

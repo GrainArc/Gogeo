@@ -108,16 +108,16 @@ func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 		activeDS = dataset
 		warpedDS = nil
 
-		// 如果没有地理信息，创建默认的地理变换
 		if !hasGeoInfo {
-			// 创建像素坐标系的地理变换 (0,0) 到 (width, height)
-			geoTransform[0] = 0.0 // 左上角X坐标
-			geoTransform[1] = 1.0 // X方向像素分辨率
-			geoTransform[2] = 0.0 // 旋转参数
-			geoTransform[3] = 0.0 // 左上角Y坐标
-			geoTransform[4] = 0.0 // 旋转参数
-			geoTransform[5] = 1.0 //
+			// 像素坐标系：左上角(0,0)，Y轴向下
+			geoTransform[0] = 0.0              // 左上角X = 0
+			geoTransform[1] = 1.0              // 像素宽度 = 1
+			geoTransform[2] = 0.0              // 无旋转
+			geoTransform[3] = C.double(height) // 左上角Y = height
+			geoTransform[4] = 0.0              // 无旋转
+			geoTransform[5] = -1.0             // 像素高度 = -1（Y轴向下）
 		}
+
 	}
 
 	// 计算边界
