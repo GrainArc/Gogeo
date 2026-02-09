@@ -152,6 +152,76 @@ func OpenRasterDataset(imagePath string, reProj bool) (*RasterDataset, error) {
 	return rd, nil
 }
 
+// GetEPSGCode 获取栅格数据的EPSG代码
+// 如果无法获取或没有投影信息，返回0
+func (rd *RasterDataset) GetEPSGCode() int {
+	if rd == nil {
+		return 0
+	}
+
+	activeDS := rd.GetActiveDataset()
+	if activeDS == nil {
+		return 0
+	}
+
+	// 如果没有地理信息，返回0
+	if !rd.hasGeoInfo {
+		return 0
+	}
+
+	// 获取投影信息
+	projRef := C.GDALGetProjectionRef(activeDS)
+	if projRef == nil {
+		return 0
+	}
+
+	wkt := C.GoString(projRef)
+	if wkt == "" || wkt == "PIXEL" {
+		return 0
+	}
+
+	// 创建空间参考对象
+	srs := C.OSRNewSpatialReference(nil)
+	if srs == nil {
+		return 0
+	}
+	defer C.OSRDestroySpatialReference(srs)
+
+	// 从WKT导入
+	cWKT := C.CString(wkt)
+	defer C.free(unsafe.Pointer(cWKT))
+
+	if C.OSRImportFromWkt(srs, &cWKT) != C.OGRERR_NONE {
+		return 0
+	}
+
+	// 尝试获取EPSG代码
+	// 首先尝试从AUTHORITY获取
+	authName := C.OSRGetAuthorityName(srs, nil)
+	if authName != nil && C.GoString(authName) == "EPSG" {
+		authCode := C.OSRGetAuthorityCode(srs, nil)
+		if authCode != nil {
+			var epsg int
+			if _, err := fmt.Sscanf(C.GoString(authCode), "%d", &epsg); err == nil {
+				return epsg
+			}
+		}
+	}
+
+	// 尝试自动识别EPSG
+	if C.OSRAutoIdentifyEPSG(srs) == C.OGRERR_NONE {
+		authCode := C.OSRGetAuthorityCode(srs, nil)
+		if authCode != nil {
+			var epsg int
+			if _, err := fmt.Sscanf(C.GoString(authCode), "%d", &epsg); err == nil {
+				return epsg
+			}
+		}
+	}
+
+	return 0
+}
+
 // Close 关闭数据集
 func (rd *RasterDataset) Close() {
 	if rd.warpedDS != nil {
