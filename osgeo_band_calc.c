@@ -1090,3 +1090,173 @@ double* calculateEVI(GDALDatasetH hDS, int nirBand, int redBand, int blueBand, i
 void freeBandCalcResult(double* ptr) {
     if (ptr) CPLFree(ptr);
 }
+
+// ==================== 带条件计算并直接写入 ====================
+int calculateBandExpressionWithConditionAndWrite(
+    GDALDatasetH hDS,
+    const char* expression,
+    const char* condition,
+    double noDataValue,
+    int targetBand,
+    int setNoData)
+{
+    if (hDS == NULL || expression == NULL) {
+        return 0;
+    }
+
+    int width = GDALGetRasterXSize(hDS);
+    int height = GDALGetRasterYSize(hDS);
+    int bandCount = GDALGetRasterCount(hDS);
+    size_t totalPixels = (size_t)width * height;
+
+    // 验证目标波段
+    if (targetBand < 1 || targetBand > bandCount) {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "Invalid target band: %d (valid: 1-%d)", targetBand, bandCount);
+        return 0;
+    }
+
+    // 编译主表达式
+    CompiledExpression* ceExpr = compileExpression(expression);
+    if (ceExpr == NULL) {
+        CPLError(CE_Failure, CPLE_AppDefined,
+                 "Failed to compile expression: %s", expression);
+        return 0;
+    }
+
+    // 编译条件表达式（可选）
+    CompiledExpression* ceCond = NULL;
+    if (condition != NULL && strlen(condition) > 0) {
+        ceCond = compileExpression(condition);
+        if (ceCond == NULL) {
+            CPLError(CE_Failure, CPLE_AppDefined,
+                     "Failed to compile condition: %s", condition);
+            freeCompiledExpression(ceExpr);
+            return 0;
+        }
+    }
+
+    // 收集所有需要的波段索引（去重）
+    int allBands[64];
+    int allBandCount = 0;
+
+    for (int i = 0; i < ceExpr->usedBandCount; i++) {
+        int found = 0;
+        for (int j = 0; j < allBandCount; j++) {
+            if (allBands[j] == ceExpr->usedBands[i]) { found = 1; break; }
+        }
+        if (!found && allBandCount < 64) {
+            allBands[allBandCount++] = ceExpr->usedBands[i];
+        }
+    }
+    if (ceCond) {
+        for (int i = 0; i < ceCond->usedBandCount; i++) {
+            int found = 0;
+            for (int j = 0; j < allBandCount; j++) {
+                if (allBands[j] == ceCond->usedBands[i]) { found = 1; break; }
+            }
+            if (!found && allBandCount < 64) {
+                allBands[allBandCount++] = ceCond->usedBands[i];
+            }
+        }
+    }
+
+    // 验证所有波段索引
+    int maxBandIdx = 0;
+    for (int i = 0; i < allBandCount; i++) {
+        if (allBands[i] < 1 || allBands[i] > bandCount) {
+            CPLError(CE_Failure, CPLE_AppDefined,
+                     "Invalid band index: %d (valid: 1-%d)", allBands[i], bandCount);
+            freeCompiledExpression(ceExpr);
+            if (ceCond) freeCompiledExpression(ceCond);
+            return 0;
+        }
+        if (allBands[i] > maxBandIdx) maxBandIdx = allBands[i];
+    }
+
+    // 分配波段数据缓存
+    double** bandData = (double**)CPLCalloc(maxBandIdx + 1, sizeof(double*));
+    if (bandData == NULL) {
+        freeCompiledExpression(ceExpr);
+        if (ceCond) freeCompiledExpression(ceCond);
+        return 0;
+    }
+
+    // 读取所有需要的波段
+    for (int i = 0; i < allBandCount; i++) {
+        int bandIdx = allBands[i];
+        bandData[bandIdx] = (double*)CPLMalloc(totalPixels * sizeof(double));
+        if (bandData[bandIdx] == NULL) {
+            goto cleanup_fail;
+        }
+
+        GDALRasterBandH hBand = GDALGetRasterBand(hDS, bandIdx);
+        if (hBand == NULL) {
+            goto cleanup_fail;
+        }
+
+        CPLErr err = GDALRasterIO(hBand, GF_Read, 0, 0, width, height,
+                                   bandData[bandIdx], width, height,
+                                   GDT_Float64, 0, 0);
+        if (err != CE_None) {
+            goto cleanup_fail;
+        }
+    }
+
+    // 分配结果缓冲区
+    double* result = (double*)CPLMalloc(totalPixels * sizeof(double));
+    if (result == NULL) {
+        goto cleanup_fail;
+    }
+
+    // 并行计算
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (size_t i = 0; i < totalPixels; i++) {
+        if (ceCond) {
+            double condResult = executeCompiledExpr(ceCond, bandData, (int)i);
+            if (condResult == 0.0 || isnan(condResult)) {
+                result[i] = noDataValue;
+                continue;
+            }
+        }
+        result[i] = executeCompiledExpr(ceExpr, bandData, (int)i);
+    }
+
+    // 获取目标波段句柄
+    GDALRasterBandH hTargetBand = GDALGetRasterBand(hDS, targetBand);
+    if (hTargetBand == NULL) {
+        CPLFree(result);
+        goto cleanup_fail;
+    }
+
+    // 设置NoData
+    if (setNoData) {
+        GDALSetRasterNoDataValue(hTargetBand, noDataValue);
+    }
+
+    // 直接写入目标波段
+    CPLErr writeErr = GDALRasterIO(hTargetBand, GF_Write, 0, 0, width, height,
+                result, width, height, GDT_Float64, 0, 0);
+
+    // 清理
+    CPLFree(result);
+    for (int j = 0; j <= maxBandIdx; j++) {
+        if (bandData[j]) CPLFree(bandData[j]);
+    }
+    CPLFree(bandData);
+    freeCompiledExpression(ceExpr);
+    if (ceCond) freeCompiledExpression(ceCond);
+
+    return (writeErr == CE_None) ? 1 : 0;
+
+cleanup_fail:
+    for (int j = 0; j <= maxBandIdx; j++) {
+        if (bandData[j]) CPLFree(bandData[j]);
+    }
+    CPLFree(bandData);
+    freeCompiledExpression(ceExpr);
+    if (ceCond) freeCompiledExpression(ceCond);
+    return 0;
+}

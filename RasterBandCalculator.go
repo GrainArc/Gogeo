@@ -189,6 +189,63 @@ func (bc *BandCalculator) CalculateAndWrite(expression string, targetBand int) e
 	return bc.rd.WriteBandData(targetBand, result)
 }
 
+// CalculateWithConditionAndWrite 带条件计算并直接写入目标波段（零拷贝，C层直接完成）
+// expression: 计算表达式，如 "(b1-b2)/(b1+b2)"
+// condition:  条件表达式，如 "b1+b2 > 0"（空字符串表示无条件）
+// noDataValue: 不满足条件时的填充值
+// targetBand:  写入的目标波段（1-based）
+// setNoData:   是否将noDataValue设置为该波段的NoData元数据
+func (bc *BandCalculator) CalculateWithConditionAndWrite(
+	expression, condition string,
+	noDataValue float64,
+	targetBand int,
+	setNoData bool,
+) error {
+	if err := bc.rd.ensureMemoryCopy(); err != nil {
+		return err
+	}
+	activeDS := bc.rd.GetActiveDataset()
+	if activeDS == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	// 验证目标波段
+	bandCount := bc.rd.GetBandCount()
+	if targetBand < 1 || targetBand > bandCount {
+		return fmt.Errorf("invalid target band: %d (valid: 1-%d)", targetBand, bandCount)
+	}
+
+	cExpr := C.CString(expression)
+	defer C.free(unsafe.Pointer(cExpr))
+
+	var cCond *C.char
+	if condition != "" {
+		cCond = C.CString(condition)
+		defer C.free(unsafe.Pointer(cCond))
+	}
+
+	cSetNoData := C.int(0)
+	if setNoData {
+		cSetNoData = C.int(1)
+	}
+
+	ret := C.calculateBandExpressionWithConditionAndWrite(
+		activeDS,
+		cExpr,
+		cCond,
+		C.double(noDataValue),
+		C.int(targetBand),
+		cSetNoData,
+	)
+
+	if ret == 0 {
+		return fmt.Errorf("failed to calculate and write: expr=%q, cond=%q, band=%d",
+			expression, condition, targetBand)
+	}
+
+	return nil
+}
+
 // ==================== 预定义指数计算 ====================
 
 // CalculateNDVI 计算归一化植被指数 (NIR - Red) / (NIR + Red)

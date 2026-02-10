@@ -44,6 +44,15 @@ double* calculateNDVI(GDALDatasetH hDS, int nirBand, int redBand, int* outSize);
 double* calculateNDWI(GDALDatasetH hDS, int greenBand, int nirBand, int* outSize);
 double* calculateEVI(GDALDatasetH hDS, int nirBand, int redBand, int blueBand, int* outSize);
 void freeBandCalcResult(double* ptr);
+// 带条件计算并直接写入目标波段（零拷贝）
+int calculateBandExpressionWithConditionAndWrite(
+    GDALDatasetH hDS,
+    const char* expression,
+    const char* condition,
+    double noDataValue,
+    int targetBand,
+    int setNoData
+);
 #ifdef __cplusplus
 }
 #endif
