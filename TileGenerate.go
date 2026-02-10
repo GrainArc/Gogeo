@@ -916,10 +916,6 @@ func NewOptimizedTileProcessor(sourceLayer *GDALLayer, tiles []*TileInfo, config
 
 // GroupAndExportByTiles 使用优化的方法按瓦片分组并导出为bin文件
 func (p *OptimizedTileProcessor) GroupAndExportByTiles(outputDir string) ([]*TileClipResultM, error) {
-	// 创建输出目录
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create output directory: %v", err)
-	}
 
 	// 准备C函数参数
 	tileCount := len(p.tiles)
@@ -1009,7 +1005,7 @@ func ClipAndSerializeLayerByTilesOptimized(layer *GDALLayer, tiles []*TileInfo, 
 	defer processor.Cleanup()
 
 	// 输出目录
-	outputDir := uuid
+	outputDir, _ := getWorkDirectory(uuid)
 
 	// 直接执行优化的处理流程（内部进行一次性裁剪和分组）
 	results, err := processor.GroupAndExportByTiles(outputDir)
@@ -1180,8 +1176,14 @@ type GroupBin struct {
 
 // ReadAndGroupBinFiles 读取layer1和layer2文件夹中的bin文件并按文件名分组
 func ReadAndGroupBinFiles(uuid string) ([]GroupTileFiles, error) {
-	layer1Dir := uuid + "/layer1"
-	layer2Dir := uuid + "/layer2"
+	// 使用与GenerateTilesFromPG一致的规范目录
+	workDir, err := getWorkDirectory(uuid)
+	if err != nil {
+		return nil, fmt.Errorf("获取工作目录失败: %v", err)
+	}
+
+	layer1Dir := filepath.Join(workDir, "layer1")
+	layer2Dir := filepath.Join(workDir, "layer2")
 	layer1Map := readBinFilesMap(layer1Dir)
 	layer2Map := readBinFilesMap(layer2Dir)
 
@@ -1194,11 +1196,9 @@ func ReadAndGroupBinFiles(uuid string) ([]GroupTileFiles, error) {
 		indexMap[idx] = true
 	}
 
-	var result []GroupTileFiles
-	count := 0
+	result := make([]GroupTileFiles, 0, len(indexMap))
 
 	for index := range indexMap {
-
 		result = append(result, GroupTileFiles{
 			Index: index,
 			GPBin: GroupBin{
@@ -1206,7 +1206,6 @@ func ReadAndGroupBinFiles(uuid string) ([]GroupTileFiles, error) {
 				Layer2: layer2Map[index],
 			},
 		})
-		count++
 	}
 
 	return result, nil
@@ -2064,5 +2063,14 @@ func IsValidBinFile(filePath string) bool {
 
 // CleanupTileFiles 清理临时瓦片文件
 func CleanupTileFiles(taskid string) error {
-	return os.RemoveAll(taskid)
+	workDir, wdErr := getWorkDirectory(taskid)
+	if wdErr != nil {
+		log.Printf("获取清理目录失败: %v", wdErr)
+		return wdErr
+	}
+	if err := os.RemoveAll(workDir); err != nil {
+		log.Printf("清理临时文件失败: %v", err)
+		return err
+	}
+	return nil
 }
