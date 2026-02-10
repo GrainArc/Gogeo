@@ -1090,7 +1090,6 @@ double* calculateEVI(GDALDatasetH hDS, int nirBand, int redBand, int blueBand, i
 void freeBandCalcResult(double* ptr) {
     if (ptr) CPLFree(ptr);
 }
-
 // ==================== 带条件计算并直接写入 ====================
 int calculateBandExpressionWithConditionAndWrite(
     GDALDatasetH hDS,
@@ -1100,49 +1099,60 @@ int calculateBandExpressionWithConditionAndWrite(
     int targetBand,
     int setNoData)
 {
+    int retCode = 0;
+    int width, height, bandCount;
+    size_t totalPixels;
+    CompiledExpression* ceExpr = NULL;
+    CompiledExpression* ceCond = NULL;
+    double** bandData = NULL;
+    double* result = NULL;
+    int allBands[64];
+    int allBandCount = 0;
+    int maxBandIdx = 0;
+    int i, j;
+
     if (hDS == NULL || expression == NULL) {
         return 0;
     }
 
-    int width = GDALGetRasterXSize(hDS);
-    int height = GDALGetRasterYSize(hDS);
-    int bandCount = GDALGetRasterCount(hDS);
-    size_t totalPixels = (size_t)width * height;
+    width = GDALGetRasterXSize(hDS);
+    height = GDALGetRasterYSize(hDS);
+    bandCount = GDALGetRasterCount(hDS);
+    totalPixels = (size_t)width * height;
 
-    // 验证目标波段
+    if (totalPixels == 0) {
+        return 0;
+    }
+
+    /* 验证目标波段 */
     if (targetBand < 1 || targetBand > bandCount) {
         CPLError(CE_Failure, CPLE_AppDefined,
                  "Invalid target band: %d (valid: 1-%d)", targetBand, bandCount);
         return 0;
     }
 
-    // 编译主表达式
-    CompiledExpression* ceExpr = compileExpression(expression);
+    /* 编译主表达式 */
+    ceExpr = compileExpression(expression);
     if (ceExpr == NULL) {
         CPLError(CE_Failure, CPLE_AppDefined,
                  "Failed to compile expression: %s", expression);
         return 0;
     }
 
-    // 编译条件表达式（可选）
-    CompiledExpression* ceCond = NULL;
+    /* 编译条件表达式（可选） */
     if (condition != NULL && strlen(condition) > 0) {
         ceCond = compileExpression(condition);
         if (ceCond == NULL) {
             CPLError(CE_Failure, CPLE_AppDefined,
                      "Failed to compile condition: %s", condition);
-            freeCompiledExpression(ceExpr);
-            return 0;
+            goto cleanup;
         }
     }
 
-    // 收集所有需要的波段索引（去重）
-    int allBands[64];
-    int allBandCount = 0;
-
-    for (int i = 0; i < ceExpr->usedBandCount; i++) {
+    /* 收集所有需要的波段索引（去重） */
+    for (i = 0; i < ceExpr->usedBandCount; i++) {
         int found = 0;
-        for (int j = 0; j < allBandCount; j++) {
+        for (j = 0; j < allBandCount; j++) {
             if (allBands[j] == ceExpr->usedBands[i]) { found = 1; break; }
         }
         if (!found && allBandCount < 64) {
@@ -1150,9 +1160,9 @@ int calculateBandExpressionWithConditionAndWrite(
         }
     }
     if (ceCond) {
-        for (int i = 0; i < ceCond->usedBandCount; i++) {
+        for (i = 0; i < ceCond->usedBandCount; i++) {
             int found = 0;
-            for (int j = 0; j < allBandCount; j++) {
+            for (j = 0; j < allBandCount; j++) {
                 if (allBands[j] == ceCond->usedBands[i]) { found = 1; break; }
             }
             if (!found && allBandCount < 64) {
@@ -1161,102 +1171,115 @@ int calculateBandExpressionWithConditionAndWrite(
         }
     }
 
-    // 验证所有波段索引
-    int maxBandIdx = 0;
-    for (int i = 0; i < allBandCount; i++) {
+    /* 验证所有波段索引并找最大索引 */
+    for (i = 0; i < allBandCount; i++) {
         if (allBands[i] < 1 || allBands[i] > bandCount) {
             CPLError(CE_Failure, CPLE_AppDefined,
                      "Invalid band index: %d (valid: 1-%d)", allBands[i], bandCount);
-            freeCompiledExpression(ceExpr);
-            if (ceCond) freeCompiledExpression(ceCond);
-            return 0;
+            goto cleanup;
         }
         if (allBands[i] > maxBandIdx) maxBandIdx = allBands[i];
     }
 
-    // 分配波段数据缓存
-    double** bandData = (double**)CPLCalloc(maxBandIdx + 1, sizeof(double*));
-    if (bandData == NULL) {
-        freeCompiledExpression(ceExpr);
-        if (ceCond) freeCompiledExpression(ceCond);
-        return 0;
+    if (maxBandIdx == 0) {
+        CPLError(CE_Failure, CPLE_AppDefined, "No valid bands referenced in expression");
+        goto cleanup;
     }
 
-    // 读取所有需要的波段
-    for (int i = 0; i < allBandCount; i++) {
+    /* 分配波段指针数组（maxBandIdx+1 个槽位，全部初始化为 NULL） */
+    bandData = (double**)CPLCalloc((size_t)(maxBandIdx + 1), sizeof(double*));
+    if (bandData == NULL) {
+        goto cleanup;
+    }
+
+    /* 读取所有需要的波段 */
+    for (i = 0; i < allBandCount; i++) {
         int bandIdx = allBands[i];
+        GDALRasterBandH hBand;
+        CPLErr err;
+
         bandData[bandIdx] = (double*)CPLMalloc(totalPixels * sizeof(double));
         if (bandData[bandIdx] == NULL) {
-            goto cleanup_fail;
+            goto cleanup;
         }
 
-        GDALRasterBandH hBand = GDALGetRasterBand(hDS, bandIdx);
+        hBand = GDALGetRasterBand(hDS, bandIdx);
         if (hBand == NULL) {
-            goto cleanup_fail;
+            goto cleanup;
         }
 
-        CPLErr err = GDALRasterIO(hBand, GF_Read, 0, 0, width, height,
-                                   bandData[bandIdx], width, height,
-                                   GDT_Float64, 0, 0);
+        err = GDALRasterIO(hBand, GF_Read, 0, 0, width, height,
+                            bandData[bandIdx], width, height,
+                            GDT_Float64, 0, 0);
         if (err != CE_None) {
-            goto cleanup_fail;
+            goto cleanup;
         }
     }
 
-    // 分配结果缓冲区
-    double* result = (double*)CPLMalloc(totalPixels * sizeof(double));
+    /* 分配结果缓冲区 */
+    result = (double*)CPLMalloc(totalPixels * sizeof(double));
     if (result == NULL) {
-        goto cleanup_fail;
+        goto cleanup;
     }
 
-    // 并行计算
+    /* 并行计算 */
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
 #endif
-    for (size_t i = 0; i < totalPixels; i++) {
+    for (i = 0; i < (int)totalPixels; i++) {
         if (ceCond) {
-            double condResult = executeCompiledExpr(ceCond, bandData, (int)i);
+            double condResult = executeCompiledExpr(ceCond, bandData, i);
             if (condResult == 0.0 || isnan(condResult)) {
                 result[i] = noDataValue;
                 continue;
             }
         }
-        result[i] = executeCompiledExpr(ceExpr, bandData, (int)i);
+        result[i] = executeCompiledExpr(ceExpr, bandData, i);
     }
 
-    // 获取目标波段句柄
-    GDALRasterBandH hTargetBand = GDALGetRasterBand(hDS, targetBand);
-    if (hTargetBand == NULL) {
+    /* 写入目标波段 */
+    {
+        GDALRasterBandH hTargetBand = GDALGetRasterBand(hDS, targetBand);
+        CPLErr writeErr;
+
+        if (hTargetBand == NULL) {
+            goto cleanup;
+        }
+
+        if (setNoData) {
+            GDALSetRasterNoDataValue(hTargetBand, noDataValue);
+        }
+
+        writeErr = GDALRasterIO(hTargetBand, GF_Write, 0, 0, width, height,result, width, height, GDT_Float64, 0, 0);
+        if (writeErr == CE_None) {
+            retCode = 1;
+        }
+    }
+
+cleanup:
+    /* 统一清理：每个指针只释放一次，NULL 安全 */
+    if (result) {
         CPLFree(result);
-        goto cleanup_fail;
+        result = NULL;
+    }
+    if (bandData) {
+        for (j = 0; j <= maxBandIdx; j++) {
+            if (bandData[j]) {
+                CPLFree(bandData[j]);
+                bandData[j] = NULL;
+            }
+        }
+        CPLFree(bandData);
+        bandData = NULL;
+    }
+    if (ceExpr) {
+        freeCompiledExpression(ceExpr);
+        ceExpr = NULL;
+    }
+    if (ceCond) {
+        freeCompiledExpression(ceCond);
+        ceCond = NULL;
     }
 
-    // 设置NoData
-    if (setNoData) {
-        GDALSetRasterNoDataValue(hTargetBand, noDataValue);
-    }
-
-    // 直接写入目标波段
-    CPLErr writeErr = GDALRasterIO(hTargetBand, GF_Write, 0, 0, width, height,
-                result, width, height, GDT_Float64, 0, 0);
-
-    // 清理
-    CPLFree(result);
-    for (int j = 0; j <= maxBandIdx; j++) {
-        if (bandData[j]) CPLFree(bandData[j]);
-    }
-    CPLFree(bandData);
-    freeCompiledExpression(ceExpr);
-    if (ceCond) freeCompiledExpression(ceCond);
-
-    return (writeErr == CE_None) ? 1 : 0;
-
-cleanup_fail:
-    for (int j = 0; j <= maxBandIdx; j++) {
-        if (bandData[j]) CPLFree(bandData[j]);
-    }
-    CPLFree(bandData);
-    freeCompiledExpression(ceExpr);
-    if (ceCond) freeCompiledExpression(ceCond);
-    return 0;
+    return retCode;
 }

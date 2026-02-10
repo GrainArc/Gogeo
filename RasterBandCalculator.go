@@ -539,7 +539,9 @@ func (bc *BandCalculator) ValidateExpression(expression string) error {
 	return nil
 }
 
-// CreateSingleBandDataset 从计算结果创建单波段数据集
+// RasterBandCalculator.go - 优化部分
+
+// CreateSingleBandDataset 从计算结果创建单波段内存数据集
 func (rd *RasterDataset) CreateSingleBandDataset(data []float64, dataType BandDataType) (*RasterDataset, error) {
 	width := rd.GetWidth()
 	height := rd.GetHeight()
@@ -547,6 +549,11 @@ func (rd *RasterDataset) CreateSingleBandDataset(data []float64, dataType BandDa
 
 	if len(data) != expectedSize {
 		return nil, fmt.Errorf("data size mismatch: got %d, expected %d", len(data), expectedSize)
+	}
+
+	activeDS := rd.GetActiveDataset()
+	if activeDS == nil {
+		return nil, fmt.Errorf("source dataset is nil")
 	}
 
 	// 获取MEM驱动
@@ -557,21 +564,19 @@ func (rd *RasterDataset) CreateSingleBandDataset(data []float64, dataType BandDa
 		return nil, fmt.Errorf("failed to get MEM driver")
 	}
 
-	// 创建内存数据集
+	// ★ 关键修复1：MEM驱动的文件名可以为空字符串，但必须有效
 	cEmpty := C.CString("")
 	defer C.free(unsafe.Pointer(cEmpty))
-	newDS := C.GDALCreate(driver, cEmpty, C.int(width), C.int(height), 1, C.GDALDataType(dataType), nil)
+
+	// ★ 关键修复2：统一用 GDT_Float64 创建，避免类型不匹配
+	newDS := C.GDALCreate(driver, cEmpty, C.int(width), C.int(height), 1,
+		C.GDT_Float64, nil)
 	if newDS == nil {
-		return nil, fmt.Errorf("failed to create dataset")
+		return nil, fmt.Errorf("failed to create MEM dataset")
 	}
 
 	// 复制地理变换
 	var geoTransform [6]C.double
-	activeDS := rd.dataset
-	if rd.warpedDS != nil {
-		activeDS = rd.warpedDS
-	}
-
 	hasGeoInfo := false
 	if C.GDALGetGeoTransform(activeDS, &geoTransform[0]) == C.CE_None {
 		C.GDALSetGeoTransform(newDS, &geoTransform[0])
@@ -579,48 +584,57 @@ func (rd *RasterDataset) CreateSingleBandDataset(data []float64, dataType BandDa
 	}
 
 	// 复制投影
-	proj := C.GDALGetProjectionRef(activeDS)
 	projection := ""
+	proj := C.GDALGetProjectionRef(activeDS)
 	if proj != nil {
 		projection = C.GoString(proj)
 		if projection != "" {
 			cProj := C.CString(projection)
-			defer C.free(unsafe.Pointer(cProj))
 			C.GDALSetProjection(newDS, cProj)
+			C.free(unsafe.Pointer(cProj))
 		}
 	}
 
-	// 获取波段并写入数据
+	// 获取波段
 	band := C.GDALGetRasterBand(newDS, 1)
 	if band == nil {
 		C.GDALClose(newDS)
-		return nil, fmt.Errorf("failed to get raster band")
+		return nil, fmt.Errorf("failed to get raster band from new dataset")
 	}
 
-	// 转换数据
-	cData := make([]C.double, len(data))
+	// ★ 关键修复3：直接用 C 内存写入，避免 Go slice -> C 的二次拷贝问题
+	cData := (*C.double)(C.malloc(C.size_t(len(data)) * C.size_t(unsafe.Sizeof(C.double(0)))))
+	if cData == nil {
+		C.GDALClose(newDS)
+		return nil, fmt.Errorf("failed to allocate C memory for write buffer")
+	}
+	defer C.free(unsafe.Pointer(cData))
+
+	cSlice := unsafe.Slice((*C.double)(cData), len(data))
 	for i, v := range data {
-		cData[i] = C.double(v)
+		cSlice[i] = C.double(v)
 	}
 
 	// 写入数据
 	err := C.GDALRasterIO(band, C.GF_Write, 0, 0, C.int(width), C.int(height),
-		unsafe.Pointer(&cData[0]), C.int(width), C.int(height), C.GDT_Float64, 0, 0)
+		unsafe.Pointer(cData), C.int(width), C.int(height), C.GDT_Float64, 0, 0)
 	if err != C.CE_None {
 		C.GDALClose(newDS)
-		return nil, fmt.Errorf("failed to write raster data")
+		return nil, fmt.Errorf("GDALRasterIO write failed with error code: %d", int(err))
 	}
+
+	// ★ 关键修复4：刷新缓存确保数据写入
+	C.GDALFlushCache(newDS)
 
 	// 计算bounds
 	var bounds [4]float64
 	if hasGeoInfo {
-		bounds[0] = float64(geoTransform[0])                                            // minX
-		bounds[1] = float64(geoTransform[3]) + float64(height)*float64(geoTransform[5]) // minY
-		bounds[2] = float64(geoTransform[0]) + float64(width)*float64(geoTransform[1])  // maxX
-		bounds[3] = float64(geoTransform[3])                                            // maxY
+		bounds[0] = float64(geoTransform[0])
+		bounds[1] = float64(geoTransform[3]) + float64(height)*float64(geoTransform[5])
+		bounds[2] = float64(geoTransform[0]) + float64(width)*float64(geoTransform[1])
+		bounds[3] = float64(geoTransform[3])
 	}
 
-	// 创建新的 RasterDataset
 	newRD := &RasterDataset{
 		dataset:       newDS,
 		warpedDS:      nil,
@@ -635,4 +649,88 @@ func (rd *RasterDataset) CreateSingleBandDataset(data []float64, dataType BandDa
 	}
 
 	return newRD, nil
+}
+
+// SaveAsGeoTIFF 快捷方法：导出为GeoTIFF
+// compress: 压缩方式 "LZW", "DEFLATE", "ZSTD", "NONE" 等
+func (rd *RasterDataset) SaveAsGeoTIFF(filePath string, compress string) error {
+	opts := []string{}
+	if compress != "" && compress != "NONE" {
+		opts = append(opts, "COMPRESS="+compress)
+		opts = append(opts, "TILED=YES")
+		opts = append(opts, "BLOCKXSIZE=256")
+		opts = append(opts, "BLOCKYSIZE=256")
+	}
+	return rd.SaveToFile(filePath, "GTiff", opts)
+}
+
+// CalculateAndSave 计算表达式并直接保存为文件（一步到位）
+func (bc *BandCalculator) CalculateAndSave(expression string, filePath string, compress string) error {
+	data, err := bc.Calculate(expression)
+	if err != nil {
+		return fmt.Errorf("calculation failed: %w", err)
+	}
+
+	newDS, err := bc.rd.CreateSingleBandDataset(data, BandDataType(C.GDT_Float64))
+	if err != nil {
+		return fmt.Errorf("create dataset failed: %w", err)
+	}
+	defer newDS.Close()
+
+	return newDS.SaveAsGeoTIFF(filePath, compress)
+}
+
+// CalculateWithConditionAndSave 带条件计算并直接保存
+func (bc *BandCalculator) CalculateWithConditionAndSave(
+	expression, condition string,
+	noDataValue float64,
+	filePath string,
+	compress string,
+) error {
+	data, err := bc.CalculateWithCondition(expression, condition, noDataValue)
+	if err != nil {
+		return fmt.Errorf("calculation failed: %w", err)
+	}
+
+	newDS, err := bc.rd.CreateSingleBandDataset(data, BandDataType(C.GDT_Float64))
+	if err != nil {
+		return fmt.Errorf("create dataset failed: %w", err)
+	}
+	defer newDS.Close()
+
+	// 设置NoData
+	activeDSPtr := newDS.GetActiveDataset()
+	if activeDSPtr != nil {
+		band := C.GDALGetRasterBand(activeDSPtr, 1)
+		if band != nil {
+			C.GDALSetRasterNoDataValue(band, C.double(noDataValue))
+		}
+	}
+
+	return newDS.SaveAsGeoTIFF(filePath, compress)
+}
+
+// CalculateNDVIAndSave NDVI计算并直接保存
+func (bc *BandCalculator) CalculateNDVIAndSave(nirBand, redBand int, filePath string, compress string) error {
+	data, err := bc.CalculateNDVI(nirBand, redBand)
+	if err != nil {
+		return err
+	}
+
+	newDS, err := bc.rd.CreateSingleBandDataset(data, BandDataType(C.GDT_Float64))
+	if err != nil {
+		return err
+	}
+	defer newDS.Close()
+
+	// NDVI 设置 NoData = NaN
+	activeDSPtr := newDS.GetActiveDataset()
+	if activeDSPtr != nil {
+		band := C.GDALGetRasterBand(activeDSPtr, 1)
+		if band != nil {
+			C.GDALSetRasterNoDataValue(band, C.double(math.NaN()))
+		}
+	}
+
+	return newDS.SaveAsGeoTIFF(filePath, compress)
 }
