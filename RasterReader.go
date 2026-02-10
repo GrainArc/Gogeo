@@ -46,9 +46,13 @@ func (rd *RasterDataset) GetActiveDataset() C.GDALDatasetH {
 	if rd == nil {
 		return nil
 	}
-	// 优先返回 warpedDS（内存副本）
+	// 优先返回 warpedDS（重投影副本）
 	if rd.warpedDS != nil {
 		return rd.warpedDS
+	}
+	// dataset 可能已被 Close，需要检查
+	if rd.dataset == nil {
+		return nil
 	}
 	return rd.dataset
 }
@@ -224,15 +228,31 @@ func (rd *RasterDataset) GetEPSGCode() int {
 
 // Close 关闭数据集
 func (rd *RasterDataset) Close() {
+	if rd == nil {
+		return
+	}
+
+	// 清除 finalizer，防止重复调用
+	runtime.SetFinalizer(rd, nil)
+
+	// 先关闭 warpedDS（如果存在且与 dataset 不同）
 	if rd.warpedDS != nil {
 		C.GDALClose(rd.warpedDS)
 		rd.warpedDS = nil
 	}
+
+	// 关闭主数据集
 	if rd.dataset != nil {
 		C.GDALClose(rd.dataset)
 		rd.dataset = nil
 	}
+
+	// 清零所有字段，防止悬挂引用
+	rd.width = 0
+	rd.height = 0
+	rd.bandCount = 0
 }
+
 func (rd *RasterDataset) ensureMemoryCopy() error {
 	// 已经有内存副本
 	if rd.warpedDS != nil {

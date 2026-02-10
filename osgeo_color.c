@@ -314,7 +314,8 @@ double* calculateCumulativeHistogram(int* histogram, int size) {
 
 // ==================== 调色函数实现 ====================
 
-// 基础调色
+// osgeo_color.c - 修复版 adjustColors
+
 GDALDatasetH adjustColors(GDALDatasetH hDS, ColorAdjustParams* params) {
     if (!hDS || !params) return NULL;
 
@@ -322,13 +323,14 @@ GDALDatasetH adjustColors(GDALDatasetH hDS, ColorAdjustParams* params) {
     int height = GDALGetRasterYSize(hDS);
     int bandCount = GDALGetRasterCount(hDS);
 
+    // ✅ 修复1：验证数据集有效性
+    if (width <= 0 || height <= 0 || bandCount <= 0) return NULL;
+
     // 创建输出数据集
     GDALDriverH memDriver = GDALGetDriverByName("MEM");
+    if (!memDriver) return NULL;
     GDALDatasetH outDS = GDALCreate(memDriver, "", width, height, bandCount, GDT_Byte, NULL);
     if (!outDS) return NULL;
-
-    // 复制地理信息
-// osgeo_color.c (续)
 
     // 复制地理信息
     double geoTransform[6];
@@ -336,17 +338,17 @@ GDALDatasetH adjustColors(GDALDatasetH hDS, ColorAdjustParams* params) {
         GDALSetGeoTransform(outDS, geoTransform);
     }
     const char* proj = GDALGetProjectionRef(hDS);
-    if (proj && strlen(proj) > 0) {
+    if (proj && proj[0] != '\0') {  // ✅ 修复2：避免对空字符串调用 strlen
         GDALSetProjection(outDS, proj);
     }
 
-    // 处理需要至少3个波段的RGB操作
-    int hasRGB = (bandCount >= 3);
+    // ✅ 修复3：使用 long long 防止大图像溢出
+    long long pixelCount = (long long)width * height;
 
     // 分配缓冲区
-    unsigned char* rBuf = (unsigned char*)malloc(width * height);
-    unsigned char* gBuf = (unsigned char*)malloc(width * height);
-    unsigned char* bBuf = (unsigned char*)malloc(width * height);
+    unsigned char* rBuf = (unsigned char*)malloc(pixelCount);
+    unsigned char* gBuf = (unsigned char*)malloc(pixelCount);
+    unsigned char* bBuf = (unsigned char*)malloc(pixelCount);
     unsigned char* aBuf = NULL;
 
     if (!rBuf || !gBuf || !bBuf) {
@@ -357,35 +359,79 @@ GDALDatasetH adjustColors(GDALDatasetH hDS, ColorAdjustParams* params) {
         return NULL;
     }
 
-    if (bandCount >= 4) {
-        aBuf = (unsigned char*)malloc(width * height);
-    }
-
-    // 读取数据
+    // ✅ 修复4：安全读取各波段，验证每个波段句柄
     GDALRasterBandH band1 = GDALGetRasterBand(hDS, 1);
-    GDALRasterBandH band2 = bandCount >= 2 ? GDALGetRasterBand(hDS, 2) : NULL;
-    GDALRasterBandH band3 = bandCount >= 3 ? GDALGetRasterBand(hDS, 3) : NULL;
-    GDALRasterBandH band4 = bandCount >= 4 ? GDALGetRasterBand(hDS, 4) : NULL;
-
-    GDALRasterIO(band1, GF_Read, 0, 0, width, height, rBuf, width, height, GDT_Byte, 0, 0);
-    if (band2) GDALRasterIO(band2, GF_Read, 0, 0, width, height, gBuf, width, height, GDT_Byte, 0, 0);
-    if (band3) GDALRasterIO(band3, GF_Read, 0, 0, width, height, bBuf, width, height, GDT_Byte, 0, 0);
-    if (band4 && aBuf) GDALRasterIO(band4, GF_Read, 0, 0, width, height, aBuf, width, height, GDT_Byte, 0, 0);
-
-    // 如果只有单波段，复制到其他通道
-    if (!hasRGB) {
-        memcpy(gBuf, rBuf, width * height);
-        memcpy(bBuf, rBuf, width * height);
+    if (!band1) {
+        free(rBuf); free(gBuf); free(bBuf);
+        GDALClose(outDS);
+        return NULL;
     }
 
-    // 预计算亮度和对比度参数
+    // 读取第一个波段
+    if (GDALRasterIO(band1, GF_Read, 0, 0, width, height,
+                     rBuf, width, height, GDT_Byte, 0, 0) != CE_None) {
+        free(rBuf); free(gBuf); free(bBuf);
+        GDALClose(outDS);
+        return NULL;
+    }
+
+    // ✅ 修复5：根据实际波段数安全读取
+    int hasRGB = (bandCount >= 3);
+
+    if (bandCount >= 2) {
+        GDALRasterBandH band2 = GDALGetRasterBand(hDS, 2);
+        if (band2) {
+            GDALRasterIO(band2, GF_Read, 0, 0, width, height,gBuf, width, height, GDT_Byte, 0, 0);
+        } else {
+            memcpy(gBuf, rBuf, pixelCount);
+        }
+    } else {
+        memcpy(gBuf, rBuf, pixelCount);
+    }
+
+    if (bandCount >= 3) {
+        GDALRasterBandH band3 = GDALGetRasterBand(hDS, 3);
+        if (band3) {
+            GDALRasterIO(band3, GF_Read, 0, 0, width, height,
+                        bBuf, width, height, GDT_Byte, 0, 0);
+        } else {
+            memcpy(bBuf, rBuf, pixelCount);
+        }
+    } else {
+        memcpy(bBuf, rBuf, pixelCount);
+    }
+
+    if (bandCount >= 4) {
+        aBuf = (unsigned char*)malloc(pixelCount);
+        if (aBuf) {
+            GDALRasterBandH band4 = GDALGetRasterBand(hDS, 4);
+            if (band4) {
+                GDALRasterIO(band4, GF_Read, 0, 0, width, height,
+                            aBuf, width, height, GDT_Byte, 0, 0);
+            }
+        }
+    }
+
+    // 预计算参数
     double brightnessOffset = params->brightness * 255.0;
     double contrastFactor = (params->contrast >= 0) ?
                             (1.0 + params->contrast * 2.0) :
                             (1.0 + params->contrast);
 
+    // ✅ 修复6：预计算 Gamma 查找表，避免逐像素 pow() 调用（性能+安全）
+    unsigned char gammaLUT[256];
+    int useGammaLUT = (params->gamma != 1.0 && params->gamma > 0);
+    if (useGammaLUT) {
+        double invGamma = 1.0 / params->gamma;
+        for (int i = 0; i < 256; i++) {
+            gammaLUT[i] = (unsigned char)clamp(pow(i / 255.0, invGamma) * 255.0, 0, 255);
+        }
+    }
+
+    int needHSL = (params->saturation != 0 || params->hue != 0);
+
     // 处理每个像素
-    for (int i = 0; i < width * height; i++) {
+    for (long long i = 0; i < pixelCount; i++) {
         double r = rBuf[i];
         double g = gBuf[i];
         double b = bBuf[i];
@@ -395,25 +441,23 @@ GDALDatasetH adjustColors(GDALDatasetH hDS, ColorAdjustParams* params) {
         g += brightnessOffset;
         b += brightnessOffset;
 
-        // 2. 对比度调整 (以128为中心)
+        // 2. 对比度调整
         r = (r - 128.0) * contrastFactor + 128.0;
         g = (g - 128.0) * contrastFactor + 128.0;
         b = (b - 128.0) * contrastFactor + 128.0;
 
-        // 3. Gamma校正
-        if (params->gamma != 1.0 && params->gamma > 0) {
-            double invGamma = 1.0 / params->gamma;
-            r = pow(clamp(r, 0, 255) / 255.0, invGamma) * 255.0;
-            g = pow(clamp(g, 0, 255) / 255.0, invGamma) * 255.0;
-            b = pow(clamp(b, 0, 255) / 255.0, invGamma) * 255.0;
+        // 3. Gamma校正（使用查找表）
+        if (useGammaLUT) {
+            r = gammaLUT[(unsigned char)clamp(r, 0, 255)];
+            g = gammaLUT[(unsigned char)clamp(g, 0, 255)];
+            b = gammaLUT[(unsigned char)clamp(b, 0, 255)];
         }
 
-        // 4. 饱和度和色相调整 (转换到HSL空间)
-        if (params->saturation != 0 || params->hue != 0) {
+        // 4. 饱和度和色相调整
+        if (needHSL) {
             double h, s, l;
             rgbToHsl(clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255), &h, &s, &l);
 
-            // 饱和度调整
             if (params->saturation >= 0) {
                 s = s + (1.0 - s) * params->saturation;
             } else {
@@ -421,28 +465,46 @@ GDALDatasetH adjustColors(GDALDatasetH hDS, ColorAdjustParams* params) {
             }
             s = clamp(s, 0, 1);
 
-            // 色相调整
             h = fmod(h + params->hue + 360.0, 360.0);
 
             hslToRgb(h, s, l, &r, &g, &b);
         }
 
-        // 写回结果
         rBuf[i] = (unsigned char)clamp(r, 0, 255);
         gBuf[i] = (unsigned char)clamp(g, 0, 255);
         bBuf[i] = (unsigned char)clamp(b, 0, 255);
     }
 
-    // 写入输出数据集
+    // ✅ 修复7：安全写入，只写实际存在的波段
     GDALRasterBandH outBand1 = GDALGetRasterBand(outDS, 1);
-    GDALRasterBandH outBand2 = bandCount >= 2 ? GDALGetRasterBand(outDS, 2) : NULL;
-    GDALRasterBandH outBand3 = bandCount >= 3 ? GDALGetRasterBand(outDS, 3) : NULL;
-    GDALRasterBandH outBand4 = bandCount >= 4 ? GDALGetRasterBand(outDS, 4) : NULL;
+    if (outBand1) {
+        GDALRasterIO(outBand1, GF_Write, 0, 0, width, height,
+                    rBuf, width, height, GDT_Byte, 0, 0);
+    }
 
-    GDALRasterIO(outBand1, GF_Write, 0, 0, width, height, rBuf, width, height, GDT_Byte, 0, 0);
-    if (outBand2) GDALRasterIO(outBand2, GF_Write, 0, 0, width, height, gBuf, width, height, GDT_Byte, 0, 0);
-    if (outBand3) GDALRasterIO(outBand3, GF_Write, 0, 0, width, height, bBuf, width, height, GDT_Byte, 0, 0);
-    if (outBand4 && aBuf) GDALRasterIO(outBand4, GF_Write, 0, 0, width, height, aBuf, width, height, GDT_Byte, 0, 0);
+    if (bandCount >= 2) {
+        GDALRasterBandH outBand2 = GDALGetRasterBand(outDS, 2);
+        if (outBand2) {
+            GDALRasterIO(outBand2, GF_Write, 0, 0, width, height,
+                        gBuf, width, height, GDT_Byte, 0, 0);
+        }
+    }
+
+    if (bandCount >= 3) {
+        GDALRasterBandH outBand3 = GDALGetRasterBand(outDS, 3);
+        if (outBand3) {
+            GDALRasterIO(outBand3, GF_Write, 0, 0, width, height,
+                        bBuf, width, height, GDT_Byte, 0, 0);
+        }
+    }
+
+    if (bandCount >= 4 && aBuf) {
+        GDALRasterBandH outBand4 = GDALGetRasterBand(outDS, 4);
+        if (outBand4) {
+            GDALRasterIO(outBand4, GF_Write, 0, 0, width, height,
+                        aBuf, width, height, GDT_Byte, 0, 0);
+        }
+    }
 
     // 清理
     free(rBuf);

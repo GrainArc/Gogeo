@@ -9,6 +9,7 @@ import "C"
 
 import (
 	"fmt"
+	"runtime"
 	"unsafe"
 )
 
@@ -92,10 +93,15 @@ type ColorBalanceParams struct {
 
 // ==================== 调色函数 ====================
 
+// RasterColor.go - 修复版
+
 // AdjustColors 综合调色
 func (rd *RasterDataset) AdjustColors(params *ColorAdjustParams) (*RasterDataset, error) {
 	if params == nil {
 		return nil, fmt.Errorf("params cannot be nil")
+	}
+	if rd == nil {
+		return nil, fmt.Errorf("RasterDataset is nil")
 	}
 
 	activeDS := rd.GetActiveDataset()
@@ -142,6 +148,7 @@ func (rd *RasterDataset) AdjustContrast(contrast float64) (*RasterDataset, error
 	}
 
 	newDS := C.adjustContrast(activeDS, C.double(contrast))
+
 	if newDS == nil {
 		return nil, fmt.Errorf("failed to adjust contrast")
 	}
@@ -157,6 +164,7 @@ func (rd *RasterDataset) AdjustSaturation(saturation float64) (*RasterDataset, e
 	}
 
 	newDS := C.adjustSaturation(activeDS, C.double(saturation))
+
 	if newDS == nil {
 		return nil, fmt.Errorf("failed to adjust saturation")
 	}
@@ -176,6 +184,7 @@ func (rd *RasterDataset) AdjustGamma(gamma float64) (*RasterDataset, error) {
 	}
 
 	newDS := C.adjustGamma(activeDS, C.double(gamma))
+
 	if newDS == nil {
 		return nil, fmt.Errorf("failed to adjust gamma")
 	}
@@ -446,6 +455,7 @@ func (rd *RasterDataset) HistogramMatch(refDS *RasterDataset, srcRegion, refRegi
 	}
 
 	newDS := C.histogramMatch(srcActiveDS, refActiveDS, cSrcRegion, cRefRegion)
+
 	if newDS == nil {
 		return nil, fmt.Errorf("failed to histogram match")
 	}
@@ -687,17 +697,38 @@ func BatchColorBalance(datasets []*RasterDataset, refDS *RasterDataset, params *
 
 // createNewDataset 从C数据集创建新的RasterDataset
 func (rd *RasterDataset) createNewDataset(cDS C.GDALDatasetH) *RasterDataset {
+	// 获取新数据集的实际尺寸
+	newWidth := int(C.GDALGetRasterXSize(cDS))
+	newHeight := int(C.GDALGetRasterYSize(cDS))
+	newBandCount := int(C.GDALGetRasterCount(cDS))
+
+	// 获取新数据集的地理变换以计算正确的 bounds
+	var geoTransform [6]C.double
+	newBounds := rd.bounds // 默认继承
+	if C.GDALGetGeoTransform(cDS, &geoTransform[0]) == C.CE_None {
+		minX := float64(geoTransform[0])
+		maxY := float64(geoTransform[3])
+		maxX := minX + float64(newWidth)*float64(geoTransform[1])
+		minY := maxY + float64(newHeight)*float64(geoTransform[5])
+		newBounds = [4]float64{minX, minY, maxX, maxY}
+	}
+
 	newRD := &RasterDataset{
-		dataset:       cDS,
-		warpedDS:      nil,
-		width:         int(C.GDALGetRasterXSize(cDS)),
-		height:        int(C.GDALGetRasterYSize(cDS)),
-		bandCount:     int(C.GDALGetRasterCount(cDS)),
-		bounds:        rd.bounds,
+		dataset:       cDS, // MEM 数据集作为主数据集
+		warpedDS:      nil, // 调色结果不需要 warpedDS
+		filePath:      "",  // 内存数据集无文件路径
+		width:         newWidth,
+		height:        newHeight,
+		bandCount:     newBandCount,
+		bounds:        newBounds,
 		projection:    rd.projection,
 		isReprojected: false,
 		hasGeoInfo:    rd.hasGeoInfo,
 	}
+
+	// 关键：为新数据集设置 finalizer，确保 MEM 数据集最终被释放
+	runtime.SetFinalizer(newRD, (*RasterDataset).Close)
+
 	return newRD
 }
 
