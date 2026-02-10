@@ -392,9 +392,25 @@ int reprojectRasterWithAffineParamsResample(GDALDatasetH hSrcDS, int nSrcEPSG,
                                              const char* pszOutputPath, const char* pszFormat,
                                              int nResampleMethod, char* errorMsg);
 
-
 #ifdef __cplusplus
 }
 #endif
 
-#endif // OSGEO_UTILS_H
+#endif
+
+// osgeo_utils.h 中新增
+#ifndef UNION_BATCH_H
+#define UNION_BATCH_H
+
+
+// 批量Union：将多个几何体一次性合并（内部使用UnaryUnion/CascadedUnion）
+// 比逐个OGR_G_Union快10-100倍
+OGRGeometryH batchUnionGeometries(OGRGeometryH *geometries, int count);
+
+// 批量从要素中提取几何体并Union
+OGRGeometryH batchUnionFromFeatures(OGRFeatureH *features, int count);
+
+// 批量创建输出要素（减少CGo调用次数）
+int batchCreateFeatures(OGRLayerH layer, OGRFeatureH *features, int count);
+
+#endif

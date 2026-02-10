@@ -3728,3 +3728,85 @@ int defineProjectionWithWKTInPlace(GDALDatasetH hDS, const char* pszWKT, char* e
     OSRDestroySpatialReference(hSRS);
     return 1;
 }
+
+OGRGeometryH batchUnionGeometries(OGRGeometryH *geometries, int count) {
+    if (count <= 0 || geometries == NULL) return NULL;
+    if (count == 1) return OGR_G_Clone(geometries[0]);
+    // 策略：构建GeometryCollection，然后调用UnaryUnion
+    // UnaryUnion内部使用CascadedPolygonUnion（基于STRtree），复杂度O(n log n)
+    OGRGeometryH collection = OGR_G_CreateGeometry(wkbGeometryCollection);
+    if (collection == NULL) return NULL;
+    int validCount = 0;
+    for (int i = 0; i < count; i++) {
+        if (geometries[i] == NULL) continue;
+        // 检查有效性，无效的尝试修复
+        OGRGeometryH geom = geometries[i];
+        if (!OGR_G_IsValid(geom)) {
+            OGRGeometryH fixed = OGR_G_MakeValid(geom);
+            if (fixed != NULL) {
+                OGR_G_AddGeometry(collection, fixed);  // AddGeometry会cloneOGR_G_DestroyGeometry(fixed);
+            } else {
+                // 尝试Buffer(0)修复
+                OGRGeometryH buffered = OGR_G_Buffer(geom, 0.0, 30);
+                if (buffered != NULL) {
+                    OGR_G_AddGeometry(collection, buffered);
+                    OGR_G_DestroyGeometry(buffered);
+                }
+                // 都失败则跳过
+            }
+        } else {
+            OGR_G_AddGeometry(collection, geom); }
+        validCount++;
+    }
+    if (validCount == 0) {
+        OGR_G_DestroyGeometry(collection);
+        return NULL;
+    }
+    // UnaryUnion — GEOS内部使用CascadedPolygonUnion + STRtree
+    // 这是关键性能提升点：O(n log n) vs O(n²)
+    OGRGeometryH result = OGR_G_UnaryUnion(collection);
+    OGR_G_DestroyGeometry(collection);
+    return result;
+}
+
+
+
+
+OGRGeometryH batchUnionFromFeatures(OGRFeatureH *features, int count) {
+    if (count <= 0 || features == NULL) return NULL;
+    if (count == 1) {
+        OGRGeometryH geom = OGR_F_GetGeometryRef(features[0]);
+        return geom ? OGR_G_Clone(geom) : NULL;
+    }
+    // 预分配几何体指针数组
+    OGRGeometryH *geometries = (OGRGeometryH *)malloc(sizeof(OGRGeometryH) * count);
+    if (geometries == NULL) return NULL;
+    int validCount = 0;
+    for (int i = 0; i < count; i++) {
+        OGRGeometryH geom = OGR_F_GetGeometryRef(features[i]);
+        if (geom != NULL) {
+            geometries[validCount++] = geom;  // 不需要clone，batchUnionGeometries内部会clone
+        }
+    }
+    OGRGeometryH result = NULL;
+    if (validCount > 0) {
+        result = batchUnionGeometries(geometries, validCount);
+    }
+    free(geometries);
+    return result;
+}
+int batchCreateFeatures(OGRLayerH layer, OGRFeatureH *features, int count) {
+    if (layer == NULL || features == NULL || count <= 0) return 0;
+    int success = 0;
+    // 使用事务批量写入
+    OGR_L_StartTransaction(layer);
+    for (int i = 0; i < count; i++) {
+        if (features[i] != NULL) {
+            if (OGR_L_CreateFeature(layer, features[i]) == OGRERR_NONE) {
+                success++;
+            }
+        }
+    }
+    OGR_L_CommitTransaction(layer);
+    return success;
+}
