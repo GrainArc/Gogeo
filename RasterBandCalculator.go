@@ -654,14 +654,20 @@ func (rd *RasterDataset) CreateSingleBandDataset(data []float64, dataType BandDa
 // SaveAsGeoTIFF 快捷方法：导出为GeoTIFF
 // compress: 压缩方式 "LZW", "DEFLATE", "ZSTD", "NONE" 等
 func (rd *RasterDataset) SaveAsGeoTIFF(filePath string, compress string) error {
-	opts := []string{}
+	opts := map[string]string{}
 	if compress != "" && compress != "NONE" {
-		opts = append(opts, "COMPRESS="+compress)
-		opts = append(opts, "TILED=YES")
-		opts = append(opts, "BLOCKXSIZE=256")
-		opts = append(opts, "BLOCKYSIZE=256")
+		opts = map[string]string{
+			"TILED":              "YES",
+			"BLOCKXSIZE":         "512",
+			"BLOCKYSIZE":         "512",
+			"COMPRESS":           "DEFLATE",
+			"ZLEVEL":             "6", // 压缩级别 1-9，6是速度/体积平衡点
+			"NUM_THREADS":        "ALL_CPUS",
+			"BIGTIFF":            "YES", // 支持 >4GB
+			"COPY_SRC_OVERVIEWS": "YES",
+		}
 	}
-	return rd.SaveToFile(filePath, "GTiff", opts)
+	return rd.ExportToFile(filePath, "GTiff", opts)
 }
 
 // CalculateAndSave 计算表达式并直接保存为文件（一步到位）

@@ -11,7 +11,6 @@ import "C"
 import (
 	"fmt"
 	"runtime"
-	"unsafe"
 )
 
 // ResampleMethod 重采样方法
@@ -230,7 +229,7 @@ func MosaicToFile(datasets []*RasterDataset, outputPath string, format string, o
 	}
 	defer result.Close()
 
-	return result.SaveToFile(outputPath, format, nil)
+	return result.ExportToFile(outputPath, format, nil)
 }
 
 // MosaicFilesToFile 从文件镶嵌并保存
@@ -241,49 +240,7 @@ func MosaicFilesToFile(inputPaths []string, outputPath string, format string, op
 	}
 	defer result.Close()
 
-	return result.SaveToFile(outputPath, format, nil)
-}
-
-// SaveToFile 保存数据集到文件
-func (rd *RasterDataset) SaveToFile(outputPath string, format string, createOptions []string) error {
-	activeDS := rd.GetActiveDataset()
-	if activeDS == nil {
-		return fmt.Errorf("dataset is nil")
-	}
-
-	cPath := C.CString(outputPath)
-	defer C.free(unsafe.Pointer(cPath))
-
-	cFormat := C.CString(format)
-	defer C.free(unsafe.Pointer(cFormat))
-
-	driver := C.GDALGetDriverByName(cFormat)
-	if driver == nil {
-		return fmt.Errorf("driver %s not found", format)
-	}
-
-	// 准备创建选项
-	var cOptions **C.char
-	if len(createOptions) > 0 {
-		cOptArray := make([]*C.char, len(createOptions)+1)
-		for i, opt := range createOptions {
-			cOptArray[i] = C.CString(opt)
-			defer C.free(unsafe.Pointer(cOptArray[i]))
-		}
-		cOptArray[len(createOptions)] = nil
-		cOptions = &cOptArray[0]
-	}
-
-	gdalMutex.Lock()
-	outputDS := C.GDALCreateCopy(driver, cPath, activeDS, 0, cOptions, nil, nil)
-	gdalMutex.Unlock()
-
-	if outputDS == nil {
-		return fmt.Errorf("failed to create output file")
-	}
-
-	C.GDALClose(outputDS)
-	return nil
+	return result.ExportToFile(outputPath, format, nil)
 }
 
 // cloneDataset 克隆数据集

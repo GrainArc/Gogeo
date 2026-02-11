@@ -589,6 +589,18 @@ func (rd *RasterDataset) GetHeight() int {
 func (rd *RasterDataset) GetProjection() string {
 	return rd.projection
 }
+
+var defaultExportOptions = map[string]string{
+	"TILED":              "YES",
+	"BLOCKXSIZE":         "512",
+	"BLOCKYSIZE":         "512",
+	"COMPRESS":           "DEFLATE",
+	"ZLEVEL":             "6",
+	"NUM_THREADS":        "ALL_CPUS",
+	"BIGTIFF":            "YES",
+	"COPY_SRC_OVERVIEWS": "YES",
+}
+
 func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[string]string) error {
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
@@ -603,18 +615,18 @@ func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[str
 		return fmt.Errorf("unsupported format: %s", format)
 	}
 
+	if options == nil {
+		options = defaultExportOptions
+	}
+
 	// 构建选项
 	var cOptions **C.char
-	var optionPtrs []*C.char
-	if len(options) > 0 {
-		optionPtrs = make([]*C.char, 0, len(options)+1)
-		for k, v := range options {
-			optStr := C.CString(fmt.Sprintf("%s=%s", k, v))
-			optionPtrs = append(optionPtrs, optStr)
-		}
-		optionPtrs = append(optionPtrs, nil)
-		cOptions = &optionPtrs[0]
+	optionPtrs := make([]*C.char, 0, len(options)+1)
+	for k, v := range options {
+		optionPtrs = append(optionPtrs, C.CString(k+"="+v))
 	}
+	optionPtrs = append(optionPtrs, nil)
+	cOptions = &optionPtrs[0]
 
 	defer func() {
 		for _, ptr := range optionPtrs {
@@ -627,43 +639,35 @@ func (rd *RasterDataset) ExportToFile(outputPath, format string, options map[str
 	cOutputPath := C.CString(outputPath)
 	defer C.free(unsafe.Pointer(cOutputPath))
 
-	// 创建输出文件
 	outputDS := C.GDALCreateCopy(driver, cOutputPath, activeDS, C.int(0), cOptions, nil, nil)
 	if outputDS == nil {
 		return fmt.Errorf("failed to create output: %s", C.GoString(C.CPLGetLastErrorMsg()))
 	}
+	defer C.GDALClose(outputDS)
 
-	// 关键：同步元数据修改到输出数据集
+	// 同步波段元数据
 	bandCount := int(C.GDALGetRasterCount(activeDS))
 	for i := 1; i <= bandCount; i++ {
 		srcBand := C.GDALGetRasterBand(activeDS, C.int(i))
 		dstBand := C.GDALGetRasterBand(outputDS, C.int(i))
-
 		if srcBand == nil || dstBand == nil {
 			continue
 		}
 
-		// 同步颜色解释
-		colorInterp := C.GDALGetRasterColorInterpretation(srcBand)
-		C.GDALSetRasterColorInterpretation(dstBand, colorInterp)
+		C.GDALSetRasterColorInterpretation(dstBand, C.GDALGetRasterColorInterpretation(srcBand))
 
-		// 同步 NoData
 		var hasNoData C.int
 		noData := C.GDALGetRasterNoDataValue(srcBand, &hasNoData)
 		if hasNoData != 0 {
 			C.GDALSetRasterNoDataValue(dstBand, noData)
 		}
 
-		// 同步调色板
-		colorTable := C.GDALGetRasterColorTable(srcBand)
-		if colorTable != nil {
+		if colorTable := C.GDALGetRasterColorTable(srcBand); colorTable != nil {
 			C.GDALSetRasterColorTable(dstBand, colorTable)
 		}
 	}
 
 	C.GDALFlushCache(outputDS)
-	C.GDALClose(outputDS)
-
 	return nil
 }
 
@@ -998,4 +1002,111 @@ func ValidateProjectionWKT(wkt string) bool {
 
 	result := C.validateProjectionWKT(cWKT)
 	return result != 0
+}
+
+// ResampleOverview 金字塔重采样方法
+type ResampleOverview string
+
+const (
+	OverviewNearest  ResampleOverview = "NEAREST"
+	OverviewBilinear ResampleOverview = "BILINEAR"
+	OverviewCubic    ResampleOverview = "CUBIC"
+	OverviewAverage  ResampleOverview = "AVERAGE"
+	OverviewGauss    ResampleOverview = "GAUSS"
+	OverviewLanczos  ResampleOverview = "LANCZOS"
+	OverviewMode     ResampleOverview = "MODE"
+)
+
+// BuildOverviews 构建金字塔（自定义层级）
+// levels: 缩放因子数组，如 []int{2, 4, 8, 16, 32}
+// resampling: 重采样方法
+func (rd *RasterDataset) BuildOverviews(levels []int, resampling ResampleOverview) error {
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	if len(levels) == 0 {
+		return fmt.Errorf("levels is empty")
+	}
+
+	cResampling := C.CString(string(resampling))
+	defer C.free(unsafe.Pointer(cResampling))
+
+	cLevels := make([]C.int, len(levels))
+	for i, l := range levels {
+		cLevels[i] = C.int(l)
+	}
+
+	var errorMsg [256]C.char
+	result := C.buildOverviews(
+		rd.dataset,
+		cResampling,
+		C.int(len(levels)),
+		(*C.int)(&cLevels[0]),
+		&errorMsg[0],
+	)
+
+	if result == 0 {
+		return fmt.Errorf("build overviews failed: %s", C.GoString(&errorMsg[0]))
+	}
+
+	return nil
+}
+
+// BuildOverviewsAuto 自动构建金字塔（自动计算合适的层级）
+// resampling: 重采样方法，传空则默认 NEAREST
+func (rd *RasterDataset) BuildOverviewsAuto(resampling ResampleOverview) error {
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	cResampling := C.CString(string(resampling))
+	defer C.free(unsafe.Pointer(cResampling))
+
+	var errorMsg [256]C.char
+	result := C.buildOverviewsDefault(rd.dataset, cResampling, &errorMsg[0])
+
+	if result == 0 {
+		return fmt.Errorf("build overviews failed: %s", C.GoString(&errorMsg[0]))
+	}
+
+	return nil
+}
+
+// RemoveOverviews 删除金字塔
+func (rd *RasterDataset) RemoveOverviews() error {
+	if rd.dataset == nil {
+		return fmt.Errorf("dataset is nil")
+	}
+
+	var errorMsg [256]C.char
+	result := C.removeOverviews(rd.dataset, &errorMsg[0])
+
+	if result == 0 {
+		return fmt.Errorf("remove overviews failed: %s", C.GoString(&errorMsg[0]))
+	}
+
+	return nil
+}
+
+// HasOverviews 检查是否已有金字塔
+func (rd *RasterDataset) HasOverviews() bool {
+	if rd.dataset == nil {
+		return false
+	}
+	return C.hasOverviews(rd.dataset) != 0
+}
+
+// GetOverviewCount 获取金字塔层级数
+func (rd *RasterDataset) GetOverviewCount() int {
+	if rd.dataset == nil {
+		return 0
+	}
+
+	band := C.GDALGetRasterBand(rd.dataset, 1)
+	if band == nil {
+		return 0
+	}
+
+	return int(C.GDALGetOverviewCount(band))
 }

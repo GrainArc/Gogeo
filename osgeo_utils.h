@@ -391,6 +391,11 @@ int reprojectRasterWithAffineParamsResample(GDALDatasetH hSrcDS, int nSrcEPSG,
                                              double* dParams, int nParamCount,
                                              const char* pszOutputPath, const char* pszFormat,
                                              int nResampleMethod, char* errorMsg);
+int buildOverviews(GDALDatasetH dataset, const char* resampling, int nLevels, int* levels, char* errorMsg);
+int buildOverviewsDefault(GDALDatasetH dataset, const char* resampling,
+                          char* errorMsg);
+int removeOverviews(GDALDatasetH dataset, char* errorMsg);
+int hasOverviews(GDALDatasetH dataset);
 
 #ifdef __cplusplus
 }

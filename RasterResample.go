@@ -324,7 +324,7 @@ func (rd *RasterDataset) ResampleToFile(outputPath string, format string, option
 	}
 	defer result.Close()
 
-	return result.SaveToFile(outputPath, format, nil)
+	return result.ExportToFile(outputPath, format, nil)
 }
 
 // GetResampleInfo 获取重采样预览信息（不执行实际重采样）

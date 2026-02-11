@@ -3810,3 +3810,80 @@ int batchCreateFeatures(OGRLayerH layer, OGRFeatureH *features, int count) {
     OGR_L_CommitTransaction(layer);
     return success;
 }
+
+int buildOverviews(GDALDatasetH dataset, const char* resampling,
+                   int nLevels, int* levels, char* errorMsg) {
+    if (dataset == NULL) {
+        snprintf(errorMsg, 256, "dataset is NULL");
+        return 0;
+    }
+    const char* resample = (resampling != NULL && strlen(resampling) > 0)
+                           ? resampling : "NEAREST";
+    // 设置压缩选项（对外部.ovr文件生效）
+    CPLSetConfigOption("COMPRESS_OVERVIEW", "DEFLATE");
+    CPLSetConfigOption("GDAL_NUM_THREADS", "ALL_CPUS");
+    CPLSetConfigOption("BIGTIFF_OVERVIEW", "IF_SAFER");
+    CPLErr err = GDALBuildOverviews(dataset, resample, nLevels, levels,
+                                     0, NULL, GDALDummyProgress, NULL);
+    if (err != CE_None) {
+        snprintf(errorMsg, 256, "GDALBuildOverviews failed: %s",
+                 CPLGetLastErrorMsg());
+        return 0;
+    }
+    GDALFlushCache(dataset);
+    return 1;
+}
+// 构建金字塔（自动计算层级，直到最小边 <= 256）
+int buildOverviewsDefault(GDALDatasetH dataset, const char* resampling,
+                          char* errorMsg) {
+    if (dataset == NULL) {
+        snprintf(errorMsg, 256, "dataset is NULL");
+        return 0;
+    }
+    int width = GDALGetRasterXSize(dataset);
+    int height = GDALGetRasterYSize(dataset);
+    int minDim = width < height ? width : height;
+    // 计算层级：2, 4, 8, 16, ... 直到缩小后最小边 <= 256
+    int levels[32];
+    int nLevels = 0;
+    int factor = 2;
+    while (minDim / factor > 256 && nLevels < 32) {
+        levels[nLevels++] = factor;
+        factor *= 2;
+    }
+    // 最后一级
+    if (nLevels < 32) {
+        levels[nLevels++] = factor;
+    }
+    if (nLevels == 0) {
+        // 影像太小，不需要金字塔
+        snprintf(errorMsg, 256, "image too small for overviews (%dx%d)", width, height);
+        return 1; // 不算错误
+    }
+    return buildOverviews(dataset, resampling, nLevels, levels, errorMsg);
+}
+// 删除金字塔
+int removeOverviews(GDALDatasetH dataset, char* errorMsg) {
+    if (dataset == NULL) {
+        snprintf(errorMsg, 256, "dataset is NULL");
+        return 0;
+    }
+    // 传入0个层级 = 清除所有overview
+    int noLevels = 0;
+    CPLErr err = GDALBuildOverviews(dataset, "NONE", 0, NULL,
+                                     0, NULL, NULL, NULL);
+    if (err != CE_None) {
+        snprintf(errorMsg, 256, "remove overviews failed: %s",
+                 CPLGetLastErrorMsg());
+        return 0;
+    }
+    GDALFlushCache(dataset);
+    return 1;
+}
+// 检查是否已有金字塔
+int hasOverviews(GDALDatasetH dataset) {
+    if (dataset == NULL) return 0;
+    GDALRasterBandH band = GDALGetRasterBand(dataset, 1);
+    if (band == NULL) return 0;
+    return GDALGetOverviewCount(band) > 0 ? 1 : 0;
+}
