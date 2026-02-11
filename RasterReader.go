@@ -1021,6 +1021,7 @@ const (
 // levels: 缩放因子数组，如 []int{2, 4, 8, 16, 32}
 // resampling: 重采样方法
 func (rd *RasterDataset) BuildOverviews(levels []int, resampling ResampleOverview) error {
+
 	if rd.dataset == nil {
 		return fmt.Errorf("dataset is nil")
 	}
