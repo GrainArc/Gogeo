@@ -241,9 +241,18 @@ func (rd *RasterDataset) GetBandCount() int {
 }
 
 // ==================== 波段操作 ====================
+// prepareDataset 根据 persist 决定是否创建内存副本
+func (rd *RasterDataset) prepareDataset(persist bool) error {
+	if !persist {
+		return rd.ensureMemoryCopy()
+	}
+	return nil
+}
+func (rd *RasterDataset) AddBand(dataType BandDataType, colorInterp ColorInterpretation, noDataValue float64, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
+		return err
+	}
 
-// AddBand 添加新波段
-func (rd *RasterDataset) AddBand(dataType BandDataType, colorInterp ColorInterpretation, noDataValue float64) error {
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
@@ -255,15 +264,16 @@ func (rd *RasterDataset) AddBand(dataType BandDataType, colorInterp ColorInterpr
 		return fmt.Errorf("failed to add band")
 	}
 
-	// 更新数据集引用
 	rd.replaceDataset(newDS)
 	rd.bandCount++
-
 	return nil
 }
 
-// RemoveBand 删除指定波段
-func (rd *RasterDataset) RemoveBand(bandIndex int) error {
+func (rd *RasterDataset) RemoveBand(bandIndex int, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
+		return err
+	}
+
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
@@ -284,16 +294,11 @@ func (rd *RasterDataset) RemoveBand(bandIndex int) error {
 
 	rd.replaceDataset(newDS)
 	rd.bandCount--
-
 	return nil
 }
 
-// SetBandColorInterpretation 设置波段颜色解释
-// RasterBand.go
-
-// SetBandColorInterpretation 设置波段颜色解释
-func (rd *RasterDataset) SetBandColorInterpretation(bandIndex int, colorInterp ColorInterpretation) error {
-	if err := rd.ensureMemoryCopy(); err != nil {
+func (rd *RasterDataset) SetBandColorInterpretation(bandIndex int, colorInterp ColorInterpretation, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
 		return err
 	}
 
@@ -301,6 +306,7 @@ func (rd *RasterDataset) SetBandColorInterpretation(bandIndex int, colorInterp C
 	if bandIndex < 1 || bandIndex > rd.bandCount {
 		return fmt.Errorf("invalid band index: %d", bandIndex)
 	}
+
 	band := C.GDALGetRasterBand(activeDS, C.int(bandIndex))
 	if band == nil {
 		return fmt.Errorf("failed to get band %d", bandIndex)
@@ -310,9 +316,8 @@ func (rd *RasterDataset) SetBandColorInterpretation(bandIndex int, colorInterp C
 	return nil
 }
 
-// SetBandNoDataValue 设置波段NoData值
-func (rd *RasterDataset) SetBandNoDataValue(bandIndex int, noDataValue float64) error {
-	if err := rd.ensureMemoryCopy(); err != nil {
+func (rd *RasterDataset) SetBandNoDataValue(bandIndex int, noDataValue float64, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
 		return err
 	}
 
@@ -324,9 +329,8 @@ func (rd *RasterDataset) SetBandNoDataValue(bandIndex int, noDataValue float64) 
 	return nil
 }
 
-// DeleteBandNoDataValue 删除波段NoData值
-func (rd *RasterDataset) DeleteBandNoDataValue(bandIndex int) error {
-	if err := rd.ensureMemoryCopy(); err != nil {
+func (rd *RasterDataset) DeleteBandNoDataValue(bandIndex int, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
 		return err
 	}
 
@@ -338,8 +342,11 @@ func (rd *RasterDataset) DeleteBandNoDataValue(bandIndex int) error {
 	return nil
 }
 
-// ReorderBands 重排波段顺序
-func (rd *RasterDataset) ReorderBands(bandOrder []int) error {
+func (rd *RasterDataset) ReorderBands(bandOrder []int, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
+		return err
+	}
+
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
@@ -349,7 +356,6 @@ func (rd *RasterDataset) ReorderBands(bandOrder []int) error {
 		return fmt.Errorf("band order cannot be empty")
 	}
 
-	// 转换为C数组
 	cBandOrder := make([]C.int, len(bandOrder))
 	for i, v := range bandOrder {
 		cBandOrder[i] = C.int(v)
@@ -362,12 +368,14 @@ func (rd *RasterDataset) ReorderBands(bandOrder []int) error {
 
 	rd.replaceDataset(newDS)
 	rd.bandCount = len(bandOrder)
-
 	return nil
 }
 
-// ConvertBandDataType 转换波段数据类型
-func (rd *RasterDataset) ConvertBandDataType(bandIndex int, newType BandDataType) error {
+func (rd *RasterDataset) ConvertBandDataType(bandIndex int, newType BandDataType, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
+		return err
+	}
+
 	activeDS := rd.GetActiveDataset()
 	if activeDS == nil {
 		return fmt.Errorf("dataset is nil")
@@ -379,12 +387,14 @@ func (rd *RasterDataset) ConvertBandDataType(bandIndex int, newType BandDataType
 	}
 
 	rd.replaceDataset(newDS)
-
 	return nil
 }
 
-// CopyBandData 复制波段数据到另一个数据集
-func (rd *RasterDataset) CopyBandData(srcBandIndex int, dstDataset *RasterDataset, dstBandIndex int) error {
+func (rd *RasterDataset) CopyBandData(srcBandIndex int, dstDataset *RasterDataset, dstBandIndex int, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
+		return err
+	}
+
 	srcDS := rd.GetActiveDataset()
 	dstDS := dstDataset.GetActiveDataset()
 
@@ -396,7 +406,6 @@ func (rd *RasterDataset) CopyBandData(srcBandIndex int, dstDataset *RasterDatase
 	if result == 0 {
 		return fmt.Errorf("failed to copy band data")
 	}
-
 	return nil
 }
 
@@ -615,28 +624,27 @@ type BandOperation struct {
 }
 
 // ApplyBandOperations 批量应用波段操作
-func (rd *RasterDataset) ApplyBandOperations(operations []BandOperation) error {
+func (rd *RasterDataset) ApplyBandOperations(operations []BandOperation, persist bool) error {
+
 	for i, op := range operations {
 		var err error
 		switch op.Type {
 		case "add":
-			err = rd.AddBand(op.DataType, op.ColorInterp, op.NoDataValue)
+			err = rd.AddBand(op.DataType, op.ColorInterp, op.NoDataValue, persist)
 		case "remove":
-			err = rd.RemoveBand(op.BandIndex)
+			err = rd.RemoveBand(op.BandIndex, persist)
 		case "modify":
-			err = rd.SetBandColorInterpretation(op.BandIndex, op.ColorInterp)
+			err = rd.SetBandColorInterpretation(op.BandIndex, op.ColorInterp, persist)
 			if err == nil && op.NoDataValue != 0 {
-				err = rd.SetBandNoDataValue(op.BandIndex, op.NoDataValue)
+				err = rd.SetBandNoDataValue(op.BandIndex, op.NoDataValue, persist)
 			}
 		default:
 			err = fmt.Errorf("unknown operation type: %s", op.Type)
 		}
-
 		if err != nil {
 			return fmt.Errorf("operation %d failed: %w", i, err)
 		}
 	}
-
 	return nil
 }
 
