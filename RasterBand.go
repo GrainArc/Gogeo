@@ -482,11 +482,10 @@ func (ct *ColorTable) Destroy() {
 }
 
 // SetBandColorTable 设置波段调色板
-func (rd *RasterDataset) SetBandColorTable(bandIndex int, colorTable *ColorTable) error {
-	if err := rd.ensureMemoryCopy(); err != nil {
+func (rd *RasterDataset) SetBandColorTable(bandIndex int, colorTable *ColorTable, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
 		return err
 	}
-
 	activeDS := rd.GetActiveDataset()
 	if colorTable == nil || colorTable.handle == nil {
 		return fmt.Errorf("color table is nil")
@@ -499,11 +498,10 @@ func (rd *RasterDataset) SetBandColorTable(bandIndex int, colorTable *ColorTable
 }
 
 // DeleteBandColorTable 删除波段调色板
-func (rd *RasterDataset) DeleteBandColorTable(bandIndex int) error {
-	if err := rd.ensureMemoryCopy(); err != nil {
+func (rd *RasterDataset) DeleteBandColorTable(bandIndex int, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
 		return err
 	}
-
 	activeDS := rd.GetActiveDataset()
 	result := C.deleteBandColorTable(activeDS, C.int(bandIndex))
 	if result == 0 {
@@ -513,11 +511,10 @@ func (rd *RasterDataset) DeleteBandColorTable(bandIndex int) error {
 }
 
 // ModifyPaletteEntry 修改调色板条目
-func (rd *RasterDataset) ModifyPaletteEntry(bandIndex, entryIndex int, r, g, b, a int16) error {
-	if err := rd.ensureMemoryCopy(); err != nil {
+func (rd *RasterDataset) ModifyPaletteEntry(bandIndex, entryIndex int, r, g, b, a int16, persist bool) error {
+	if err := rd.prepareDataset(persist); err != nil {
 		return err
 	}
-
 	activeDS := rd.GetActiveDataset()
 	result := C.modifyPaletteEntry(activeDS, C.int(bandIndex), C.int(entryIndex),
 		C.short(r), C.short(g), C.short(b), C.short(a))
