@@ -194,7 +194,7 @@ func BufferLayerAuto(sourceLayer *GDALLayer, targetRatio float64, quadSegs int) 
 			area := float64(C.OGR_G_Area(exteriorGeom))
 
 			// 计算周长(对于多边形使用边界长度)
-			boundary := C.OGR_G_GetBoundary(exteriorGeom)
+			boundary := C.OGR_G_Boundary(exteriorGeom)
 			perimeter := 0.0
 			if boundary != nil {
 				perimeter = float64(C.OGR_G_Length(boundary))
@@ -3015,7 +3015,7 @@ func RemoveLinePolygonBoundaryOverlapGeometryAndReturnLongest(lineGeom C.OGRGeom
 	}
 
 	// 获取面的边界
-	polygonBoundary := C.OGR_G_GetBoundary(processedPolygonGeom)
+	polygonBoundary := C.OGR_G_Boundary(processedPolygonGeom)
 	if polygonBoundary == nil {
 		// 清理已分配的精度设置几何体
 		if lineNeedsCleanup {
